@@ -8,24 +8,27 @@ This PowerShell script automates the whole process. A clean install or in-place 
 > [!TIP]
 > **No PowerShell knowledge is required — just double-click `Run-Windows-ISO-Updater.bat`.** Everything is designed to run safely with its defaults: the batch file handles the UAC prompt and the execution policy for you (without changing any system-wide setting), the script explains what it is about to do and waits for your confirmation, and **nothing on the machine you run it from is modified** — the build happens entirely against files in a working folder. Every file it fetches (the ISO, the updates, `oscdimg.exe`, and the Fido helper) is verified to come from an official Microsoft or GitHub source before it is used — see [Important Notes](#important-notes).
 
-## Table of Contents
+## Quick Start
 
-- [Important Notes](#important-notes)
-- [Requirements](#requirements)
-- [How to Run This Script](#how-to-run-this-script)
-  - [Recommended Method: Using the Batch File](#recommended-method-using-the-batch-file)
-  - [Running with Parameters (from Command Line)](#running-with-parameters-from-command-line)
-- [Command-Line Parameters](#command-line-parameters)
-- [Unattended Installs](#unattended-installs)
-- [What the Script Does](#what-the-script-does)
-- [How Files Are Downloaded](#how-files-are-downloaded)
-- [Design Notes](#design-notes)
-  - [How the Already-Patched Check Works](#how-the-already-patched-check-works)
-  - [Why Both boot.wim Indexes Are Serviced](#why-both-bootwim-indexes-are-serviced)
-  - [What Windows Update Will Still Offer](#what-windows-update-will-still-offer)
-- [Disk Space Requirements](#disk-space-requirements)
-- [Where Files Are Written](#where-files-are-written)
-- [Logging](#logging)
+1.  Put `Run-Windows-ISO-Updater.bat` and `Windows-ISO-Updater.ps1` in the same folder. (If the `.ps1` is missing, the batch file downloads it.)
+2.  Double-click the batch file and accept the UAC prompt.
+3.  Read the summary it prints and confirm.
+
+Everything else is optional. For a specific edition, your own ISO, or a run with no prompts:
+
+```shell
+.\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Win11.iso" -Edition "Windows 11 Pro" -Unattended
+```
+
+## Documentation
+
+| Page | Contents |
+|---|---|
+| [Usage](docs/usage.md) | Running the script, command-line examples, and slimming the ISO by removing editions. |
+| [Command-Line Parameters](docs/parameters.md) | Every parameter and what it does. |
+| [Unattended Installs](docs/unattended-installs.md) | `-UnattendPath`, plus two worked answer files: a no-OOBE lab machine and a sysprep gold image. |
+| [Design Notes](docs/design-notes.md) | Why the already-patched check works the way it does, why both `boot.wim` indexes are serviced, and what Windows Update still offers afterwards. |
+| [Reference](docs/reference.md) | Step by step of a run, how files are downloaded, disk space, output locations, and logging. |
 
 ## Important Notes
 
@@ -41,7 +44,8 @@ This PowerShell script automates the whole process. A clean install or in-place 
 > [!TIP]
 > **You don't have to pass `-IsoPath` at all — you can just drop your ISO in the download folder.** If `-IsoPath` is not given, the script looks in the download folder (`<SystemDrive>\WISO-Work\Downloads` by default, or wherever `-DownloadPath` points) and reuses the **largest `.iso` file over 3 GB** it finds there instead of downloading one. This is the easiest route when double-clicking the batch file: create the folder, drop the ISO in, and run. It is also why a previously downloaded ISO is never re-downloaded.
 
-- The Microsoft Update Catalog has **no public API**, so the script parses its search pages to find the latest cumulative update. If Microsoft changes the catalog layout the lookup may need adjustment; you can always supply your own `.msu`/`.cab` packages with `-UpdatePath`.- Recompiling the ISO requires **`oscdimg.exe`**, part of the **Windows ADK "Deployment Tools"** feature. If it is not already installed, the script downloads a **standalone `oscdimg.exe` (~140 KB) straight from Microsoft's public symbol server** ([how this works](https://pete.akeo.ie/2025/06/downloading-oscdimgexe-from-microsoft.html)) and caches it under `<WorkPath>\Tools`, so the multi-hundred-MB ADK is not needed. The download is verified against a pinned SHA-256. Use `-SkipOscdimgDownload` to disable this, and `-InstallAdk` to fall back to installing the ADK Deployment Tools instead.
+- The Microsoft Update Catalog has **no public API**, so the script parses its search pages to find the latest cumulative update. If Microsoft changes the catalog layout the lookup may need adjustment; you can always supply your own `.msu`/`.cab` packages with `-UpdatePath`.
+- Recompiling the ISO requires **`oscdimg.exe`**, part of the **Windows ADK "Deployment Tools"** feature. If it is not already installed, the script downloads a **standalone `oscdimg.exe` (~140 KB) straight from Microsoft's public symbol server** ([how this works](https://pete.akeo.ie/2025/06/downloading-oscdimgexe-from-microsoft.html)) and caches it under `<WorkPath>\Tools`, so the multi-hundred-MB ADK is not needed. The download is verified against a pinned SHA-256. Use `-SkipOscdimgDownload` to disable this, and `-InstallAdk` to fall back to installing the ADK Deployment Tools instead.
 - Every download URL (ISO, updates, oscdimg, ADK) is validated to point at an **official Microsoft host over HTTPS** before anything is downloaded.
 - The **Fido helper is downloaded and executed**, so it is validated first: the URL must point at the official `github.com/pbatard/Fido` repository over HTTPS, and the downloaded script must be a plausible size, parse as PowerShell, carry Fido's header and `-GetUrl` parameter, and contain no code-execution, persistence or security-tampering commands (Fido is not code-signed, so there is no signature to verify). It is then run **in a separate PowerShell process** so it cannot touch this script's session. Its SHA-256 is logged on every run, and you can pin a version you have reviewed yourself with `-FidoSha256`.
 
@@ -53,243 +57,4 @@ This PowerShell script automates the whole process. A clean install or in-place 
 - **PowerShell 5.0+** and **Windows 10 / Server 2016** or newer, run **as Administrator**.
 - An internet connection (unless you supply both the ISO with `-IsoPath` and updates with `-UpdatePath`).
 - **`oscdimg.exe`** — downloaded automatically from Microsoft if it is not already present (or installed with the ADK via `-InstallAdk`).
-- Plenty of free disk space on a **local** working drive — see [Disk Space Requirements](#disk-space-requirements).
-
-## How to Run This Script
-
-The easiest and recommended way to run this script is by using the `Run-Windows-ISO-Updater.bat` file. It automatically handles administrator elevation and PowerShell execution policies, and will download the latest `Windows-ISO-Updater.ps1` from GitHub if it is missing.
-
-**As long as you use the batch file, no setup or PowerShell experience is needed.** It requests administrator rights through the normal UAC prompt, downloads the script over HTTPS from the official [Windows-ISO-Updater](https://github.com/brycefors/Windows-ISO-Updater) repository if it is not already next to it, and runs it with `-ExecutionPolicy Bypass` scoped to that single run — your system-wide execution policy is never changed. Running the `.ps1` by hand works too, but then elevation and execution policy are on you.
-
-### Recommended Method: Using the Batch File
-
-1.  **Download Files:** Make sure both `Run-Windows-ISO-Updater.bat` and `Windows-ISO-Updater.ps1` are saved in the **same folder**. (If the `.ps1` is missing, the batch file will download it automatically.)
-2.  **Run the Batch File:** Double-click the `Run-Windows-ISO-Updater.bat` file.
-3.  **Administrator Prompt:** A User Account Control (UAC) window will appear asking for administrative privileges. Click **Yes**.
-4.  **Follow Prompts:** The script opens in a new window, summarizes what it will do, and asks for confirmation before downloading and building.
-
-### Running with Parameters (from Command Line)
-
-To use command-line parameters, run the batch file from a Command Prompt or PowerShell terminal.
-
-1.  Open Command Prompt or PowerShell.
-2.  Navigate to the directory where you saved the files (e.g., `cd C:\Users\YourUser\Downloads`).
-3.  Run the batch file with your desired parameters. For example:
-    ```shell
-    .\Run-Windows-ISO-Updater.bat -Unattended -InstallAdk -Edition "Windows 11 Pro"
-    ```
-
-### Removing Editions (Slimming the ISO)
-
-A Windows ISO's `install.wim` usually contains many editions (Home, Home N, Pro, Education, etc.). **By default the script keeps only the highest edition present** (e.g. Enterprise over Pro, or Pro over Home) and removes the rest — this speeds up servicing and produces a smaller ISO. Use `-KeepAllEditions` to keep every edition, or `-KeepEditions` to choose exactly which ones to keep.
-
-```shell
-:: See what editions are inside the ISO first (downloads/uses the ISO, then just lists and exits)
-.\Run-Windows-ISO-Updater.bat -ListEditions
-
-:: Keep EVERY edition instead of just the highest one
-.\Run-Windows-ISO-Updater.bat -KeepAllEditions
-
-:: Build an updated ISO containing ONLY Windows 11 Pro and Home (by name)
-.\Run-Windows-ISO-Updater.bat -KeepEditions "Windows 11 Pro","Windows 11 Home"
-
-:: Same idea, selecting by index number instead of name
-.\Run-Windows-ISO-Updater.bat -KeepEditions 6,1
-```
-
-`-KeepEditions` accepts edition names (partial matches allowed) or index numbers, and overrides the highest-edition default. Only the kept editions are serviced and re-exported, so the removed editions are gone from the final `install.wim`. It works with `-SkipUpdates` too, if you only want to trim editions without integrating updates.
-
-## Command-Line Parameters
-
-The script supports the following optional parameters:
-
-| Parameter | Description |
-|---|---|
-| `-Unattended` | Runs the script without any confirmation prompts. |
-| `-IsoPath` | Path to an existing Windows ISO to update instead of downloading one from Microsoft. Omit it and the script reuses the largest `.iso` over 3 GB found in the download folder. |
-| `-WindowsVersion` | Windows version to download/update: `10` or `11`. Defaults to `11`. |
-| `-Release` | Fido release to request (e.g. `24H2`, `23H2`) or `Latest`. Defaults to `Latest`. |
-| `-Language` | ISO language as named by Microsoft/Fido (e.g. `English`, `"English International"`). Defaults to `English`. |
-| `-Edition` | Which edition inside `install.wim` to service: `All` (default) or an edition name like `"Windows 11 Pro"`. |
-| `-KeepEditions` | Editions to **keep** in the final ISO, removing the rest to slim it down. Accepts edition names (partial matches allowed) or index numbers, comma-separated. Overrides the default of keeping only the highest edition. |
-| `-KeepAllEditions` | Keep **every** edition in the final ISO. By default only the highest edition present (e.g. Enterprise over Pro, or Pro over Home) is kept. |
-| `-ListEditions` | List the editions/indexes inside the ISO's `install.wim` and exit, without downloading updates or building anything. Useful for choosing `-Edition`/`-KeepEditions` values. |
-| `-UpdatePath` | Folder containing your own `.msu`/`.cab` update packages to integrate instead of fetching from the Microsoft Update Catalog. |
-| `-SkipDotNet` | Skip the **.NET cumulative update**. The .NET update is downloaded and integrated **by default**; use this switch to leave it out. |
-| `-SkipSetupDU` | Skip the **Setup Dynamic Update**, which refreshes the loose Windows Setup files in the media's `sources` folder. It is applied **by default**; without it the Windows 11 24H2+ Setup engine can fail with *"Windows 11 installation has failed"*. |
-| `-ServiceWinRE` | Also service the recovery image (`winre.wim`). Off by default; the Safe OS Dynamic Update is used when available. |
-| `-SkipUpdates` | Skip update integration entirely and just extract and recompile the ISO. |
-| `-CompressEsd` | Export the finished image as `install.esd` (LZMS "recovery" compression) instead of `install.wim`. Typically **25-40% smaller**, which can bring the image under the 4 GB FAT32 limit for UEFI USB sticks — but the export is slow and the finished media cannot be serviced again without converting it back. |
-| `-UnattendPath` | Path to an unattended answer file to place on the finished ISO as `\autounattend.xml`, so Windows Setup runs without prompting. |
-| `-DownloadPath` | Directory to download the ISO/updates into. Defaults to the script folder. |
-| `-WorkPath` | Working folder used to extract and service the media. Defaults to `<SystemDrive>\WISO-Work`. |
-| `-OutputIsoPath` | Full path for the recompiled ISO. Defaults to the `Output\` folder under the working folder, named after the contents and the patched build, e.g. `Win11_Pro_x64_26100.4061_20260815-1332.iso`. |
-| `-OscdimgPath` | Full path to `oscdimg.exe` if the Windows ADK is installed in a non-standard location. |
-| `-SkipOscdimgDownload` | Do not download a standalone `oscdimg.exe` from Microsoft's symbol server; require the Windows ADK instead. |
-| `-InstallAdk` | If `oscdimg.exe` is not found and cannot be downloaded, download and silently install the ADK Deployment Tools from Microsoft. |
-| `-FidoUrl` | Override the URL used to fetch the Fido download helper. Must still point at the official `github.com/pbatard/Fido` repository. |
-| `-FidoSha256` | Pin the expected SHA-256 of `Fido.ps1` so only that reviewed version is ever run. |
-| `-FidoRetryCount` | Extra attempts to make when Fido cannot resolve a download link (Microsoft's anti-bot check is often transient). Defaults to `2`; `0` disables retrying. |
-| `-UseMct` | Skip Fido and get the ISO with Microsoft's Media Creation Tool instead. MCT has no headless mode, so you click through its last few pages and save the ISO into the download folder. |
-| `-MctUrl` | Override the URL used to download the Media Creation Tool. Must still be an official Microsoft URL. |
-| `-MctEdition` | Edition passed to MCT's `/MediaEdition` switch (e.g. `Professional`, `Enterprise`). Only used with `-MctPreselect`, and it makes MCT demand a product key. |
-| `-MctPreselect` | Launch MCT with the architecture/language/edition switches pre-filled. Off by default: driving MCT that way sends it down the "enter your product key" flow. |
-| `-MctLangCode` | Locale code passed to MCT's `/MediaLangCode` switch (e.g. `en-US`). Derived from `-Language` when not set. |
-| `-AdkSetupUrl` | Override the URL used to download the Windows ADK setup bootstrapper. |
-| `-OscdimgUrl` | Override the Microsoft symbol server URL used to download the standalone `oscdimg.exe`. |
-| `-OscdimgSha256` | Expected SHA-256 of the downloaded `oscdimg.exe`. Pass an empty string to skip the hash check when overriding `-OscdimgUrl`. |
-| `-LogPath` | Directory to write log files to. Defaults to a `Logs` folder inside the working folder. |
-| `-SkipInteractive` | Skips the interactive confirmation prompt (still shows output). |
-
-## Unattended Installs
-
-Pass an answer file with `-UnattendPath` and it is copied to the root of the finished ISO as `autounattend.xml`:
-
-```shell
-.\Run-Windows-ISO-Updater.bat -UnattendPath "C:\Answer\autounattend.xml"
-```
-
-Windows Setup implicitly reads `\autounattend.xml` from the root of read-only boot media during the `windowsPE` pass, so nothing else is needed — boot the ISO and Setup runs without prompting. Generate the file with [Windows System Image Manager](https://learn.microsoft.com/en-us/windows-hardware/customize/desktop/wsim/windows-system-image-manager-technical-reference) (part of the ADK) or a generator such as [schneegans.de/windows/unattend-generator](https://schneegans.de/windows/unattend-generator/).
-
-The script validates that the file exists and is well-formed XML before starting the build, and warns if the root element is not `<unattend>`.
-
-### Example: lab machine with no OOBE
-
-[`Examples/autounattend-lab-admin.xml`](Examples/autounattend-lab-admin.xml) skips OOBE entirely, signs in automatically as the built-in Administrator (password `Password123`), enables Remote Desktop, and sets `PreventDeviceEncryption` **only when the install detects it is running in a virtual machine** — encrypted guests defeat block-level deduplication on the SAN, and it also stops Windows 11 24H2 silently turning on BitLocker there. On physical machines it **removes** that value rather than merely leaving it unset, so hardware deployed from a gold image that baked it in still encrypts normally. On VMware guests it also installs VMware Tools at first logon, using a Tools ISO mounted by the hypervisor if one is present and downloading from `packages.vmware.com` otherwise.
-
-The file was produced with [schneegans.de/windows/unattend-generator](https://schneegans.de/windows/unattend-generator/) and then **hand edited**; a comment at the top of the file records exactly what was changed and why. The generator URL preserved alongside it reproduces the original options only — regenerating from it discards the manual changes.
-
-```shell
-.\Run-Windows-ISO-Updater.bat -UnattendPath ".\Examples\autounattend-lab-admin.xml"
-```
-
-> [!CAUTION]
-> That example produces a deliberately insecure machine: a well-known Administrator password stored in plain text in the answer file and on the finished ISO, an automatic first sign-in as Administrator, Remote Desktop reachable on all firewall profiles, and a first boot that downloads and silently runs an installer from the internet. It is for throwaway VMs on a trusted network only — change the password in both places in the file, and never reuse it anywhere that matters.
-
-> [!WARNING]
-> **This example partitions and formats disk 0 without asking which disk to use.** A generated WinPE script first asserts that disk 0 exists and is between 100 and 4000 GiB, aborting if not. If disk 0 is **empty it proceeds with no prompt at all** — clean, partition, apply image index 1, reboot. If disk 0 **already holds partitions** it stops and asks: you must type `WIPE` to erase it, and any other answer aborts without touching the disk.
->
-> Because it applies **index 1**, it pairs with the default edition handling, which leaves a single edition at index 1. If you build with `-KeepAllEditions`, index 1 is whichever edition came first in the original ISO — usually Home, not the one you probably want.
-
-### Example: gold image build
-
-[`Examples/autounattend-gold-image.xml`](Examples/autounattend-gold-image.xml) builds a **reference machine** that you customize by hand, seal with `sysprep /generalize`, and capture — rather than a machine that is ready to use. It uses the same windowsPE installer as the lab example, so **disk 0 is wiped and image index 1 applied on the same terms** (no prompt on an empty disk, type `WIPE` on one that already holds partitions). The differences are all in what happens after Windows is on disk:
-
-- **Almost no hardware-conditional logic.** The `specialize` pass runs once, on the reference machine, so the lab file's `$isVirtualMachine` branches would stamp the *build* machine's identity onto every target. The one surviving branch is the idle timeout block, which only keeps a virtual reference machine awake while you work on it; the active power scheme is never changed, so nothing forces High Performance onto a laptop, and the lab answer file restores the default schemes on physical targets.
-- **`PreventDeviceEncryption` is a build-only setting.** BitLocker on the volume you are about to capture breaks the capture, so `specialize` sets it whatever the reference machine is — and the seal checklist has you **delete it again before running sysprep**. Because `specialize` runs once, on the reference machine, it cannot make this decision per target; the image ships neutral and the deployment answer file decides. The lab file sets it on VMs, where encrypted guests defeat block-level deduplication on the SAN, and leaves physical hardware to encrypt normally. Shipping it neutral also fails in the safe direction: an answer file that never considers the question leaves a physical machine encrypting, rather than a fleet that silently never encrypts.
-- **The answer file deletes itself** from `C:\Windows\Panther` at first logon. `sysprep /generalize` implicitly consumes `Panther\unattend.xml`, so leaving it there would re-run the `specialize` pass — and carry the plain-text password — onto every machine deployed from the captured image.
-- **8.3 short file names are left enabled.** The lab file disables them on the target volume and in the offline `SYSTEM` hive; that is dropped here so installers that still resolve short paths work while you build the image.
-- **`C:\Windows.old` is removed properly.** The lab file's plain `rmdir` only deletes an empty directory, so this takes ownership and grants Administrators full control first. Skipped when the folder is absent, which is the normal case on a wiped disk.
-- **No `CopyProfile`, no product key, no domain join, no vendor drivers.** All machine- or site-specific, and `CopyProfile` is the usual reason a gold image ships with a broken Start menu.
-
-It drops a `SEAL-THIS-IMAGE.txt` checklist on the public desktop with the remaining manual steps, including the seal command:
-
-```shell
-%WINDIR%\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown
-```
-
-```shell
-.\Run-Windows-ISO-Updater.bat -UnattendPath ".\Examples\autounattend-gold-image.xml"
-```
-
-> [!TIP]
-> Finish your customization **offline**. Windows Update refreshing an inbox app for the signed-in user is the usual cause of sysprep failing with `SYSPRP Failed to remove apps for the current user: 0x80073CF2`; when it happens, `C:\Windows\System32\Sysprep\Panther\setupact.log` names the package. The same applies to the VMware Tools download fallback, which also makes the build non-reproducible — attach the hypervisor's Tools ISO instead if you want a fixed version.
-
-> [!CAUTION]
-> This example uses the same plain-text `Password123` build credential and automatic first sign-in as the lab example. `sysprep /oobe` disables the built-in Administrator, but its hash survives generalize, so anything that later re-enables the account without setting a new password inherits it. Change it before you build anything you intend to keep.
-
-> [!WARNING]
-> Two things to watch for with any answer file:
-> - **Edition selection.** By default this script keeps only the highest edition and renumbers `install.wim`, so an answer file that selects the edition with `/IMAGE/INDEX` will point at the wrong image. Use `/IMAGE/NAME` instead, or build with `-KeepAllEditions`. The script warns when it detects this combination.
-> - **Secrets.** Answer files store passwords in plain text or base64 and product keys in the clear. Anyone who can read the ISO can recover them, so treat the finished ISO as a secret and don't commit the answer file to source control.
-
-## What the Script Does
-
-1.  **Locate `oscdimg.exe`** — Downloads a standalone copy from Microsoft's symbol server if it is not already installed (or installs the ADK with `-InstallAdk`), and otherwise fails fast so the build cannot get most of the way through and then be unable to recompile the ISO.
-2.  **Obtain the ISO** — Uses `-IsoPath` if given, otherwise reuses the largest `.iso` over 3 GB already sitting in the download folder, and only if neither is available downloads the matching official Microsoft ISO via the community [Fido](https://github.com/pbatard/Fido) helper (verified and sandboxed in its own process — see [Important Notes](#important-notes)). Blocked link requests are retried with a growing delay, and Microsoft's signature-verified Media Creation Tool can be used as a guided fallback (`-UseMct`).
-3.  **Extract the ISO** — Mounts the ISO and mirrors its contents into the working folder with `robocopy`, then dismounts. If the media ships `install.esd`, it is converted to an editable `install.wim`.
-4.  **Find the updates** — Detects the feature update (e.g. `24H2`) and architecture from the image, then downloads the latest combined Servicing Stack + Cumulative Update (and, by default, the .NET cumulative update — disable with `-SkipDotNet`, and the Setup Dynamic Update — disable with `-SkipSetupDU`) from the Microsoft Update Catalog. If the image is confirmed to already be at the build that cumulative update delivers, it is neither downloaded nor applied. `-UpdatePath` uses your own packages instead.
-5.  **Integrate the updates** — Uses offline DISM to apply the package(s) to `install.wim` (by default only the highest edition present — override with `-KeepAllEditions` or `-KeepEditions`/`-Edition`), to `boot.wim` (Windows Setup / WinPE), and optionally to `winre.wim`.
-6.  **Refresh the media Setup files** — Expands the **Setup Dynamic Update** over the media's `sources` folder (updated Setup binaries, compatibility database and replacement component manifests), then copies the serviced `setup.exe`, `setuphost.exe` (Windows 11 24H2+) and boot manager files out of `boot.wim` index 2 onto the media. Windows Setup **fails during installation** if these loose files do not match the version inside `boot.wim`.
-7.  **Clean up and shrink** — Runs `DISM /Cleanup-Image /StartComponentCleanup /ResetBase`, re-exports `install.wim` to reclaim space, and re-exports `boot.wim` (which servicing inflates), preserving the bootable flag on the Windows Setup index. With `-CompressEsd` the install image is written as `install.esd` instead, using recovery compression.
-8.  **Add the answer file** — If `-UnattendPath` was supplied, copies it to the root of the media as `autounattend.xml`.
-9.  **Recompile the ISO** — Uses `oscdimg` to build a new bootable ISO, preserving both the **BIOS (`etfsboot.com`)** and **UEFI (`efisys.bin`)** boot sectors so the media boots on legacy and modern PCs alike.
-10. **Clean up** — Removes the extracted working files, leaving the finished ISO.
-
-## How Files Are Downloaded
-
-- The **ISO** link is resolved by the third-party **Fido** helper, which queries Microsoft's own software-download servers. If you prefer not to run external code, supply your own ISO with `-IsoPath`, or use `-UseMct` to get the ISO from Microsoft's own signature-verified Media Creation Tool instead.
-- The **updates** are located by parsing the Microsoft Update Catalog search results and its download dialog (the same technique community tools use), then downloaded directly from Microsoft's update servers.
-- Downloads prefer **BITS** (resumable) and fall back to `Invoke-WebRequest`. Every resolved URL is verified to point at an official Microsoft host (`microsoft.com`, `windowsupdate.com`) over HTTPS before it is downloaded.
-
-## Design Notes
-
-### How the Already-Patched Check Works
-
-Integrating a cumulative update is the expensive part of a run — mount, apply, component cleanup, re-export — so the script checks whether the image already has that update before downloading it. Re-applying a present update is harmless (DISM returns `0x800f081e`, "not applicable", and the script treats that as success), but it costs the better part of an hour.
-
-The check has to bridge two things that don't reference each other: the image reports a **build and UBR** (for example `26100.4946`), while the Update Catalog reports a **KB number**. The bridge is the KB's own support page, whose title reads `... KB5062553 (OS Builds 26100.4652 and 26200.4652)`. That gives the UBR the update delivers, before anything is downloaded.
-
-Because a wrong "already patched" decision would quietly ship an unpatched ISO, the check is deliberately asymmetric:
-
-- The WIM header's `SPBuild` is only a **hint**. It is stale on some Microsoft media, so it is used solely to decide whether the question is worth asking.
-- If the header suggests the image is current, the image is **mounted read-only** and its real build is read from the `SOFTWARE` hive. Only that confirmed value can trigger a skip.
-- Anything unknown — support page unreachable, title format changed, hive unreadable, out-of-band release missing from the page — **fails open** and the update is downloaded and applied as usual.
-
-So the worst case is a few wasted minutes on a confirmation mount, and the update still gets applied. A skip only happens when the image's own registry proves it is already at or past the update's build.
-
-### Why Both boot.wim Indexes Are Serviced
-
-`boot.wim` never becomes the installed OS — index 1 is Windows PE, index 2 is Windows Setup — so patching it looks like time that could be saved. It isn't, and both indexes get the same treatment as `install.wim`:
-
-- **Secure Boot revocations.** The media's `bootmgfw.efi` and `bootmgr.efi` are taken from index 2. Once a machine has the CVE-2023-24932 revocations in its DBX and SBAT, media carrying pre-revocation boot managers will not boot at all — and that failure happens before Setup starts, so there is nothing to recover from.
-- **Setup binary version match.** The cumulative update raises the version of `setup.exe` and `setuphost.exe` *inside* index 2. If those don't match the loose copies in the media's `sources` folder, Windows Setup fails with errors such as "A media driver your computer needs is missing." The script therefore copies the serviced binaries out of index 2 and overwrites the ones on the media, after the Setup Dynamic Update has been applied.
-- **Inbox drivers.** WinPE's storage, NVMe and network drivers come from the cumulative update. An unpatched WinPE on recent hardware can boot to a Setup screen that sees no disks.
-
-Index 1 is serviced as well rather than index 2 alone. It is the repair and recovery environment launched from the media, and leaving two images inside one WIM at different patch levels is a configuration Microsoft neither ships nor tests.
-
-The .NET cumulative update is offered to `boot.wim` along with everything else, even though WinPE has no .NET Framework to patch. DISM reports it as not applicable (`0x800f081e`) and the run continues, which keeps the servicing order identical for every image at the cost of one wasted package expansion per index.
-
-### What Windows Update Will Still Offer
-
-A machine installed from a freshly built ISO still shows a few pending items on its first check for updates. That is expected rather than a gap in the build: the script integrates component-store packages, and Windows Update also delivers things that are not component-store packages at all. Those cannot be slipstreamed by any means.
-
-- **Standalone tools shipped as an `.exe`.** Some Update Catalog entries are ordinary programs rather than servicing packages — the monthly Malicious Software Removal Tool is the one you will see most often. There is nothing inside them for DISM to bind into an offline image, and a fresh build ships every Patch Tuesday, so a baked-in copy would be superseded within weeks and offered again regardless.
-- **Definition updates.** Microsoft Defender's security intelligence and the Windows Security platform updates are classified in the catalog as *Definition Updates*, the same category as virus signatures, and also ship as an `.exe`. They are re-released several times a day, so media is stale before the build finishes.
-
-`DISM /Add-Package` only consumes `.msu`/`.cab` packages that bind into the component store by build number, which is exactly what makes a cumulative update integrable and these not. Passing one to `-UpdatePath` fails its `.msu`/`.cab` check.
-
-So they stay a post-install task. Left alone, Windows Update installs them on its own within a day of the machine going online. If you want them handled deterministically, do it from the answer file rather than the media:
-
-- Pull Defender's platform and intelligence updates at first logon with the in-box client, which needs no download URL:
-  ```powershell
-  & "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -SignatureUpdate
-  ```
-- Stop the removal tool being offered at all, if you consider Defender sufficient — set `DontOfferThroughWUAU` to `1` under `HKLM\SOFTWARE\Policies\Microsoft\MRT`.
-
-Neither is worth doing in a gold image before sealing: definitions age out while the image sits in storage, so run them at deployment instead.
-
-## Disk Space Requirements
-
-Because the download, the extracted media, the mounted image, and the re-exported image all coexist, the working drive should have at least **50 GB free**. The script checks this up front and stops if the working drive is too small — choose a larger drive with `-WorkPath` if needed.
-
-The shrink steps near the end of the build stage a second copy of the image beside the original, so each one re-checks free space first. If the drive has filled up, that step is skipped with a warning and the build still finishes — the ISO is just larger than it could have been.
-
-## Where Files Are Written
-
-Everything the script writes lives under a single working folder, which defaults to `<SystemDrive>\WISO-Work`. The script prints this layout before it asks for confirmation, so you can see exactly what it will touch:
-
-```text
-C:\WISO-Work\              <- -WorkPath (moves everything below it)
-  ISO\                     <- extracted media, deleted when the build finishes
-  Mount\                   <- DISM mount point
-  Downloads\               <- -DownloadPath (source ISO and updates)
-  Output\                  <- the finished ISO (-OutputIsoPath overrides it)
-  Logs\                    <- -LogPath
-```
-
-Dropping your own `.iso` into `Downloads\` is all it takes to skip the Microsoft download — no `-IsoPath` needed. The finished ISO is written to `Output\` instead, so a previous build is never picked up as the source for the next one. `-DownloadPath`, `-LogPath` and `-OutputIsoPath` override the individual folders if you want them elsewhere. Nothing outside these folders is changed — all servicing happens against files in the working folder, never against the running system.
-
-## Logging
-
-Each run writes a timestamped transcript to `<WorkPath>\Logs` (or `-LogPath`) named `Windows-ISO-Updater_<date>_<time>.log`. The 30 most recent logs are kept and older ones are pruned automatically.
+- Plenty of free disk space on a **local** working drive — see [Disk Space Requirements](docs/reference.md#disk-space-requirements).
