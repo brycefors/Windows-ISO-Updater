@@ -20,7 +20,8 @@ This PowerShell script automates the whole process. A clean install or in-place 
 - [What the Script Does](#what-the-script-does)
 - [How Files Are Downloaded](#how-files-are-downloaded)
 - [Design Notes](#design-notes)
-  - [Why Updates Are Not Pre-Checked Against the ISO](#why-updates-are-not-pre-checked-against-the-iso)
+  - [How the Already-Patched Check Works](#how-the-already-patched-check-works)
+  - [Why Both boot.wim Indexes Are Serviced](#why-both-bootwim-indexes-are-serviced)
 - [Disk Space Requirements](#disk-space-requirements)
 - [Where Files Are Written](#where-files-are-written)
 - [Logging](#logging)
@@ -179,7 +180,7 @@ The file was produced with [schneegans.de/windows/unattend-generator](https://sc
 1.  **Locate `oscdimg.exe`** — Downloads a standalone copy from Microsoft's symbol server if it is not already installed (or installs the ADK with `-InstallAdk`), and otherwise fails fast so the build cannot get most of the way through and then be unable to recompile the ISO.
 2.  **Obtain the ISO** — Uses `-IsoPath` if given, otherwise reuses the largest `.iso` over 3 GB already sitting in the download folder, and only if neither is available downloads the matching official Microsoft ISO via the community [Fido](https://github.com/pbatard/Fido) helper (verified and sandboxed in its own process — see [Important Notes](#important-notes)). Blocked link requests are retried with a growing delay, and Microsoft's signature-verified Media Creation Tool can be used as a guided fallback (`-UseMct`).
 3.  **Extract the ISO** — Mounts the ISO and mirrors its contents into the working folder with `robocopy`, then dismounts. If the media ships `install.esd`, it is converted to an editable `install.wim`.
-4.  **Find the updates** — Detects the feature update (e.g. `24H2`) and architecture from the image, then downloads the latest combined Servicing Stack + Cumulative Update (and, by default, the .NET cumulative update — disable with `-SkipDotNet`, and the Setup Dynamic Update — disable with `-SkipSetupDU`) from the Microsoft Update Catalog. `-UpdatePath` uses your own packages instead.
+4.  **Find the updates** — Detects the feature update (e.g. `24H2`) and architecture from the image, then downloads the latest combined Servicing Stack + Cumulative Update (and, by default, the .NET cumulative update — disable with `-SkipDotNet`, and the Setup Dynamic Update — disable with `-SkipSetupDU`) from the Microsoft Update Catalog. If the image is confirmed to already be at the build that cumulative update delivers, it is neither downloaded nor applied. `-UpdatePath` uses your own packages instead.
 5.  **Integrate the updates** — Uses offline DISM to apply the package(s) to `install.wim` (by default only the highest edition present — override with `-KeepAllEditions` or `-KeepEditions`/`-Edition`), to `boot.wim` (Windows Setup / WinPE), and optionally to `winre.wim`.
 6.  **Refresh the media Setup files** — Expands the **Setup Dynamic Update** over the media's `sources` folder (updated Setup binaries, compatibility database and replacement component manifests), then copies the serviced `setup.exe`, `setuphost.exe` (Windows 11 24H2+) and boot manager files out of `boot.wim` index 2 onto the media. Windows Setup **fails during installation** if these loose files do not match the version inside `boot.wim`.
 7.  **Clean up and shrink** — Runs `DISM /Cleanup-Image /StartComponentCleanup /ResetBase`, re-exports `install.wim` to reclaim space, and re-exports `boot.wim` (which servicing inflates), preserving the bootable flag on the Windows Setup index. With `-CompressEsd` the install image is written as `install.esd` instead, using recovery compression.
@@ -195,21 +196,31 @@ The file was produced with [schneegans.de/windows/unattend-generator](https://sc
 
 ## Design Notes
 
-### Why Updates Are Not Pre-Checked Against the ISO
+### How the Already-Patched Check Works
 
-The script does not inspect the image's patch level before downloading and applying an update. It downloads the latest cumulative update and hands it to DISM regardless. This is deliberate.
+Integrating a cumulative update is the expensive part of a run — mount, apply, component cleanup, re-export — so the script checks whether the image already has that update before downloading it. Re-applying a present update is harmless (DISM returns `0x800f081e`, "not applicable", and the script treats that as success), but it costs the better part of an hour.
 
-Re-applying an update that is already present is safe. Cumulative updates supersede one another, and DISM returns `0x800f081e` ("not applicable") when the package is already in the image. The script treats that as success and moves on, so the only cost of a redundant apply is time.
+The check has to bridge two things that don't reference each other: the image reports a **build and UBR** (for example `26100.4946`), while the Update Catalog reports a **KB number**. The bridge is the KB's own support page, whose title reads `... KB5062553 (OS Builds 26100.4652 and 26200.4652)`. That gives the UBR the update delivers, before anything is downloaded.
 
-A pre-check would have to answer "is this KB already in this image?", and that is harder than it looks:
+Because a wrong "already patched" decision would quietly ship an unpatched ISO, the check is deliberately asymmetric:
 
-- The image reports a **build and UBR** (for example `26100.4946`), read from the `SOFTWARE` hive of a mounted image. The Microsoft Update Catalog reports a **KB number**. Nothing in either source maps one to the other, so the check needs a separate KB-to-UBR table scraped from Microsoft's release-health pages — a new dependency on HTML that Microsoft is free to restructure.
-- The `SPBuild` value in the WIM header is the only patch level available without mounting, and it is frequently stale on Microsoft-published media. Trusting it would produce wrong answers; not trusting it means paying for a read-only mount before the check is worth anything.
-- Out-of-band releases and newly published updates are missing from the table until it is re-synced, so the lookup has to **fail open** and apply the update anyway. The code would therefore do nothing in exactly the cases where certainty matters most.
+- The WIM header's `SPBuild` is only a **hint**. It is stale on some Microsoft media, so it is used solely to decide whether the question is worth asking.
+- If the header suggests the image is current, the image is **mounted read-only** and its real build is read from the `SOFTWARE` hive. Only that confirmed value can trigger a skip.
+- Anything unknown — support page unreachable, title format changed, hive unreadable, out-of-band release missing from the page — **fails open** and the update is downloaded and applied as usual.
 
-The payoff is small as well. Official Microsoft media usually lags the current cumulative update by months, so "already up to date" is the rare case rather than the common one — and even when it happens, only the update download and one mount are skipped. The Setup Dynamic Update, `boot.wim` servicing, component cleanup, re-export and `oscdimg` rebuild all still run.
+So the worst case is a few wasted minutes on a confirmation mount, and the update still gets applied. A skip only happens when the image's own registry proves it is already at or past the update's build.
 
-Weighed together, the current behaviour risks **wasted minutes in an uncommon case**, while the pre-check would risk **shipping an unpatched ISO because a lookup went stale**. The second failure is far worse and much quieter, so the check is intentionally left out.
+### Why Both boot.wim Indexes Are Serviced
+
+`boot.wim` never becomes the installed OS — index 1 is Windows PE, index 2 is Windows Setup — so patching it looks like time that could be saved. It isn't, and both indexes get the same treatment as `install.wim`:
+
+- **Secure Boot revocations.** The media's `bootmgfw.efi` and `bootmgr.efi` are taken from index 2. Once a machine has the CVE-2023-24932 revocations in its DBX and SBAT, media carrying pre-revocation boot managers will not boot at all — and that failure happens before Setup starts, so there is nothing to recover from.
+- **Setup binary version match.** The cumulative update raises the version of `setup.exe` and `setuphost.exe` *inside* index 2. If those don't match the loose copies in the media's `sources` folder, Windows Setup fails with errors such as "A media driver your computer needs is missing." The script therefore copies the serviced binaries out of index 2 and overwrites the ones on the media, after the Setup Dynamic Update has been applied.
+- **Inbox drivers.** WinPE's storage, NVMe and network drivers come from the cumulative update. An unpatched WinPE on recent hardware can boot to a Setup screen that sees no disks.
+
+Index 1 is serviced as well rather than index 2 alone. It is the repair and recovery environment launched from the media, and leaving two images inside one WIM at different patch levels is a configuration Microsoft neither ships nor tests.
+
+The .NET cumulative update is offered to `boot.wim` along with everything else, even though WinPE has no .NET Framework to patch. DISM reports it as not applicable (`0x800f081e`) and the run continues, which keeps the servicing order identical for every image at the cost of one wasted package expansion per index.
 
 ## Disk Space Requirements
 

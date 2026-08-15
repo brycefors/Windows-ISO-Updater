@@ -849,6 +849,29 @@ function Get-UpdateCatalogDownloadUrl {
     return @($Urls)
 }
 
+# Looks up which OS build(s) a KB article delivers, from the title of its Microsoft support page - e.g.
+# "July 8, 2025-KB5062553 (OS Builds 26100.4652 and 26200.4652)". The Update Catalog itself never states
+# the resulting build, and this is the only cheap way to know it BEFORE downloading a multi-GB package.
+# Returns a hashtable of build -> UBR, or $null if the page could not be read or parsed.
+function Get-KbTargetBuilds {
+    param([Parameter(Mandatory)][string]$KbNumber)
+
+    try {
+        $Response = Invoke-WebRequest -Uri "https://support.microsoft.com/help/$KbNumber" -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
+    }
+    catch { return $null }
+
+    $Title = if ("$($Response.Content)" -match '(?is)<title>(.*?)</title>') { $Matches[1] } else { '' }
+    if ($Title -notmatch '(?i)OS Build') { return $null }
+
+    $Builds = @{}
+    foreach ($M in [regex]::Matches($Title, '\b(\d{5})\.(\d{1,5})\b')) {
+        $Builds[[int]$M.Groups[1].Value] = [int]$M.Groups[2].Value
+    }
+    if ($Builds.Count -eq 0) { return $null }
+    return $Builds
+}
+
 # Finds the newest, non-preview cumulative update in the catalog for a given search query, downloads it
 # to the download folder, and returns the local .msu path (or $null on failure).
 function Get-LatestCatalogPackage {
@@ -857,7 +880,11 @@ function Get-LatestCatalogPackage {
         [Parameter(Mandatory)][string]$DownloadDir,
         [string]$TitleInclude,   # regex the title MUST match (e.g. cumulative update wording)
         [string]$TitleExclude,   # regex the title must NOT match (e.g. ".net", "dynamic")
-        [switch]$AllowPreview
+        [switch]$AllowPreview,
+        [int]$CurrentBuild,      # OS build already in the image - set to enable the up-to-date check
+        [int]$CurrentUbr,        # UBR from the WIM header (only a hint - it is confirmed before use)
+        [string]$VerifyWimPath,  # WIM to mount read-only to confirm that UBR before anything is skipped
+        [ref]$AlreadyCurrent     # receives the image's confirmed build when the update is not needed
     )
 
     Write-HostTimestamp "  Searching the Microsoft Update Catalog for: $Query"
@@ -888,6 +915,28 @@ function Get-LatestCatalogPackage {
 
     Write-HostTimestamp "  Selected: $($Selected.Title)$(if ($Selected.LastUpdated) { " (released $($Selected.LastUpdated.ToString('yyyy-MM-dd')))" })" -ForegroundColor Green
 
+    $PrimaryKb = if ($Selected.Title -match '(?i)KB(\d{6,})') { $Matches[1] } else { $null }
+
+    # If the image is already at (or past) the build this KB delivers, there is nothing to gain from
+    # downloading and integrating it - that is the hour-long part of the run.
+    if ($CurrentBuild -gt 0 -and $CurrentUbr -gt 0 -and $PrimaryKb) {
+        $Targets = Get-KbTargetBuilds -KbNumber $PrimaryKb
+        $TargetUbr = if ($Targets -and $Targets.ContainsKey($CurrentBuild)) { [int]$Targets[$CurrentBuild] } else { 0 }
+        if ($TargetUbr -gt 0 -and $CurrentUbr -ge $TargetUbr) {
+            # The WIM header's UBR is stale on some Microsoft media, and wrongly skipping the update would
+            # quietly ship an unpatched ISO, so confirm against the image's own SOFTWARE hive first.
+            Write-HostTimestamp "  The media claims to be at $CurrentBuild.$CurrentUbr already, and KB$PrimaryKb delivers $CurrentBuild.$TargetUbr. Confirming the image's real patch level before skipping it..."
+            $Confirmed = if ($VerifyWimPath) { Get-WimBuildViaMount -WimPath $VerifyWimPath } else { $null }
+            $ConfirmedUbr = if ("$Confirmed" -match '\b\d+\.\d+\.\d+\.(\d+)') { [int]$Matches[1] } else { 0 }
+            if ($ConfirmedUbr -ge $TargetUbr) {
+                Write-HostTimestamp "  Confirmed: the image is at $Confirmed, so KB$PrimaryKb adds nothing - skipping the download and the integration." -ForegroundColor Green
+                if ($AlreadyCurrent) { $AlreadyCurrent.Value = $Confirmed }
+                return $null
+            }
+            Write-HostTimestamp "  The image is really at $(if ($Confirmed) { $Confirmed } else { 'an unknown build' }), so the update is needed after all." -ForegroundColor Yellow
+        }
+    }
+
     # A single catalog entry can resolve to MULTIPLE .msu files. For Windows 11 24H2/25H2, Microsoft uses
     # "checkpoint cumulative updates": the latest LCU download also includes one or more baseline/checkpoint
     # packages that MUST be integrated first. So download every file the dialog returns and order them so
@@ -900,9 +949,7 @@ function Get-LatestCatalogPackage {
         return $null
     }
 
-    $PrimaryKb = if ($Selected.Title -match '(?i)KB(\d{6,})') { $Matches[1] } else { $null }
-
-    # Helper: extract the numeric KB from a URL/filename for ordering (checkpoints ascending, LCU last).
+    # Extracts the numeric KB from a URL/filename for ordering (checkpoints ascending, LCU last).
     $GetKb = { param($Text) if ($Text -match '(?i)kb(\d{6,})') { [int]$Matches[1] } else { 0 } }
 
     $Downloaded = New-Object System.Collections.Generic.List[object]
@@ -1364,6 +1411,34 @@ function Get-MountedImageBuild {
     catch { return $null }
 }
 
+# Mounts a WIM read-only just long enough to read its true build/UBR, because the WIM header's SPBuild is
+# stale on some Microsoft media and the SOFTWARE hive is the only trustworthy source. Costs a few minutes.
+# Returns a version string, or $null if it could not be read.
+function Get-WimBuildViaMount {
+    param(
+        [Parameter(Mandatory)][string]$WimPath,
+        [int]$Index = 1
+    )
+
+    $Mnt = Join-Path -Path $WorkRoot -ChildPath 'BuildCheck'
+    $Build = $null
+    try {
+        Reset-MountDirectory -Path $Mnt -ImagePath $WimPath
+        Mount-WindowsImage -ImagePath $WimPath -Index $Index -Path $Mnt -ReadOnly -ErrorAction Stop | Out-Null
+        $Build = Get-MountedImageBuild -MountPath $Mnt
+    }
+    catch { }
+    finally {
+        Dismount-WindowsImage -Path $Mnt -Discard -ErrorAction SilentlyContinue | Out-Null
+        # Removing a directory DISM still tracks as mounted is what orphans a mount point, so leave it
+        # alone if the discard above did not take.
+        if (-not (Get-WindowsImage -Mounted -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.TrimEnd('\') -ieq $Mnt.TrimEnd('\') })) {
+            Remove-Item -LiteralPath $Mnt -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    return $Build
+}
+
 # Reports the editions (indexes) inside the finished install.wim and the exact OS build. The build number
 # (including the revision/UBR set by the cumulative update) isn't stored in the WIM header, so it comes from
 # the image's offline SOFTWARE hive - reusing the value captured during servicing, or mounting read-only if
@@ -1527,6 +1602,7 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions) {
         }
         else {
             Write-Host "  - Download the latest cumulative update(s)$(if (-not $SkipDotNet) { ' and the latest .NET cumulative update' }) from the Microsoft Update Catalog"
+            Write-Host "      (the cumulative update is skipped entirely if the image already has that build)" -ForegroundColor DarkGray
             if (-not $SkipSetupDU) { Write-Host "  - Download the latest Setup Dynamic Update and apply it to the media's sources folder" }
         }
         Write-Host "  - Integrate the update(s) into install.wim ($Edition), boot.wim$(if ($ServiceWinRE) { ', and winre.wim' })"
@@ -1860,11 +1936,14 @@ $ImageInfo = $null
 try { $ImageInfo = Get-WindowsImage -ImagePath $InstallWimExtracted -Index 1 -ErrorAction Stop } catch { }
 $ImageBuild = 0
 if ($ImageInfo -and $ImageInfo.Version -match '^\d+\.\d+\.(\d+)') { $ImageBuild = [int]$Matches[1] }
+# The WIM header carries the UBR as the "service pack build", so the image's exact patch level is known
+# without mounting anything.
+$ImageUbr = if ($ImageInfo -and $null -ne $ImageInfo.SPBuild) { [int]$ImageInfo.SPBuild } else { 0 }
 $FeatureName = if ($ImageBuild) { Get-FeatureUpdateName -Build $ImageBuild } else { $null }
 $ImageArch = switch ($ImageInfo.Architecture) { 0 { 'x86' } 9 { 'x64' } 12 { 'arm64' } default { $WinInfo.Architecture } }
 $CatalogArch = switch ($ImageArch) { 'x64' { 'x64' } 'arm64' { 'ARM64' } 'x86' { 'x86' } default { 'x64' } }
 
-Write-HostTimestamp "Image build    : $($ImageInfo.Version)$(if ($FeatureName) { " ($FeatureName)" })"
+Write-HostTimestamp "Image build    : $($ImageInfo.Version)$(if ($ImageUbr) { ".$ImageUbr" })$(if ($FeatureName) { " ($FeatureName)" })"
 Write-HostTimestamp "Image arch     : $ImageArch"
 Write-Host $LineBreak
 
@@ -1909,15 +1988,21 @@ else {
         $Query = "Cumulative Update for Windows $WindowsVersion ${VerPart}for $CatalogArch-based Systems"
         $Include = '(?i)cumulative update for windows'
         $Exclude = '(?i)\.net|dynamic update'
-        $script:Lcu = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude
-        if (-not $script:Lcu) {
+        $script:LcuUpToDate = $null
+        $script:Lcu = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate)
+        if (-not $script:Lcu -and -not $script:LcuUpToDate) {
             # Retry with a looser query (some releases omit the "Version xxHx" token in the title).
             $Query2 = "Cumulative Update for Windows $WindowsVersion for $CatalogArch-based Systems"
             Write-HostTimestamp "  Retrying with a broader query: $Query2" -ForegroundColor Yellow
-            $script:Lcu = Get-LatestCatalogPackage -Query $Query2 -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude
+            $script:Lcu = Get-LatestCatalogPackage -Query $Query2 -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate)
         }
     }
     if ($script:Lcu) { $UpdateGroups.Add(@($script:Lcu)) }
+    elseif ($script:LcuUpToDate) {
+        # Nothing will change the OS build now, so reuse the build already confirmed by the check.
+        if (-not $script:FinalBuildString) { $script:FinalBuildString = $script:LcuUpToDate }
+        Write-HostTimestamp "The image is already fully patched ($script:LcuUpToDate), so no cumulative update is needed." -ForegroundColor Green
+    }
     else {
         Write-HostTimestamp 'Could not obtain a cumulative update from the catalog. You can supply one with -UpdatePath, or use -SkipUpdates to just recompile the ISO.' -ForegroundColor Red
         Stop-Transcript | Out-Null
