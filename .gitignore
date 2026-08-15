@@ -1,0 +1,5 @@
+*.log
+Windows-Update-Fix/.last_remediation
+Windows-Clean-Up/.last_cleanup
+*.iso
+*.msu
