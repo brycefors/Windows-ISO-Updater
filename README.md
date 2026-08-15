@@ -28,7 +28,7 @@ This PowerShell script automates the whole process. A clean install or in-place 
 ## Important Notes
 
 > [!WARNING]
-> This is a **disk- and time-intensive** operation. The downloaded ISO, the extracted media, the mounted image, and the re-exported image all coexist during the build, and offline DISM servicing plus component-store cleanup can take a long time. Nothing on the machine running the script is changed — all servicing happens against files in the working folder.
+> This is a **disk- and time-intensive** operation — with the default parameters a full run normally takes **an hour or two**. The downloaded ISO, the extracted media, the mounted image, and the re-exported image all coexist during the build, and offline DISM servicing plus component-store cleanup can take a long time. Nothing on the machine running the script is changed — all servicing happens against files in the working folder.
 
 > [!TIP]
 > **It is recommended to download the ISO yourself and pass it with `-IsoPath`.** The automatic download relies on the community Fido helper, which queries Microsoft's software-download servers on your behalf. Microsoft rate-limits and can temporarily block IP addresses that make repeated ISO requests — this shows up as *"Error: Sentinel marked this request as rejected"* or a *715-123130* error, which the script now prints verbatim (add `-Verbose` for Fido's full request log). The script automatically retries a few times with a growing delay (`-FidoRetryCount`, default 2 extra attempts), because the block is often transient. Downloading the ISO once from [microsoft.com/software-download](https://www.microsoft.com/software-download) (or with the Media Creation Tool) and reusing it with `-IsoPath` avoids this entirely.

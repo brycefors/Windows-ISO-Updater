@@ -35,8 +35,9 @@
 #      -UnattendPath is placed at the root of the media as autounattend.xml, which Windows Setup reads
 #      automatically when the ISO is booted.
 #
-# This is disk- and time-intensive: it needs a lot of free space (the download, the extracted media, the
-# mounted image, and the exported image all coexist) and DISM servicing/cleanup can take a long time.
+# This is disk- and time-intensive: with the default parameters a full run normally takes an hour or two.
+# It needs a lot of free space (the download, the extracted media, the mounted image, and the exported
+# image all coexist) and DISM servicing/cleanup can take a long time.
 # Nothing on the running machine is changed - all servicing happens against files in the working folder.
 # -------------------------------------------------
 # How to Run .PS1 Script with PowerShell:
@@ -1540,6 +1541,7 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions) {
     }
     Write-Host "  - Recompile a new bootable ISO with oscdimg"
     Write-Host ""
+    Write-Host "With the default settings this normally takes an hour or two from start to finish." -ForegroundColor Yellow
     Write-Host "This is disk- and time-intensive and needs a lot of free space. Nothing on this PC is changed." -ForegroundColor Yellow
     Write-Host ""
     $Confirm = Read-Host "Type 'Y' to continue, or anything else to cancel"
