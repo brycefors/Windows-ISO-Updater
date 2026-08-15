@@ -22,6 +22,7 @@ This PowerShell script automates the whole process. A clean install or in-place 
 - [Design Notes](#design-notes)
   - [How the Already-Patched Check Works](#how-the-already-patched-check-works)
   - [Why Both boot.wim Indexes Are Serviced](#why-both-bootwim-indexes-are-serviced)
+  - [What Windows Update Will Still Offer](#what-windows-update-will-still-offer)
 - [Disk Space Requirements](#disk-space-requirements)
 - [Where Files Are Written](#where-files-are-written)
 - [Logging](#logging)
@@ -248,6 +249,25 @@ So the worst case is a few wasted minutes on a confirmation mount, and the updat
 Index 1 is serviced as well rather than index 2 alone. It is the repair and recovery environment launched from the media, and leaving two images inside one WIM at different patch levels is a configuration Microsoft neither ships nor tests.
 
 The .NET cumulative update is offered to `boot.wim` along with everything else, even though WinPE has no .NET Framework to patch. DISM reports it as not applicable (`0x800f081e`) and the run continues, which keeps the servicing order identical for every image at the cost of one wasted package expansion per index.
+
+### What Windows Update Will Still Offer
+
+A machine installed from a freshly built ISO still shows a few pending items on its first check for updates. That is expected rather than a gap in the build: the script integrates component-store packages, and Windows Update also delivers things that are not component-store packages at all. Those cannot be slipstreamed by any means.
+
+- **Standalone tools shipped as an `.exe`.** Some Update Catalog entries are ordinary programs rather than servicing packages — the monthly Malicious Software Removal Tool is the one you will see most often. There is nothing inside them for DISM to bind into an offline image, and a fresh build ships every Patch Tuesday, so a baked-in copy would be superseded within weeks and offered again regardless.
+- **Definition updates.** Microsoft Defender's security intelligence and the Windows Security platform updates are classified in the catalog as *Definition Updates*, the same category as virus signatures, and also ship as an `.exe`. They are re-released several times a day, so media is stale before the build finishes.
+
+`DISM /Add-Package` only consumes `.msu`/`.cab` packages that bind into the component store by build number, which is exactly what makes a cumulative update integrable and these not. Passing one to `-UpdatePath` fails its `.msu`/`.cab` check.
+
+So they stay a post-install task. Left alone, Windows Update installs them on its own within a day of the machine going online. If you want them handled deterministically, do it from the answer file rather than the media:
+
+- Pull Defender's platform and intelligence updates at first logon with the in-box client, which needs no download URL:
+  ```powershell
+  & "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -SignatureUpdate
+  ```
+- Stop the removal tool being offered at all, if you consider Defender sufficient — set `DontOfferThroughWUAU` to `1` under `HKLM\SOFTWARE\Policies\Microsoft\MRT`.
+
+Neither is worth doing in a gold image before sealing: definitions age out while the image sits in storage, so run them at deployment instead.
 
 ## Disk Space Requirements
 
