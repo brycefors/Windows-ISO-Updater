@@ -1,64 +1,128 @@
 <?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
 	<!--
-		MANUALLY MODIFIED. Do not treat this as generator output.
+		GOLD IMAGE BUILD ANSWER FILE. Not a deployment answer file.
 
-		This file started as output from the unattend generator at https://schneegans.de/windows/unattend-generator/
-		(the URL in the comment below reproduces the options that were selected), and was then hand edited.
-		Regenerating from that URL will silently discard every change listed here.
+		This builds the reference machine that you then customize by hand, seal with sysprep /generalize,
+		and capture. It is a sibling of autounattend-lab-admin.xml and shares its entire windowsPE
+		installer; the differences are all in what happens after Windows is on disk.
 
-		Changes made after generation:
+		The captured image is deployed with a DIFFERENT answer file (autounattend-lab-admin.xml, or your
+		own), which is what sets the computer name, credentials, domain membership and so on.
 
-		1. C:\Windows\Setup\Scripts\VMwareTools.ps1
-		   The generator only installs VMware Tools from a Tools ISO mounted by the hypervisor, and gives up
-		   if none is attached. It now falls back to downloading the installer from packages.vmware.com.
-		   The fallback is gated on Win32_ComputerSystem.Manufacturer matching VMware, because the drive scan
-		   also finds nothing on physical hardware and would otherwise install Tools there. It retries the
-		   listing for about three minutes (first logon regularly starts before DHCP settles) and refuses to
-		   run the download unless its Authenticode signature is valid and signed by VMware or Broadcom.
-		   Install arguments were also corrected to VMware's documented form: /S /v"/qn REBOOT=R".
+		WHAT WAS DELIBERATELY CHANGED OR LEFT OUT, RELATIVE TO autounattend-lab-admin.xml
+		=================================================================================
 
-		2. C:\Windows\Setup\Scripts\Specialize.ps1
-		   The generator writes PreventDeviceEncryption unconditionally. It is now gated on SMBIOS
-		   manufacturer and model, so only virtual machines skip automatic BitLocker encryption, because
-		   encrypted guests defeat block level deduplication on the SAN. Physical machines built from the
-		   same ISO still encrypt normally, and the value is explicitly removed on them rather than merely
-		   left unset, so an image that baked it in during a gold image build does not suppress encryption
-		   forever. Those machines also get the FVE encryption method policy set to AES 256 first, so
-		   anything BitLocker encrypts later uses XTS-AES 256 rather than the 128-bit default.
+		1. Almost no hardware-conditional logic ($isVirtualMachine).
+		   The lab file branches on SMBIOS manufacturer/model so VMs and physical machines get different
+		   settings. That works when the answer file runs on the machine it is configuring. In a gold
+		   image the specialize pass runs ONCE, on the reference machine, and whatever it decides is
+		   baked into every target. A reference VM would therefore stamp "this is a VM" settings onto
+		   the physical machines built from the same image.
 
-		3. windowsPE pass, RunSynchronousCommand orders 23 and 24
-		   The generator prompts for the image index to install. It now applies index 1 without asking,
-		   and the :choice label that existed only to retry that prompt was removed.
+		   One branch survives, the idle timeouts, and it is a statement about the BUILD rather than about
+		   the targets: keep the reference machine awake while you work on it, but only bother when that
+		   machine is a VM. It is still baked into the capture like everything else, which is why the
+		   deployment answer file has to set the final per-target state. Everything else here is hardware
+		   neutral.
 
-		4. windowsPE pass, RunSynchronousCommand orders 13, 15 and 23
-		   The generator's disk assertions abort outright when disk 0 already holds partitions, which makes
-		   the media useless for reinstalling over an existing system. That assertion now exits with code 2
-		   instead, and pe.cmd turns it into a prompt: you must type WIPE to erase disk 0, and anything else
-		   aborts without touching it. The size assertions still abort outright, as before.
-		   The generator's unconditional pause before diskpart was also removed, so an empty disk installs
-		   with no keypress at all; the only remaining prompt is the WIPE confirmation on a disk that
-		   already holds data.
+		2. PreventDeviceEncryption is set for the build only, and cleared before you seal.
+		   The reference machine must never encrypt itself: BitLocker on the volume you are about to
+		   capture breaks the capture. That is a build requirement independent of policy, so specialize
+		   sets it whatever the reference machine happens to be running on.
 
-		5. C:\Windows\Setup\Scripts\Specialize.ps1
-		   Three tweaks the generator does not offer were added: hibernation is turned off everywhere,
-		   virtual machines get a never-sleep high performance power plan while physical machines have the
-		   default schemes restored (so never-sleep timeouts baked in by a gold image build do not follow
-		   the image onto laptops), and the CloudContent policies that suppress suggested app installs are
-		   set on every machine.
+		   It must not survive into the image. specialize runs once, here, so it cannot make this decision
+		   per target; the capture has to ship neutral and let the deployment answer file choose. Neutral
+		   also fails in the safe direction: an answer file that never considers the question leaves a
+		   physical machine encrypting normally, instead of a fleet that silently never encrypts.
+		   SEAL-THIS-IMAGE.txt lists the removal as a step, and autounattend-lab-admin.xml sets the value
+		   on VMs, where encrypted guests defeat block level deduplication on the SAN, and removes it on
+		   physical hardware.
+
+		   The FVE EncryptionMethodWithXts* values do stay in the image on purpose. They only choose the
+		   cipher, so whatever does encrypt uses XTS-AES 256 rather than the 128-bit default.
+
+		3. No power plan change, and no VM-specific never-sleep scheme.
+		   Only the AC idle timeouts are touched, and only on a virtual reference machine. The active
+		   scheme is left alone, because forcing High Performance onto a laptop built from this image is a
+		   battery-life regression you will not notice until it ships. autounattend-lab-admin.xml restores
+		   the default schemes on physical hardware at deployment, so baked never-sleep timeouts do not
+		   follow the image onto machines that should sleep normally.
+
+		4. C:\Windows.old is removed, but with the permissions work the lab file skips.
+		   Leaving it behind would bloat the captured image with a copy of the previous install. The lab
+		   file's plain "rmdir C:\Windows.old" only succeeds on an empty directory, so this takes ownership
+		   and grants Administrators full control first, then deletes recursively. It is skipped entirely
+		   when the folder is absent, which is the normal case for a reference machine built on a disk the
+		   windowsPE pass wiped.
+
+		5. FirstLogon.ps1 deletes C:\Windows\Panther\unattend.xml, and that is load bearing here.
+		   sysprep /generalize implicitly consumes C:\Windows\Panther\unattend.xml if it is present. Left
+		   in place, this file's specialize pass would re-run on every deployed machine, re-extracting
+		   these payload scripts, and the plain text Administrator password below would ride along into
+		   the captured image. Deleting it makes sysprep use its own defaults, which is what you want.
+
+		6. 8.3 short file names are left enabled.
+		   The lab file disables them on W: and sets NtfsDisable8dot3NameCreation in the offline SYSTEM
+		   hive. That is dropped here, so the reference machine keeps the stock Windows behaviour and
+		   installers that still resolve short paths work while you are building the image.
+
+		THINGS THIS FILE INTENTIONALLY DOES NOT DO
+		==========================================
+
+		- No CopyProfile. It would push the build Administrator's profile to the Default profile, which
+		  is the usual reason a gold image ships with a broken Start menu or missing Store apps.
+		- No product key, activation, domain join, static IP or Wi-Fi profile. All machine or site
+		  specific; they belong in the deployment answer file.
+		- No $WinPEDriver$ vendor drivers are expected. The windowsPE pass still supports the folder, but
+		  do not populate it for a gold image that will land on mixed hardware.
+		- No SkipRearm. Add <SkipRearm>1</SkipRearm> to the Microsoft-Windows-Security-SPP component in
+		  specialize only if you intend to generalize this same installation more than once.
+		- The generalize pass is empty on purpose. Because the answer file is deleted before you seal,
+		  sysprep uses its defaults, and those defaults (do not persist device installs, do clean up
+		  non-present devices) are already correct for mixed hardware.
+
+		BEFORE YOU SEAL
+		===============
+
+		- Do not let the machine sit on the internet after the build. Windows Update refreshing an
+		  inbox app for the current user is the most common cause of sysprep failing with
+		  "SYSPRP Failed to remove apps for the current user: 0x80073CF2". If it happens, check
+		  C:\Windows\System32\Sysprep\Panther\setupact.log for the offending package.
+		- Confirm C:\Windows\Panther\unattend.xml is gone.
+		- Clear the build logs and scripts you do not want in the image:
+		  C:\Windows\Setup\Scripts\*.log, Specialize.ps1, FirstLogon.ps1, VMwareTools.ps1.
+		- Do NOT leave a SetupComplete.cmd in C:\Windows\Setup\Scripts; it auto-runs on every machine
+		  deployed from the image.
+		- Drop the build-only BitLocker block, so physical machines built from this image can encrypt:
+		      reg.exe delete "HKLM\SYSTEM\CurrentControlSet\Control\BitLocker" /v PreventDeviceEncryption /f
+		- Seal with:
+		      %WINDIR%\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown
+		  then capture C: only (not the recovery partition) with DISM /Capture-Image.
+
+		SECURITY NOTE ON THE BUILD CREDENTIAL
+		=====================================
+
+		The built-in Administrator password below is plain text, and its hash stays in the SAM through
+		generalize. sysprep /oobe disables the account, so a deployed machine is not directly exposed,
+		but anything that later re-enables it without setting a new password inherits this credential.
+		Change it here, and set a real one in the deployment answer file.
 	-->
-	<!--https://schneegans.de/windows/unattend-generator/?LanguageMode=Unattended&UILanguage=en-US&Locale=en-US&Keyboard=00000409&GeoLocation=244&PEMode=Generated&Disable8Dot3Names=true&PauseBeforeFormatting=true&InstallFromMode=Interactive&PartitionMode=Unattended&TargetDisk=0&PartitionLayout=Automatic&SystemSize=300&RecoveryMode=Partition&RecoverySize=1000&DiskAssertionMode=Generated&AssertMinSize=100&AssertMaxSize=4000&AssertNoPartitions=true&ProcessorArchitecture=amd64&BypassRequirementsCheck=true&ComputerNameMode=Random&TimeZoneMode=Implicit&UserAccountMode=Unattended&AutoLogonMode=Builtin&BuiltinAdministratorPassword=Password123&PasswordExpirationMode=Unlimited&LockoutMode=Default&HideFiles=Hidden&TaskbarSearch=Box&TaskbarIconsMode=Default&StartTilesMode=Default&StartPinsMode=Default&EnableLongPaths=true&EnableRemoteDesktop=true&AllowPowerShellScripts=true&DisableLastAccess=true&PreventDeviceEncryption=true&HideEdgeFre=true&DeleteWindowsOld=true&EffectsMode=Default&DesktopIconsMode=Default&StartFoldersMode=Default&CoreIsolationMode=Enabled&VMwareTools=true&WifiMode=Skip&ExpressSettings=EnableAll&LockKeysMode=Skip&StickyKeysMode=Default&ColorMode=Default&WallpaperMode=Default&LockScreenMode=Default&AppLockerMode=Skip-->
 	<!-- offlineServicing: would apply packages/drivers to the image before it boots. Unused here. -->
 	<settings pass="offlineServicing"></settings>
 
 	<!--
-		windowsPE: runs inside the WinPE boot environment, before Windows is installed.
+		windowsPE: the same installer as autounattend-lab-admin.xml, minus the 8.3 short file name steps.
+		It runs inside the WinPE boot environment, before Windows is installed.
 
 		This file does not use Setup's built in <DiskConfiguration> / <ImageInstall> elements. Instead it
 		builds its own installer batch file, X:\pe.cmd, one line at a time: every RunSynchronousCommand below
 		appends more text via "cmd.exe /c >>X:\pe.cmd (echo:...)". The caret and doubled percent escaping
 		(^%^%d, ^"...^") exists so the text is written out literally instead of being evaluated now.
-		Order 33 finally runs the completed script, and that is what actually installs Windows.
+		Order 32 finally runs the completed script, and that is what actually installs Windows.
+
+		A fresh reference VM has an empty disk 0, so this installs with no keypress at all. If disk 0
+		already holds partitions you must type WIPE to continue.
 	-->
 	<settings pass="windowsPE">
 		<component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
@@ -124,7 +188,7 @@
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:echo:expected = 4000&amp;echo:echo:If actual ^^^&gt; expected Then&amp;echo:echo:Fail ^^^"Size of disk 0 is expected to be at most ^^^" ^^^&amp; expected ^^^&amp; ^^^" GiB, but actually is ^^^" ^^^&amp; actual ^^^&amp; ^^^" GiB.^^^"&amp;echo:echo:End If)</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
-					<!-- MODIFIED (change 4): an already partitioned disk 0 exits 2 instead of failing, so Order 15 can prompt rather than abort. -->
+					<!-- An already partitioned disk 0 exits 2 instead of failing, so Order 15 can prompt rather than abort. -->
 					<Order>13</Order>
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:echo:actual = drive.Partitions&amp;echo:echo:If actual ^^^&gt; 0 Then&amp;echo:echo:WScript.Echo ^^^"Disk 0 already holds ^^^" ^^^&amp; actual ^^^&amp; ^^^" partitions.^^^"&amp;echo:echo:WScript.Quit 2&amp;echo:echo:End If)</Path>
 				</RunSynchronousCommand>
@@ -135,9 +199,9 @@
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
 					<!--
-						MODIFIED (change 4): runs assert.vbs and branches on its exit code. 2 jumps to :confirmwipe, which
-						requires the operator to type WIPE before an already partitioned disk 0 is erased; anything else
-						aborts. 1 still halts outright (size checks). An empty disk falls through to :assertok with no prompt.
+						Runs assert.vbs and branches on its exit code. 2 jumps to :confirmwipe, which requires the
+						operator to type WIPE before an already partitioned disk 0 is erased; anything else aborts.
+						1 still halts outright (size checks). An empty disk falls through to :assertok with no prompt.
 						Then begins X:\GPT.txt, the diskpart script for UEFI machines: select disk 0 and wipe it.
 					-->
 					<Order>15</Order>
@@ -179,12 +243,12 @@
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:call :fail ^"Unexpected value ^%^%t.^"&amp;echo:^)&amp;echo:^)&amp;echo:call :print ^"The target disk will be configured with the ^%LAYOUT^% partition layout^"&amp;echo:call :print ^"diskpart will now partition and format your disk^")</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
-					<!-- MODIFIED (changes 3 and 4): runs the chosen diskpart script with no pause first, then lists the image's editions for the log/screen only. -->
+					<!-- Runs the chosen diskpart script with no pause first, then lists the image's editions for the log/screen only. -->
 					<Order>23</Order>
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:diskpart.exe /s X:\^%LAYOUT^%.txt ^|^| call :fail ^"diskpart.exe encountered an error.^"&amp;echo:dism.exe /Get-WimInfo /WimFile:^"^%IMAGE_FILE^%^"&amp;echo:echo:)</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
-					<!-- MODIFIED (change 3): hardcodes image index 1 instead of prompting for an edition. -->
+					<!-- Hardcodes image index 1 instead of prompting for an edition. Pairs with the script's default of keeping only the highest edition. -->
 					<Order>24</Order>
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:set ^"IMG_PARAM=/Index:1^"&amp;echo:call :print ^"Applying image index 1 to target disk^")</Path>
 				</RunSynchronousCommand>
@@ -199,44 +263,46 @@
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:bcdboot.exe W:\Windows /s S: ^|^| call :fail ^"bcdboot.exe encountered an error.^"&amp;echo:bcdedit.exe /set {fwbootmgr} bootsequence {bootmgr}&amp;echo:call :print ^"Copying answer file to target disk^"&amp;echo:mkdir W:\Windows\Panther)</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
-					<!-- Copies this answer file to W:\Windows\Panther\unattend.xml so the specialize and oobeSystem passes below still run after reboot. -->
+					<!-- Copies this answer file to W:\Windows\Panther\unattend.xml so the specialize and oobeSystem passes below still run after reboot. FirstLogon.ps1 deletes it again. -->
 					<Order>27</Order>
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:copy ^%XML_FILE^% W:\Windows\Panther\unattend.xml&amp;echo:if defined PEDRIVERS_FOLDER (&amp;echo:call :print ^"Adding drivers from $WinPEDriver$ folder to new installation^")</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
-					<!-- Injects the $WinPEDriver$ drivers into the offline image, then disables 8.3 short file names on W: and strips the ones already there. -->
+					<!-- Injects the $WinPEDriver$ drivers into the offline image, then closes the block. -->
 					<Order>28</Order>
-					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:dism.exe /Add-Driver /Image:W:\ /Driver:^"^%PEDRIVERS_FOLDER^%^" /Recurse&amp;echo:^)&amp;echo:call :print ^"Disabling 8.3 file names^"&amp;echo:fsutil.exe 8dot3name set W: 1&amp;echo:fsutil.exe 8dot3name strip /s /f W:\)</Path>
-				</RunSynchronousCommand>
-				<RunSynchronousCommand wcm:action="add">
-					<!-- Loads the offline SYSTEM hive and sets NtfsDisable8dot3NameCreation=1 so the change sticks in the installed OS. -->
-					<Order>29</Order>
-					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:reg.exe LOAD HKLM\mount W:\Windows\System32\config\SYSTEM&amp;echo:reg.exe ADD HKLM\mount\ControlSet001\Control\FileSystem /v NtfsDisable8dot3NameCreation /t REG_DWORD /d 1 /f&amp;echo:reg.exe UNLOAD HKLM\mount)</Path>
+					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:dism.exe /Add-Driver /Image:W:\ /Driver:^"^%PEDRIVERS_FOLDER^%^" /Recurse&amp;echo:^))</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
 					<!-- Loads the offline SOFTWARE hive to set the device setup region. -->
-					<Order>30</Order>
+					<Order>29</Order>
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:call :print ^"Setting device setup region to United States (GeoID 244^)^"&amp;echo:reg.exe LOAD HKLM\mount W:\Windows\System32\config\SOFTWARE)</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
 					<!-- Writes DeviceRegion 244 (United States), unloads the hive, and announces the reboot. -->
-					<Order>31</Order>
+					<Order>30</Order>
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:reg.exe ADD ^"HKLM\mount\Microsoft\Windows\CurrentVersion\Control Panel\DeviceRegion^" /v DeviceRegion /t REG_DWORD /d 244 /f&amp;echo:reg.exe UNLOAD HKLM\mount&amp;echo:call :print ^"Computer will now reboot^")</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
 					<!-- Reboots into the freshly applied Windows, then defines the :fail (show error and stop) and :print (banner message) subroutines used above. -->
-					<Order>32</Order>
+					<Order>31</Order>
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:wpeutil.exe reboot&amp;echo:goto :eof&amp;echo::fail&amp;echo:echo:&amp;echo:echo:Fatal error: ^%~1&amp;echo:echo:&amp;echo:pause&amp;echo:exit 1&amp;echo::print&amp;echo:echo:&amp;echo:echo:*** ^%~1 ***&amp;echo:echo:&amp;echo:goto :eof)</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
 					<!-- pe.cmd is now complete: run it. Everything above only wrote the file, this line performs the installation. -->
-					<Order>33</Order>
+					<Order>32</Order>
 					<Path>cmd.exe /c "X:\pe.cmd"</Path>
 				</RunSynchronousCommand>
 			</RunSynchronous>
 		</component>
 	</settings>
-	<!-- generalize: only used when an image is sysprepped for capture. Empty here. -->
+	<!--
+		generalize: intentionally empty.
+
+		FirstLogon.ps1 deletes C:\Windows\Panther\unattend.xml, so sysprep /generalize never reads this
+		file and falls back to its own defaults: device installs are not persisted and non-present devices
+		are cleaned up, which is exactly right for an image going to mixed hardware. Do not add
+		PersistAllDeviceInstalls here unless every target is hardware-identical to the reference machine.
+	-->
 	<settings pass="generalize"></settings>
 
 	<!-- specialize: first boot of the installed OS, before any user logs on. Machine wide settings go here. -->
@@ -272,15 +338,18 @@
 		</component>
 		<component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
 			<UserAccounts>
-				<!-- SECURITY: the built in Administrator password is stored in clear text here and stays readable on the
-				     installed system until FirstLogon.ps1 deletes the answer file. Anyone who can read the ISO or the
-				     C:\Windows\Panther copy can recover it. Lab use only; change it after install. -->
+				<!-- SECURITY: build credential only. Plain text here, and the hash survives sysprep /generalize.
+				     sysprep /oobe disables the built-in Administrator, so a deployed machine is not directly
+				     exposed, but anything that re-enables the account without setting a new password inherits
+				     this. Change it here and set a real one in the deployment answer file. -->
 				<AdministratorPassword>
 					<Value>Password123</Value>
 					<PlainText>true</PlainText>
 				</AdministratorPassword>
 			</UserAccounts>
-			<!-- Signs in as Administrator automatically exactly once, so FirstLogonCommands can run unattended. -->
+			<!-- Signs in as Administrator automatically exactly once, so FirstLogonCommands can run unattended,
+			     and so the machine is sitting at a desktop ready for you to install software before sealing.
+			     No additional local accounts are created: extra profiles only complicate the capture. -->
 			<AutoLogon>
 				<Username>Administrator</Username>
 				<Enabled>true</Enabled>
@@ -295,7 +364,7 @@
 				<ProtectYourPC>1</ProtectYourPC>
 				<HideEULAPage>true</HideEULAPage>
 				<HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
-				<HideOnlineAccountScreens>false</HideOnlineAccountScreens>
+				<HideOnlineAccountScreens>true</HideOnlineAccountScreens>
 			</OOBE>
 			<!-- Runs at the first interactive logon, after specialize. See FirstLogon.ps1 near the bottom of this file. -->
 			<FirstLogonCommands>
@@ -312,7 +381,7 @@
 		<File> elements and writes each one to the path in its 'path' attribute.
 	-->
 	<Extensions xmlns="https://schneegans.de/windows/unattend-generator/">
-		<!-- Which version of the generator produced the original file, for reproducibility. -->
+		<!-- Which version of the generator produced the original file this was derived from. -->
 		<Build>
 			<Commit>
 				<Hash>781fde52797f736de9b0426bb4a5c6048a1ae075</Hash>
@@ -337,7 +406,16 @@ foreach( $file in $Document.unattend.Extensions.File ) {
     [System.IO.File]::WriteAllBytes( $path, $bytes );
 }
 		</ExtractScript>
-		<!-- MODIFIED (change 1): installs VMware Tools from the mounted Tools ISO, or downloads it when none is attached. All output is appended to VMwareTools.log. -->
+		<!--
+			Installs VMware Tools from the mounted Tools ISO, or downloads it when none is attached.
+			All output is appended to VMwareTools.log.
+
+			GOLD IMAGE CAVEAT: the download fallback always fetches the current release, so two builds a
+			month apart produce images with different Tools versions. Attach the Tools ISO from your
+			hypervisor if you want the build to be reproducible. Also note that this reaches the internet
+			before you seal; do the rest of your customization offline so Windows Update does not update
+			an inbox app under the current user and break sysprep with 0x80073CF2.
+		-->
 		<File path="C:\Windows\Setup\Scripts\VMwareTools.ps1">
 &amp; {
 	# VMware's documented silent switches: /S for the bootstrapper, /v passes the rest to the MSI.
@@ -403,9 +481,22 @@ foreach( $file in $Document.unattend.Extensions.File ) {
 	}
 } *&gt;&amp;1 | Out-String -Width 1KB -Stream &gt;&gt; 'C:\Windows\Setup\Scripts\VMwareTools.log';
 		</File>
-		<!-- System wide tweaks applied during the specialize pass. Each scriptblock runs in order and is logged to Specialize.log. -->
+		<!--
+			System wide tweaks applied during the specialize pass. Each scriptblock runs in order and is
+			logged to Specialize.log.
+
+			Every setting here is baked into the captured image, because this pass runs once on the reference
+			machine and never again. So anything conditional on the current machine's SMBIOS identity, disk
+			layout or firmware would describe the reference machine rather than the targets, and is avoided.
+
+			The single exception is the idle timeout block, which only decides whether this build machine
+			stays awake. Its result is baked in like everything else, so the deployment answer file is what
+			sets the final power behaviour per target.
+		-->
 		<File path="C:\Windows\Setup\Scripts\Specialize.ps1">
-# Matched on SMBIOS identity rather than HypervisorPresent, which is also true on physical hosts running Hyper-V or VBS.
+# Used by exactly one block below, the idle timeouts, and only to decide whether this BUILD machine
+# should stay awake. Matched on SMBIOS identity rather than HypervisorPresent, which is also true on
+# physical hosts running Hyper-V or VBS.
 $cs = Get-CimInstance -ClassName 'Win32_ComputerSystem';
 $isVirtualMachine = "$($cs.Manufacturer) $($cs.Model)" -match 'virtual|vmware|vbox|kvm|qemu|xen|bochs|parallels';
 
@@ -433,44 +524,42 @@ $scripts = @(
 	};
 	{
 		# Reclaims a hiberfil.sys the size of installed RAM, and turns off Fast Startup with it.
+		# Also keeps hiberfil.sys out of the image you are about to capture.
 		powercfg.exe /hibernate off;
 	};
 	{
-		# A VM that sleeps or blanks mid task is only friction; physical machines sleep normally.
+		# Build-time convenience, not policy: a reference VM that falls asleep mid build is just friction.
+		# Whatever is set here is baked into the capture, so the deployment answer file decides the final
+		# state per target; autounattend-lab-admin.xml restores the defaults on physical hardware.
+		# The active scheme is left alone either way, so nothing forces High Performance onto a laptop.
 		if( $isVirtualMachine ) {
-			powercfg.exe /setactive SCHEME_MIN;
 			powercfg.exe /change standby-timeout-ac 0;
 			powercfg.exe /change monitor-timeout-ac 0;
 			powercfg.exe /change disk-timeout-ac 0;
 		}
 		else {
-			# Reset rather than skip: a gold image built on a reference VM bakes never-sleep timeouts into
-			# the capture, and a laptop deployed from it would otherwise never suspend. Safe on a fresh
-			# install, where nothing has customized power yet, but it does reactivate Balanced.
-			powercfg.exe /restoredefaultschemes;
+			'Physical reference machine ({0} {1}); leaving the power settings alone.' -f $cs.Manufacturer, $cs.Model;
 		}
 	};
 	{
 		# Blocks the suggested app installs (games, trials) that otherwise arrive on first network connect.
-		# Must be set before OOBE completes, which is why it lives in specialize.
+		# Must be set before OOBE completes, which is why it lives in specialize. On a gold image this is
+		# doubly useful: it keeps junk out of the provisioned app set you are about to capture.
 		reg.exe add "HKLM\SOFTWARE\Policies\Microsoft\Windows\CloudContent" /v DisableWindowsConsumerFeatures /t REG_DWORD /d 1 /f;
 		reg.exe add "HKLM\SOFTWARE\Policies\Microsoft\Windows\CloudContent" /v DisableConsumerAccountStateContent /t REG_DWORD /d 1 /f;
 	};
 	{
-		# MODIFIED (change 2): VMs skip automatic BitLocker device encryption, because encrypted guests defeat
-		# block level deduplication on the SAN. Physical machines encrypt as normal.
-		if( $isVirtualMachine ) {
-			reg.exe add "HKLM\SYSTEM\CurrentControlSet\Control\BitLocker" /v "PreventDeviceEncryption" /t REG_DWORD /d 1 /f;
-		}
-		else {
-			# Removed, not just left alone: a gold image sets this during its build to protect the capture, so
-			# a physical machine deployed from one would inherit it and silently never encrypt.
-			Remove-ItemProperty -LiteralPath 'Registry::HKLM\SYSTEM\CurrentControlSet\Control\BitLocker' -Name 'PreventDeviceEncryption' -Force -ErrorAction 'SilentlyContinue';
-			'Physical machine ({0} {1}); automatic device encryption left enabled.' -f $cs.Manufacturer, $cs.Model;
-		}
+		# Set unconditionally, unlike the lab answer file, but only for the duration of the build: the
+		# reference machine must not encrypt itself, because BitLocker on the volume you are about to
+		# capture breaks the capture.
+		#
+		# Remove it before you seal. specialize runs once, here, so it cannot decide this per target, and
+		# an image that carries the value means every physical machine deployed from it silently never
+		# encrypts. SEAL-THIS-IMAGE.txt repeats the command.
+		reg.exe add "HKLM\SYSTEM\CurrentControlSet\Control\BitLocker" /v "PreventDeviceEncryption" /t REG_DWORD /d 1 /f;
 
-		# Set unconditionally, and before any volume is encrypted, so BitLocker uses AES 256 whenever it does run
-		# (automatic device encryption on a physical machine, or someone enabling it by hand later).
+		# Policy only, so it is safe to bake: whenever BitLocker does run on a deployed machine it uses
+		# AES 256 rather than the 128-bit default.
 		# 7 = XTS-AES 256 for the OS and fixed data drives; removable drives get 4 (AES-CBC 256), which older Windows can still read.
 		reg.exe add "HKLM\SOFTWARE\Policies\Microsoft\FVE" /v EncryptionMethodWithXtsOs /t REG_DWORD /d 7 /f;
 		reg.exe add "HKLM\SOFTWARE\Policies\Microsoft\FVE" /v EncryptionMethodWithXtsFdv /t REG_DWORD /d 7 /f;
@@ -499,7 +588,11 @@ $scripts = @(
   }
 } *&gt;&amp;1 | Out-String -Width 1KB -Stream &gt;&gt; "C:\Windows\Setup\Scripts\Specialize.log";
 		</File>
-		<!-- Cleanup and finishing tasks, run once at the first logon and logged to FirstLogon.log. -->
+		<!--
+			Cleanup and finishing tasks, run once at the first logon and logged to FirstLogon.log.
+			Deleting the answer file matters more here than it does in the lab file, because sysprep would
+			otherwise pick it up.
+		-->
 		<File path="C:\Windows\Setup\Scripts\FirstLogon.ps1">
 $scripts = @(
 	{
@@ -507,20 +600,56 @@ $scripts = @(
 		Set-ItemProperty -LiteralPath 'Registry::HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'AutoLogonCount' -Type 'DWord' -Force -Value 0;
 	};
 	{
-		# Install VMware Tools from the mounted ISO or by download.
+		# Install VMware Tools from the mounted ISO or by download. No-op on physical hardware.
 		&amp; 'C:\Windows\Setup\Scripts\VMwareTools.ps1';
 	};
 	{
-		# Remove the leftover previous installation folder.
-		cmd.exe /c "rmdir C:\Windows.old";
+		# Ownership has to be taken first: the tree is owned by TrustedInstaller, so the lab file's plain
+		# "rmdir C:\Windows.old" cannot delete a populated one. Guarded, because a reference machine built
+		# on a wiped disk has no Windows.old at all.
+		if( Test-Path -LiteralPath 'C:\Windows.old' ) {
+			takeown.exe /f 'C:\Windows.old' /r /d y;
+			icacls.exe 'C:\Windows.old' /grant '*S-1-5-32-544:F' /t /c;
+			cmd.exe /c 'rmdir /s /q C:\Windows.old';
+		}
+		else {
+			'No C:\Windows.old on this machine; nothing to remove.';
+		}
 	};
 	{
-		# Delete the answer files, which contain the clear text Administrator password.
+		# Delete the answer files. Two reasons, and the second is the important one here:
+		#  1. they contain the clear text Administrator password;
+		#  2. sysprep /generalize implicitly consumes C:\Windows\Panther\unattend.xml. Left in place, the
+		#     specialize pass above would re-run on every machine deployed from the captured image,
+		#     re-extracting these scripts and carrying that password with it.
 		Remove-Item -LiteralPath @(
 		  'C:\Windows\Panther\unattend.xml';
 		  'C:\Windows\Panther\unattend-original.xml';
-		  'C:\Windows\Setup\Scripts\Wifi.xml';
 		) -Force -ErrorAction 'SilentlyContinue' -Verbose;
+	};
+	{
+		# Leave a short reminder on the desktop of what still has to happen by hand.
+		@(
+		  'GOLD IMAGE BUILD - NOT SEALED YET';
+		  '';
+		  'Remaining steps:';
+		  '  1. Install and configure whatever this image should ship with.';
+		  '  2. Stay off the internet once you are done. Windows Update refreshing an inbox app';
+		  '     for the current user is the usual cause of sysprep failing with 0x80073CF2.';
+		  '  3. Delete the build leftovers in C:\Windows\Setup\Scripts (*.log, Specialize.ps1,';
+		  '     FirstLogon.ps1, VMwareTools.ps1) and this file.';
+		  '  4. Confirm C:\Windows\Panther\unattend.xml is gone.';
+		  '  5. Drop the build-only BitLocker block, so physical machines can encrypt:';
+		  '       reg.exe delete "HKLM\SYSTEM\CurrentControlSet\Control\BitLocker" /v PreventDeviceEncryption /f';
+		  '  6. Seal:  %WINDIR%\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown';
+		  '  7. Capture C: only, not the recovery partition, with DISM /Capture-Image.';
+		  '';
+		  'PreventDeviceEncryption=1 is set right now so the capture cannot be encrypted. Step 5 takes it';
+		  'back out so the image ships neutral: physical machines then encrypt normally, and your';
+		  'deployment answer file sets it again on VMs, where encryption defeats SAN deduplication.';
+		  '';
+		  'If sysprep fails, read C:\Windows\System32\Sysprep\Panther\setupact.log.';
+		) | Set-Content -LiteralPath 'C:\Users\Public\Desktop\SEAL-THIS-IMAGE.txt' -Encoding 'UTF8' -Force;
 	};
 );
 
