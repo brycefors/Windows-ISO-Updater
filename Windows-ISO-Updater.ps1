@@ -1943,7 +1943,12 @@ $FeatureName = if ($ImageBuild) { Get-FeatureUpdateName -Build $ImageBuild } els
 $ImageArch = switch ($ImageInfo.Architecture) { 0 { 'x86' } 9 { 'x64' } 12 { 'arm64' } default { $WinInfo.Architecture } }
 $CatalogArch = switch ($ImageArch) { 'x64' { 'x64' } 'arm64' { 'ARM64' } 'x86' { 'x86' } default { 'x64' } }
 
-Write-HostTimestamp "Image build    : $($ImageInfo.Version)$(if ($ImageUbr) { ".$ImageUbr" })$(if ($FeatureName) { " ($FeatureName)" })"
+# Version is usually already 4-part (10.0.26200.9168), but is 3-part on some media, so only add the UBR
+# when it is missing.
+$ImageVersionText = "$($ImageInfo.Version)"
+if ($ImageUbr -and $ImageVersionText -match '^\d+\.\d+\.\d+$') { $ImageVersionText = "$ImageVersionText.$ImageUbr" }
+
+Write-HostTimestamp "Image build    : $ImageVersionText$(if ($FeatureName) { " ($FeatureName)" })"
 Write-HostTimestamp "Image arch     : $ImageArch"
 Write-Host $LineBreak
 
