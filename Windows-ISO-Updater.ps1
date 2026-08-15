@@ -1811,11 +1811,35 @@ $InstallEsdExtracted = Join-Path $ExtractDir 'sources\install.esd'
 $BootWim = Join-Path $ExtractDir 'sources\boot.wim'
 
 # If the media ships install.esd (compressed), convert it to an editable install.wim so DISM can service
-# it. Servicing is done against a WIM; the ESD is a delivery-only format.
+# it. Servicing is done against a WIM; the ESD is a delivery-only format. Only the editions that will
+# survive into the final ISO are exported - each one costs several minutes, so exporting the rest just to
+# delete them later is wasted time.
+$script:EsdPreTrimmed = $false
 if (-not (Test-Path -LiteralPath $InstallWimExtracted) -and (Test-Path -LiteralPath $InstallEsdExtracted)) {
     Invoke-Task -Description 'The media uses install.esd - converting it to an editable install.wim...' -ScriptBlock {
-        $Images = Get-WindowsImage -ImagePath $InstallEsdExtracted -ErrorAction Stop
-        foreach ($Img in $Images) {
+        $Images = @(Get-WindowsImage -ImagePath $InstallEsdExtracted -ErrorAction Stop)
+        $Wanted = @($Images.ImageIndex)
+        if ($KeepEditions -and $KeepEditions.Count -gt 0) {
+            $EsdUnmatched = $null
+            $Resolved = @(Resolve-EditionIndexes -Images $Images -Tokens $KeepEditions -Unmatched ([ref]$EsdUnmatched))
+            # Anything unmatched is reported (and aborts the run) by the edition resolution further down.
+            if ($Resolved.Count -gt 0 -and -not $EsdUnmatched) { $Wanted = $Resolved }
+        }
+        elseif (-not $KeepAllEditions -and $Images.Count -gt 1) {
+            $Top = $Images |
+                Sort-Object @{ Expression = { Get-EditionRank $_.ImageName }; Descending = $true },
+                @{ Expression = { "$($_.ImageName)".Length } },
+                @{ Expression = { [int]$_.ImageIndex } } |
+                Select-Object -First 1
+            $Wanted = @([int]$Top.ImageIndex)
+        }
+
+        $Skipped = @($Images | Where-Object { $Wanted -notcontains [int]$_.ImageIndex })
+        if ($Skipped.Count -gt 0) {
+            Write-HostTimestamp "  Not exporting $($Skipped.Count) edition(s) that would only be removed again: $(($Skipped.ImageName) -join ', ')" -ForegroundColor Yellow
+            $script:EsdPreTrimmed = $true
+        }
+        foreach ($Img in @($Images | Where-Object { $Wanted -contains [int]$_.ImageIndex })) {
             Write-HostTimestamp "  Exporting index $($Img.ImageIndex): $($Img.ImageName) ..."
             Export-WindowsImage -SourceImagePath $InstallEsdExtracted -SourceIndex $Img.ImageIndex -DestinationImagePath $InstallWimExtracted -CompressionType Max -ErrorAction Stop | Out-Null
         }
@@ -1946,7 +1970,13 @@ $InstallImages = @(Get-WindowsImage -ImagePath $InstallWimExtracted -ErrorAction
 #   * default               : keep only the single highest edition (e.g. Pro over Home) to speed up
 #                             servicing and shrink the ISO.
 $KeepIndexes = @($InstallImages.ImageIndex)
-if ($KeepEditions -and $KeepEditions.Count -gt 0) {
+if ($script:EsdPreTrimmed) {
+    # The ESD conversion already exported only the editions to keep, and dropping editions renumbers the
+    # indexes, so re-resolving the same tokens against this WIM would not line up.
+    Write-HostTimestamp "Keeping the $($InstallImages.Count) edition(s) exported from install.esd: $(($InstallImages.ImageName) -join ', ')" -ForegroundColor Cyan
+    Write-Host $LineBreak
+}
+elseif ($KeepEditions -and $KeepEditions.Count -gt 0) {
     $KeepUnmatched = $null
     $KeepIndexes = @(Resolve-EditionIndexes -Images $InstallImages -Tokens $KeepEditions -Unmatched ([ref]$KeepUnmatched))
     if ($KeepUnmatched -and $KeepUnmatched.Count -gt 0) {
@@ -1988,7 +2018,8 @@ elseif ($InstallImages.Count -gt 1) {
 $TrimNeeded = ($KeepIndexes.Count -lt $InstallImages.Count)
 
 # Which of the kept editions to actually service (apply updates to). -Edition narrows this further.
-if ($Edition -eq 'All') {
+# Index numbers cannot be honoured after an ESD pre-trim renumbered them, so everything kept is serviced.
+if ($Edition -eq 'All' -or ($script:EsdPreTrimmed -and $Edition -match '^\d+$')) {
     $ServiceIndexes = $KeepIndexes
 }
 else {
@@ -2283,7 +2314,7 @@ if ($ResolvedUnattend) {
         if (Test-Path -LiteralPath $UnattendDest) { Set-ItemProperty -LiteralPath $UnattendDest -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue }
         Copy-Item -LiteralPath $ResolvedUnattend -Destination $UnattendDest -Force -ErrorAction Stop
         Write-HostTimestamp '  Added autounattend.xml to the root of the media.' -ForegroundColor Green
-        if ($TrimNeeded -and $UnattendText -match '(?i)/IMAGE/INDEX') {
+        if (($TrimNeeded -or $script:EsdPreTrimmed) -and $UnattendText -match '(?i)/IMAGE/INDEX') {
             Write-HostTimestamp '  Warning: the answer file selects the edition by /IMAGE/INDEX, but install.wim was renumbered when the other editions were removed. Switch it to /IMAGE/NAME, or use -KeepAllEditions, if Setup cannot find the edition.' -ForegroundColor Yellow
         }
     }
