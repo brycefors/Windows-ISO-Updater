@@ -130,8 +130,8 @@ param(
     [Parameter(HelpMessage = 'Override the URL used to download the Media Creation Tool')]
     [string]$MctUrl,
 
-    [Parameter(HelpMessage = 'Edition passed to the Media Creation Tool''s /MediaEdition switch (e.g. Professional, Enterprise, Education). Defaults to Professional')]
-    [string]$MctEdition = 'Professional',
+    [Parameter(HelpMessage = 'Edition passed to the Media Creation Tool''s /MediaEdition switch (e.g. Professional, Enterprise, Education). Left unset by default because that switch makes MCT ask for a product key; unset it builds the usual multi-edition ISO')]
+    [string]$MctEdition,
 
     [Parameter(HelpMessage = 'Language code passed to the Media Creation Tool''s /MediaLangCode switch (e.g. en-US). Derived from -Language when not set')]
     [string]$MctLangCode,
@@ -657,12 +657,21 @@ function Get-IsoViaMct {
 
     $MctArch = switch ($Architecture) { 'arm64' { 'ARM64' } 'x86' { 'x86' } default { 'x64' } }
     $LangCode = Get-MctLanguageCode -Name $Language
-    $MctArgs = @('/Eula', 'Accept', '/Retail', '/MediaArch', $MctArch, '/MediaLangCode', $LangCode, '/MediaEdition', $MctEdition)
+    $MctArgs = @('/Eula', 'Accept', '/Retail', '/MediaArch', $MctArch, '/MediaLangCode', $LangCode)
+    # /MediaEdition makes MCT demand a product key to unlock that single edition, so it stays opt-in.
+    if ($MctEdition) { $MctArgs += @('/MediaEdition', $MctEdition) }
 
     Write-Host ''
     Write-Host 'The Media Creation Tool is about to open with your choices pre-selected:' -ForegroundColor Cyan
-    Write-Host "  Windows $Version, $MctArch, $LangCode, $MctEdition"
+    Write-Host "  Windows $Version, $MctArch, $LangCode, $(if ($MctEdition) { $MctEdition } else { 'all editions' })"
     Write-Host ''
+    if ($MctEdition) {
+        Write-Host 'Because -MctEdition was set, MCT will ask for a product key on its first page. Enter a' -ForegroundColor Yellow
+        Write-Host "generic edition-selection key (Microsoft's published '$MctEdition' key, e.g. Pro is" -ForegroundColor Yellow
+        Write-Host 'VK7JG-NPHTM-C97JM-9MPGT-3V66T), or re-run without -MctEdition to skip that page entirely' -ForegroundColor Yellow
+        Write-Host 'and get the normal multi-edition ISO instead.' -ForegroundColor Yellow
+        Write-Host ''
+    }
     Write-Host 'It cannot be automated any further - Microsoft provides no switch to pick ISO output or a' -ForegroundColor Yellow
     Write-Host 'save location - so in its window please:' -ForegroundColor Yellow
     Write-Host '  1. Accept the licence terms if prompted.'
@@ -1140,6 +1149,48 @@ function Get-EditionRank {
     return $Rank
 }
 
+# Shortens a WIM edition name ("Windows 11 Pro") to the tag used in the output ISO file name.
+function Get-EditionShortName {
+    param([string]$Name)
+    $n = "$Name".ToLower()
+    if ($n -match 'enterprise') { return 'Ent' }
+    if ($n -match 'education') { return 'Edu' }
+    if ($n -match 'pro') { return 'Pro' }
+    if ($n -match 'home|core') { return 'Home' }
+    $Short = ($Name -replace '(?i)^\s*windows\s*\d+\s*', '') -replace '[^A-Za-z0-9]', ''
+    if ($Short) { return $Short } else { return 'Windows' }
+}
+
+# Builds the default output ISO name, e.g. Win11_Pro_x64_26100.4061_20260815-1332.iso. The build/UBR comes
+# from the serviced image when available (that is the only place the post-update revision is known),
+# otherwise from the source image's version. Several kept editions collapse to "Multi".
+function Get-DefaultIsoName {
+    param(
+        [object[]]$Images,
+        [int[]]$Indexes,
+        [string]$BuildString,
+        [string]$FallbackVersion,
+        [string]$Architecture
+    )
+
+    $Kept = @($Images | Where-Object { $Indexes -contains [int]$_.ImageIndex })
+    $Tags = @($Kept | ForEach-Object { Get-EditionShortName $_.ImageName } | Select-Object -Unique)
+    $EditionTag = if ($Tags.Count -eq 1) { $Tags[0] } elseif ($Tags.Count -gt 1) { 'Multi' } else { 'Windows' }
+
+    $BuildUbr = $null
+    foreach ($Candidate in @($BuildString, $FallbackVersion)) {
+        if ("$Candidate" -match '\b\d+\.\d+\.(\d+)\.(\d+)') { $BuildUbr = "$($Matches[1]).$($Matches[2])"; break }
+    }
+    $BuildNumber = if ("$BuildUbr" -match '^(\d+)') { [int]$Matches[1] } else { 0 }
+    $WindowsTag = if ($BuildNumber -ge 22000) { 'Win11' } elseif ($BuildNumber -gt 0) { 'Win10' } else { 'Windows' }
+
+    $Parts = @($WindowsTag, $EditionTag)
+    if ($Architecture) { $Parts += ($Architecture -replace '[^A-Za-z0-9]', '') }
+    if ($BuildUbr) { $Parts += $BuildUbr }
+    $Parts += (Get-Date -Format 'yyyyMMdd-HHmm')
+    return (($Parts -join '_') + '.iso')
+}
+
 # Ensures a mount directory is clean and ready to receive a fresh WIM mount. A previous run that crashed
 # or was killed can leave an image still mounted (or a corrupt mount point) there, which makes the next
 # Mount-WindowsImage fail. DISM tracks a mount by WIM file + index as well as by directory, so a mount
@@ -1379,7 +1430,7 @@ Write-Host "    DISM mount     : $MountDir"
 Write-Host "  Downloads        : $DlDir"
 if (-not $IsoPath) { Write-Host '                     (drop your own .iso here and it is used instead of downloading one)' -ForegroundColor DarkGray }
 Write-Host "  Logs             : $LogDir"
-Write-Host "  Finished ISO     : $(if ($OutputIsoPath) { $OutputIsoPath } else { Join-Path $DlDir '<source ISO name>-Updated_<date>.iso' })"
+Write-Host "  Finished ISO     : $(if ($OutputIsoPath) { $OutputIsoPath } else { Join-Path $DlDir 'Win11_Pro_x64_<build>.<UBR>_<date-time>.iso' })"
 Write-Host ''
 Write-Host '  Nothing outside these folders is changed. -WorkPath moves all of it; -DownloadPath, -LogPath' -ForegroundColor DarkGray
 Write-Host '  and -OutputIsoPath override the individual folders.' -ForegroundColor DarkGray
@@ -2225,11 +2276,10 @@ if ($ResolvedUnattend) {
 }
 
 # --- Recompile the ISO with oscdimg ---
-# Default the output path to the download folder, naming it after the source ISO with an "-Updated_<date>"
-# suffix so it sits next to the original without overwriting it.
+# Default the output path to the download folder, named after what the ISO actually contains:
+# Win11_Pro_x64_26100.4061_20260815-1332.iso.
 if (-not $OutputIsoPath) {
-    $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($ResolvedIso)
-    $OutputIsoPath = Join-Path -Path $DlDir -ChildPath "$BaseName-Updated_$(Get-Date -Format 'yyyyMMdd').iso"
+    $OutputIsoPath = Join-Path -Path $DlDir -ChildPath (Get-DefaultIsoName -Images $InstallImages -Indexes $KeepIndexes -BuildString $script:FinalBuildString -FallbackVersion $ImageInfo.Version -Architecture $ImageArch)
 }
 # Make sure the destination folder exists before oscdimg writes the ISO into it.
 try {
