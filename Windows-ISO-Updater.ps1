@@ -130,8 +130,11 @@ param(
     [Parameter(HelpMessage = 'Override the URL used to download the Media Creation Tool')]
     [string]$MctUrl,
 
-    [Parameter(HelpMessage = 'Edition passed to the Media Creation Tool''s /MediaEdition switch (e.g. Professional, Enterprise, Education). Left unset by default because that switch makes MCT ask for a product key; unset it builds the usual multi-edition ISO')]
+    [Parameter(HelpMessage = 'Edition passed to the Media Creation Tool''s /MediaEdition switch (e.g. Professional, Enterprise, Education). Only used with -MctPreselect, and it makes MCT ask for a product key')]
     [string]$MctEdition,
+
+    [Parameter(HelpMessage = 'Launch the Media Creation Tool with the architecture/language/edition switches pre-filled. Off by default because driving MCT that way makes it demand a product key')]
+    [switch]$MctPreselect,
 
     [Parameter(HelpMessage = 'Language code passed to the Media Creation Tool''s /MediaLangCode switch (e.g. en-US). Derived from -Language when not set')]
     [string]$MctLangCode,
@@ -620,10 +623,9 @@ function Get-MctLanguageCode {
 }
 
 # Fallback for when Fido cannot get a link (usually because Microsoft's anti-bot check blocked this IP):
-# downloads Microsoft's own Media Creation Tool and launches it with the version, architecture, language
-# and edition already selected. MCT has no switch to choose ISO output or a target path, so it cannot be
-# driven headlessly - the user clicks through the last few pages and saves the ISO into the download
-# folder, which this function then picks up. Returns the ISO path, or $null.
+# downloads Microsoft's own Media Creation Tool and runs it. MCT has no switch to choose ISO output or a
+# target path, so it cannot be driven headlessly - the user clicks through the wizard and saves the ISO
+# into the download folder, which this function then picks up. Returns the ISO path, or $null.
 function Get-IsoViaMct {
     param(
         [Parameter(Mandatory)][string]$Version,        # 10 or 11
@@ -657,28 +659,37 @@ function Get-IsoViaMct {
 
     $MctArch = switch ($Architecture) { 'arm64' { 'ARM64' } 'x86' { 'x86' } default { 'x64' } }
     $LangCode = Get-MctLanguageCode -Name $Language
-    $MctArgs = @('/Eula', 'Accept', '/Retail', '/MediaArch', $MctArch, '/MediaLangCode', $LangCode)
-    # /MediaEdition makes MCT demand a product key to unlock that single edition, so it stays opt-in.
-    if ($MctEdition) { $MctArgs += @('/MediaEdition', $MctEdition) }
+    # Driving MCT with its channel/edition switches puts it in the "enter your product key" flow, so the
+    # plain wizard is used unless -MctPreselect asks for the pre-filled one.
+    $MctArgs = @('/Eula', 'Accept')
+    if ($MctPreselect) {
+        $MctArgs += @('/Retail', '/MediaArch', $MctArch, '/MediaLangCode', $LangCode)
+        if ($MctEdition) { $MctArgs += @('/MediaEdition', $MctEdition) }
+    }
 
     Write-Host ''
-    Write-Host 'The Media Creation Tool is about to open with your choices pre-selected:' -ForegroundColor Cyan
-    Write-Host "  Windows $Version, $MctArch, $LangCode, $(if ($MctEdition) { $MctEdition } else { 'all editions' })"
-    Write-Host ''
-    if ($MctEdition) {
-        Write-Host 'Because -MctEdition was set, MCT will ask for a product key on its first page. Enter a' -ForegroundColor Yellow
-        Write-Host "generic edition-selection key (Microsoft's published '$MctEdition' key, e.g. Pro is" -ForegroundColor Yellow
-        Write-Host 'VK7JG-NPHTM-C97JM-9MPGT-3V66T), or re-run without -MctEdition to skip that page entirely' -ForegroundColor Yellow
-        Write-Host 'and get the normal multi-edition ISO instead.' -ForegroundColor Yellow
+    if ($MctPreselect) {
+        Write-Host 'The Media Creation Tool is about to open with your choices pre-selected:' -ForegroundColor Cyan
+        Write-Host "  Windows $Version, $MctArch, $LangCode, $(if ($MctEdition) { $MctEdition } else { 'all editions' })"
+        Write-Host ''
+        Write-Host 'If it asks for a product key, enter one of Microsoft''s published generic edition-selection' -ForegroundColor Yellow
+        Write-Host 'keys (Pro is VK7JG-NPHTM-C97JM-9MPGT-3V66T), or re-run without -MctPreselect to get the' -ForegroundColor Yellow
+        Write-Host 'ordinary wizard, which never asks for one.' -ForegroundColor Yellow
+        Write-Host ''
+    }
+    else {
+        Write-Host 'The Media Creation Tool is about to open. Asked for these in its window:' -ForegroundColor Cyan
+        Write-Host "  Windows $Version, $MctArch, $LangCode, all editions"
         Write-Host ''
     }
     Write-Host 'It cannot be automated any further - Microsoft provides no switch to pick ISO output or a' -ForegroundColor Yellow
     Write-Host 'save location - so in its window please:' -ForegroundColor Yellow
     Write-Host '  1. Accept the licence terms if prompted.'
     Write-Host '  2. Choose "Create installation media (USB flash drive, DVD, or ISO file) for another PC".'
-    Write-Host '  3. Choose "ISO file".'
-    Write-Host "  4. Save it into this folder: $DownloadDir" -ForegroundColor Green
-    Write-Host '  5. Let the download finish, then click Finish.'
+    Write-Host "  3. Set the language and architecture ($LangCode, $MctArch), or leave the recommended options ticked."
+    Write-Host '  4. Choose "ISO file".'
+    Write-Host "  5. Save it into this folder: $DownloadDir" -ForegroundColor Green
+    Write-Host '  6. Let the download finish, then click Finish.'
     Write-Host ''
     Write-Host 'This script waits until the Media Creation Tool closes, then continues on its own.' -ForegroundColor Cyan
     Write-Host ''
