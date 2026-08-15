@@ -103,7 +103,7 @@ param(
     [Parameter(HelpMessage = 'Working folder used to extract and service the media. Must be on a fast drive with lots of free space. Defaults to <SystemDrive>\WISO-Work')]
     [string]$WorkPath,
 
-    [Parameter(HelpMessage = 'Full path for the recompiled ISO. Defaults to the download folder with an "-Updated" suffix')]
+    [Parameter(HelpMessage = 'Full path for the recompiled ISO. Defaults to an auto-generated name in the Output folder under the working folder')]
     [string]$OutputIsoPath,
 
     [Parameter(HelpMessage = 'Full path to oscdimg.exe if the Windows ADK is installed in a non-standard location')]
@@ -214,6 +214,8 @@ $OscdimgLocalPath = Join-Path -Path $WorkRoot -ChildPath 'Tools\oscdimg.exe'
 # drive (this repo, for example, lives under a Google Drive "My Drive" path).
 $DlDir      = if ($DownloadPath) { $DownloadPath } else { Join-Path -Path $WorkRoot -ChildPath 'Downloads' }
 $LogDirWanted = if ($LogPath) { $LogPath } else { Join-Path -Path $WorkRoot -ChildPath 'Logs' }
+# The finished ISO gets its own folder so it is never mistaken for a source ISO sitting in Downloads.
+$FinishedIsoDir = Join-Path -Path $WorkRoot -ChildPath 'Output'
 
 # --- Start Logging ---
 # Create the log folder, falling back to the script folder if it cannot be used.
@@ -1442,7 +1444,7 @@ Write-Host "    DISM mount     : $MountDir"
 Write-Host "  Downloads        : $DlDir"
 if (-not $IsoPath) { Write-Host '                     (drop your own .iso here and it is used instead of downloading one)' -ForegroundColor DarkGray }
 Write-Host "  Logs             : $LogDir"
-Write-Host "  Finished ISO     : $(if ($OutputIsoPath) { $OutputIsoPath } else { Join-Path $DlDir 'Win11_Pro_x64_<build>.<UBR>_<date-time>.iso' })"
+Write-Host "  Finished ISO     : $(if ($OutputIsoPath) { $OutputIsoPath } else { Join-Path $FinishedIsoDir 'Win11_Pro_x64_<build>.<UBR>_<date-time>.iso' })"
 Write-Host ''
 Write-Host '  Nothing outside these folders is changed. -WorkPath moves all of it; -DownloadPath, -LogPath' -ForegroundColor DarkGray
 Write-Host '  and -OutputIsoPath override the individual folders.' -ForegroundColor DarkGray
@@ -2289,10 +2291,10 @@ if ($ResolvedUnattend) {
 }
 
 # --- Recompile the ISO with oscdimg ---
-# Default the output path to the download folder, named after what the ISO actually contains:
+# Default the output path to the finished-ISO folder, named after what the ISO actually contains:
 # Win11_Pro_x64_26100.4061_20260815-1332.iso.
 if (-not $OutputIsoPath) {
-    $OutputIsoPath = Join-Path -Path $DlDir -ChildPath (Get-DefaultIsoName -Images $InstallImages -Indexes $KeepIndexes -BuildString $script:FinalBuildString -FallbackVersion $ImageInfo.Version -Architecture $ImageArch)
+    $OutputIsoPath = Join-Path -Path $FinishedIsoDir -ChildPath (Get-DefaultIsoName -Images $InstallImages -Indexes $KeepIndexes -BuildString $script:FinalBuildString -FallbackVersion $ImageInfo.Version -Architecture $ImageArch)
 }
 # Make sure the destination folder exists before oscdimg writes the ISO into it.
 try {

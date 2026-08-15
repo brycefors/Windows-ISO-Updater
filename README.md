@@ -121,7 +121,7 @@ The script supports the following optional parameters:
 | `-UnattendPath` | Path to an unattended answer file to place on the finished ISO as `\autounattend.xml`, so Windows Setup runs without prompting. |
 | `-DownloadPath` | Directory to download the ISO/updates into. Defaults to the script folder. |
 | `-WorkPath` | Working folder used to extract and service the media. Defaults to `<SystemDrive>\WISO-Work`. |
-| `-OutputIsoPath` | Full path for the recompiled ISO. Defaults to the download folder, named after the contents and the patched build, e.g. `Win11_Pro_x64_26100.4061_20260815-1332.iso`. |
+| `-OutputIsoPath` | Full path for the recompiled ISO. Defaults to the `Output\` folder under the working folder, named after the contents and the patched build, e.g. `Win11_Pro_x64_26100.4061_20260815-1332.iso`. |
 | `-OscdimgPath` | Full path to `oscdimg.exe` if the Windows ADK is installed in a non-standard location. |
 | `-SkipOscdimgDownload` | Do not download a standalone `oscdimg.exe` from Microsoft's symbol server; require the Windows ADK instead. |
 | `-InstallAdk` | If `oscdimg.exe` is not found and cannot be downloaded, download and silently install the ADK Deployment Tools from Microsoft. |
@@ -225,11 +225,12 @@ Everything the script writes lives under a single working folder, which defaults
 C:\WISO-Work\              <- -WorkPath (moves everything below it)
   ISO\                     <- extracted media, deleted when the build finishes
   Mount\                   <- DISM mount point
-  Downloads\               <- -DownloadPath (source ISO, updates, and the finished ISO)
+  Downloads\               <- -DownloadPath (source ISO and updates)
+  Output\                  <- the finished ISO (-OutputIsoPath overrides it)
   Logs\                    <- -LogPath
 ```
 
-Dropping your own `.iso` into `Downloads\` is all it takes to skip the Microsoft download — no `-IsoPath` needed. `-DownloadPath`, `-LogPath` and `-OutputIsoPath` override the individual folders if you want them elsewhere. Nothing outside these folders is changed — all servicing happens against files in the working folder, never against the running system.
+Dropping your own `.iso` into `Downloads\` is all it takes to skip the Microsoft download — no `-IsoPath` needed. The finished ISO is written to `Output\` instead, so a previous build is never picked up as the source for the next one. `-DownloadPath`, `-LogPath` and `-OutputIsoPath` override the individual folders if you want them elsewhere. Nothing outside these folders is changed — all servicing happens against files in the working folder, never against the running system.
 
 ## Logging
 
