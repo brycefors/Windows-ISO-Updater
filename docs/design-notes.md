@@ -46,3 +46,26 @@ So they stay a post-install task. Left alone, Windows Update installs them on it
 - Stop the removal tool being offered at all, if you consider Defender sufficient, by setting `DontOfferThroughWUAU` to `1` under `HKLM\SOFTWARE\Policies\Microsoft\MRT`.
 
 Neither is worth doing in a gold image before sealing: definitions age out while the image sits in storage, so run them at deployment instead.
+
+## Why Not Re-Update an ISO This Script Built
+
+Feeding last month's output back in as next month's input looks like it should save time. It doesn't, and it costs you things that are hard to get back. **Keep the original Microsoft ISO and rebuild from it every time.**
+
+The saving isn't real. Cumulative updates are cumulative, so applying October's LCU to pristine media does the same work as applying it to media patched in September. It is one package either way, of roughly the same size, and every expensive step is identical: extraction, the DISM mount, `/Add-Package`, the `/ResetBase` component cleanup, `Export-WindowsImage` and `oscdimg`. The only step chaining skips is downloading the ISO, which you already skip by keeping the source on disk and passing `-IsoPath`.
+
+What it breaks:
+
+- **The rebuild-avoidance model.** [`Test-RebuildNeeded`](scheduled-runs.md#when-a-run-decides-to-rebuild) keys on the source ISO's SHA-256. Every build produces a new output with a new hash, so if that output becomes the next input, the source never matches the stamp, every scheduled run rebuilds, and `-CheckOnly` always reports that a rebuild is needed.
+- **Failures compound silently.** When a package won't apply, the script warns that the edition *"kept its original patch level"* and finishes the ISO anyway. Against pristine media that is one build you throw away. In a chain, that image becomes the base for every build after it and the drift is invisible.
+- **Some choices can't be undone.** Editions dropped in one build are gone from every descendant, so you could not get Home back without starting over. Media built with `-CompressEsd` cannot be serviced again at all, because recovery-compressed images are not mountable for servicing.
+
+Component store growth, the one argument that would favour a fresh base, is already handled: each serviced edition gets `/Cleanup-Image /StartComponentCleanup /ResetBase`, so superseded components are stripped rather than accumulating build over build.
+
+The intended setup is a pristine ISO kept somewhere permanent, with its own working folder:
+
+```shell
+.\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -Schedule PatchTuesday -AutoClean ^
+  -IsoPath "D:\ISOs\Win11_24H2_original.iso" -WorkPath "D:\WISO\Win11"
+```
+
+`-AutoClean` prunes old outputs and superseded update packages on its own, and because it only deletes files a stamp recorded, the source ISO is never touched.
