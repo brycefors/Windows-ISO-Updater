@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.10   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.11   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -228,7 +228,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.10'
+$ScriptVersion = '2026.08.16.11'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2493,10 +2493,21 @@ foreach ($Dir in @($WorkRoot, $DlDir)) {
     }
 }
 
-Write-HostTimestamp "Architecture   : $($WinInfo.Architecture)"
-if ($Server) { Write-HostTimestamp 'Target         : Windows Server (whatever release the ISO you supply contains)' }
-else { Write-HostTimestamp "Target         : Windows $WindowsVersion ($Release, $Language)" }
-Write-Host $LineBreak
+# These two lines describe the download request, so they are misleading once a local ISO exists: it
+# decides the architecture and release, not the host or the parameters.
+$LocalIsoAvailable = if ($IsoPath) {
+    [bool]((Test-Path -LiteralPath $IsoPath -PathType Leaf) -or
+        ((Test-Path -LiteralPath $IsoPath -PathType Container) -and (Find-LargestIso -Directory $IsoPath)))
+}
+else {
+    [bool](Find-LargestIso -Directory $DlDir)
+}
+if (-not $LocalIsoAvailable) {
+    Write-HostTimestamp "Architecture   : $($WinInfo.Architecture)"
+    if ($Server) { Write-HostTimestamp 'Target         : Windows Server (whatever release the ISO you supply contains)' }
+    else { Write-HostTimestamp "Target         : Windows $WindowsVersion ($Release, $Language)" }
+    Write-Host $LineBreak
+}
 Write-Host 'Everything this run writes goes under the working folder:' -ForegroundColor Cyan
 Write-Host "  Working folder   : $WorkRoot"
 Write-Host "    Extracted media: $ExtractDir"
