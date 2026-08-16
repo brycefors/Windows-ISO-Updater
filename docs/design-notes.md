@@ -2,6 +2,22 @@
 
 # Design Notes
 
+## Why This Exists
+
+The slowest part of standing up a new Windows machine is not the install. Setup itself finishes in minutes. What takes the rest of the afternoon is the first trip through Windows Update, where a cumulative update that is months behind gets downloaded, staged, installed and rebooted through, while you sit and watch. Do that on one machine and it is an annoyance. Do it on a lab, a classroom or a rack of hosts and it is the whole day.
+
+The updates can obviously wait until later, and often they are told to. That still breaks the thing that matters, which is getting a production-ready system in front of someone quickly. A machine that is installed but not yet patched is not finished. It cannot be handed over, it cannot be imaged from, and it will pick its own moment to reboot. The work is not gone, it is just deferred to a worse time.
+
+Skipping the updates outright is worse still, and how much worse depends entirely on how old the source media is. A months-old ISO is missing every fix published since it was cut, so the machine is exposed for as long as it stays that way. Age also causes plain compatibility trouble. Older media can be missing the servicing stack a current update expects, which is what `0x800F0823` means when it appears, and driver and feature support that shipped in later revisions is simply not there yet.
+
+Slipstreaming the update into the media instead moves all of that work to a machine that has time for it. The install starts already patched, and the hour it used to cost happens once, on the build machine, rather than once per deployment.
+
+There are two more wins that come along for free.
+
+**The image is a real `install.wim` again.** Where you get the ISO decides what compression it uses. The Media Creation Tool and most consumer download routes hand you `install.esd`, which is LZMS "recovery" compressed. It is much smaller on disk, but every byte has to be decompressed during apply, and that is CPU-bound work that makes Setup noticeably slower on modest hardware. This script converts `install.esd` to an editable `install.wim` before it services anything, and writes an `install.wim` back out by default, so the finished media applies faster than what you started with. `-CompressEsd` is there if you would rather have the small file, which is mostly useful for getting under the 4 GB FAT32 limit on a UEFI USB stick.
+
+**The ISO carries only the editions you actually deploy.** Retail media ships eleven or so editions you will never install, and all of them are paid for in size and in the length of the edition-picker during Setup. By default the build keeps the top edition plus Home on client media, or a single edition on Server, and `-KeepEditions` lets you name exactly what stays. Between that and the component-store cleanup, the output is usually smaller than the source despite carrying months of extra updates.
+
 ## Why the ISO Has to Come From You
 
 The script does not download a Windows ISO on its own. You pass one with `-IsoPath` or drop one into the download folder, and if neither is there the run stops and tells you so. The automatic download exists, but it is opt-in behind `-UseFido`, and that is deliberate.
