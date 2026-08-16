@@ -32,7 +32,7 @@ pass your own:
 
 | Page | Contents |
 |---|---|
-| [Usage](docs/usage.md) | Running the script, command-line examples, Windows Server media, slimming the ISO by removing editions, adding drivers, and building several Windows versions side by side. |
+| [Usage](docs/usage.md) | Running the script, command-line examples, Windows Server media, slimming the ISO by removing editions, adding drivers and your own files, and building several Windows versions side by side. |
 | [Command-Line Parameters](docs/parameters.md) | Every parameter and what it does. |
 | [Scheduled Runs](docs/scheduled-runs.md) | Running this from a scheduled task: build stamps, skipping runs that would change nothing, and `-AutoClean` housekeeping. |
 | [Unattended Installs](docs/unattended-installs.md) | `-UnattendPath`, plus two worked answer files: a no-OOBE lab machine and a sysprep gold image. |

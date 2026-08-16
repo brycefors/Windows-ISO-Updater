@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.25   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.26   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -41,7 +41,8 @@
 #      with the Windows ADK), preserving both the BIOS and
 #      UEFI boot sectors so the new ISO boots on legacy and modern PCs alike. An answer file supplied with
 #      -UnattendPath is placed at the root of the media as autounattend.xml, which Windows Setup reads
-#      automatically when the ISO is booted. A \WISO-Build folder is also written onto the media (turn it
+#      automatically when the ISO is booted, and -ExtraFilesPath copies a folder of your own files onto
+#      the media, reporting anything it replaces. A \WISO-Build folder is also written onto the media (turn it
 #      off with -SkipTattoo) recording what the ISO was made from, which updates applied or failed, what
 #      was kept and stripped, who built it and when, plus a copy of the script that built it.
 #   7. Records a "stamp" of the finished build (the source ISO's hash, the updates that went in, the
@@ -120,6 +121,9 @@ param(
 
     [Parameter(HelpMessage = 'Inject drivers even when they are unsigned or signed by a certificate the image does not trust. Off by default. 64-bit Windows refuses to load an unsigned driver at boot unless test signing is enabled, so this is only useful for drivers whose certificate is added separately')]
     [switch]$AllowUnsignedDrivers,
+
+    [Parameter(HelpMessage = 'Folder whose contents are copied onto the root of the finished ISO, keeping the folder structure. Files that land on top of something the media already has are reported individually')]
+    [string]$ExtraFilesPath,
 
     [Parameter(HelpMessage = 'Do not tattoo the finished ISO. By default a \WISO-Build folder is added to the media recording what this build was made from, which updates applied or failed, what was kept and stripped, who built it and when, plus a copy of the script that made it')]
     [switch]$SkipTattoo,
@@ -245,7 +249,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.25'
+$ScriptVersion = '2026.08.16.26'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -373,6 +377,11 @@ $script:TattooResidueFound = New-Object System.Collections.Generic.List[string]
 # The -DriverPath set, resolved once during validation and reused by every image the run services.
 $script:DriverInfFiles = @()
 $script:DriverHash     = $null
+# Filled in while -ExtraFilesPath is copied, because by tattoo time the media already looks merged.
+$script:ExtraFilesHash      = $null
+$script:ExtraFilesCopied    = 0
+$script:ExtraFileRecords    = @()
+$script:ExtraFileOverwrites = New-Object System.Collections.Generic.List[string]
 
 function Get-TimeStamp {
     return (Get-Date -Format '[MM/dd/yyyy|HH:mm:ss]')
@@ -1206,17 +1215,29 @@ function Get-TextSha256 {
     finally { $Sha.Dispose() }
 }
 
+# Path, size and SHA-256 of every file under a folder, sorted, with the path relative to the folder itself.
+# Hashing is the expensive part, so the records are produced once and then used both to decide whether the
+# folder changed since the last build and to list what actually went onto the media.
+function Get-FolderFileRecords {
+    param([Parameter(Mandatory)][string]$Path)
+    $Root = (Resolve-Path -LiteralPath $Path).Path.TrimEnd('\')
+    $Records = New-Object System.Collections.Generic.List[object]
+    $Files = @(Get-ChildItem -LiteralPath $Root -File -Recurse -Force -ErrorAction SilentlyContinue | Sort-Object -Property FullName)
+    foreach ($File in $Files) {
+        [void]$Records.Add([ordered]@{
+                Path   = $File.FullName.Substring($Root.Length)
+                SizeKB = [math]::Round($File.Length / 1KB, 2)
+                Sha256 = Get-Sha256 -Path $File.FullName
+            })
+    }
+    return $Records.ToArray()
+}
+
 # One hash covering every file under a folder, so swapping a driver for a newer one forces a rebuild even
 # though the folder path never changed.
 function Get-FolderContentHash {
-    param([Parameter(Mandatory)][string]$Path)
-    $Root = (Resolve-Path -LiteralPath $Path).Path.TrimEnd('\')
-    $Parts = New-Object System.Collections.Generic.List[string]
-    $Files = @(Get-ChildItem -LiteralPath $Root -File -Recurse -Force -ErrorAction SilentlyContinue | Sort-Object -Property FullName)
-    foreach ($File in $Files) {
-        $Relative = $File.FullName.Substring($Root.Length).TrimStart('\').ToLowerInvariant()
-        [void]$Parts.Add("$Relative=$(Get-Sha256 -Path $File.FullName)")
-    }
+    param([AllowEmptyCollection()][object[]]$Records)
+    $Parts = @($Records | ForEach-Object { "$($_.Path.TrimStart('\').ToLowerInvariant())=$($_.Sha256)" })
     return (Get-TextSha256 -Text ($Parts -join '|'))
 }
 
@@ -1255,7 +1276,7 @@ function Get-UpdateFileRecords {
 $script:BuildAffectingParameters = @(
     'WindowsVersion', 'Server', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
     'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'SkipUpdates', 'CompressEsd', 'VolumeLabel',
-    'SkipTattoo', 'StripImageResidue', 'DriverPath', 'AllowUnsignedDrivers'
+    'SkipTattoo', 'StripImageResidue', 'DriverPath', 'AllowUnsignedDrivers', 'ExtraFilesPath'
 )
 
 # Flattens those parameters (current values, not just the ones that were passed) into comparable text.
@@ -1274,6 +1295,7 @@ function Get-BuildParameterSet {
     $Set['Unattend'] = if ($script:UnattendHash) { $script:UnattendHash } else { '' }
     # Same for the drivers, which are injected into the images rather than copied onto the media.
     $Set['Drivers'] = if ($script:DriverHash) { $script:DriverHash } else { '' }
+    $Set['ExtraFiles'] = if ($script:ExtraFilesHash) { $script:ExtraFilesHash } else { '' }
     return $Set
 }
 
@@ -3196,7 +3218,7 @@ if ($DriverPath) {
     }
     # Hashed for the build stamp: dropping a newer driver in has to force a rebuild even though the path
     # never changed.
-    $script:DriverHash = Get-FolderContentHash -Path $ResolvedDriverPath
+    $script:DriverHash = Get-FolderContentHash -Records @(Get-FolderFileRecords -Path $ResolvedDriverPath)
     $DriverSizeMB = [math]::Round((Get-ChildItem -LiteralPath $ResolvedDriverPath -File -Recurse -Force -ErrorAction SilentlyContinue |
                 Measure-Object -Property Length -Sum).Sum / 1MB, 1)
     Write-HostTimestamp "Drivers        : $($script:DriverInfFiles.Count) .inf package(s) in $ResolvedDriverPath ($DriverSizeMB MB)" -ForegroundColor Green
@@ -3208,6 +3230,29 @@ if ($DriverPath) {
     if ($DriverSizeMB -gt 500) {
         Write-HostTimestamp "  That is a large set to add to boot.wim, which Windows Setup loads into memory. Consider narrowing it to the storage and network drivers Setup actually needs." -ForegroundColor Yellow
     }
+    Write-Host $LineBreak
+}
+
+# --- Validate the extra files folder ---
+$ResolvedExtraFiles = $null
+if ($ExtraFilesPath) {
+    if (-not (Test-Path -LiteralPath $ExtraFilesPath -PathType Container)) {
+        Write-HostTimestamp "The extra files folder '$ExtraFilesPath' does not exist. Cannot continue." -ForegroundColor Red
+        Stop-Transcript | Out-Null
+        exit 1
+    }
+    $ResolvedExtraFiles = (Resolve-Path -LiteralPath $ExtraFilesPath).Path
+    # Hashed and listed here rather than during the copy, so the run is priced and the rebuild decision is
+    # made before anything is extracted.
+    $script:ExtraFileRecords = @(Get-FolderFileRecords -Path $ResolvedExtraFiles)
+    if ($script:ExtraFileRecords.Count -eq 0) {
+        Write-HostTimestamp "The extra files folder '$ResolvedExtraFiles' is empty. Cannot continue." -ForegroundColor Red
+        Stop-Transcript | Out-Null
+        exit 1
+    }
+    $script:ExtraFilesHash = Get-FolderContentHash -Records $script:ExtraFileRecords
+    $ExtraSizeMB = [math]::Round((($script:ExtraFileRecords | Measure-Object -Property SizeKB -Sum).Sum) / 1024, 1)
+    Write-HostTimestamp "Extra files    : $($script:ExtraFileRecords.Count) file(s) in $ResolvedExtraFiles ($ExtraSizeMB MB), copied to the root of the ISO" -ForegroundColor Green
     Write-Host $LineBreak
 }
 
@@ -3272,6 +3317,9 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
     }
     if ($ResolvedUnattend) {
         Write-Host "  - Place your answer file on the media as autounattend.xml, so Setup runs unattended: $ResolvedUnattend" -ForegroundColor Yellow
+    }
+    if ($ResolvedExtraFiles) {
+        Write-Host "  - Copy the contents of $ResolvedExtraFiles onto the root of the ISO, replacing anything the media already had at the same path" -ForegroundColor Yellow
     }
     Write-Host "  - Recompile a new bootable ISO with oscdimg"
     if (-not $NoStamp) {
@@ -4237,6 +4285,70 @@ if ($ResolvedUnattend) {
     Write-Host $LineBreak
 }
 
+# --- Copy the extra files onto the media (-ExtraFilesPath) ---
+# Last of the content steps, so anything here deliberately wins over the media's own copy and over the
+# answer file -UnattendPath just placed.
+if ($ResolvedExtraFiles) {
+    Invoke-Task -Description 'Copying your extra files onto the media...' -ScriptBlock {
+        $Root = $ResolvedExtraFiles.TrimEnd('\')
+        # Validation already hashed every file, so the copy only has to find its record and flag it.
+        $ByPath = @{}
+        foreach ($Record in $script:ExtraFileRecords) { $ByPath[$Record.Path.ToLowerInvariant()] = $Record }
+
+        foreach ($Item in (Get-ChildItem -LiteralPath $Root -Recurse -Force -ErrorAction Stop)) {
+            $Relative = $Item.FullName.Substring($Root.Length).TrimStart('\')
+            $Dest = Join-Path -Path $ExtractDir -ChildPath $Relative
+            if ($Item.PSIsContainer) {
+                if (-not (Test-Path -LiteralPath $Dest)) { New-Item -ItemType Directory -Path $Dest -Force -ErrorAction Stop | Out-Null }
+                continue
+            }
+            $Replaced = Test-Path -LiteralPath $Dest -PathType Leaf
+            if ($Replaced) {
+                [void]$script:ExtraFileOverwrites.Add($Relative)
+                # Files copied off the source ISO are read-only, so Copy-Item -Force alone is not enough.
+                Set-ItemProperty -LiteralPath $Dest -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
+            }
+            Copy-Item -LiteralPath $Item.FullName -Destination $Dest -Force -ErrorAction Stop
+            $script:ExtraFilesCopied++
+
+            $Record = $ByPath["\$($Relative.ToLowerInvariant())"]
+            if ($Record) { $Record['Replaced'] = $Replaced }
+            $SizeKB = if ($Record) { $Record.SizeKB } else { [math]::Round($Item.Length / 1KB, 2) }
+            if ($Replaced) {
+                Write-HostTimestamp "    \$Relative ($SizeKB KB) REPLACED" -ForegroundColor Yellow
+            }
+            else {
+                Write-HostTimestamp "    \$Relative ($SizeKB KB)" -ForegroundColor DarkGray
+            }
+        }
+        Write-HostTimestamp "  Copied $($script:ExtraFilesCopied) file(s) to the root of the media." -ForegroundColor Green
+
+        if ($script:ExtraFileOverwrites.Count -eq 0) {
+            Write-HostTimestamp '  Nothing the media already had was replaced.' -ForegroundColor DarkGray
+            return
+        }
+
+        Write-HostTimestamp "  $($script:ExtraFileOverwrites.Count) of them REPLACED a file the media already had, marked above and listed in the build record." -ForegroundColor Yellow
+
+        # Replacing one of these throws away everything this run just spent an hour producing.
+        $Serviced = @($script:ExtraFileOverwrites | Where-Object { $_ -match '(?i)^sources\\(install|boot)\.(wim|esd)$' })
+        if ($Serviced.Count -gt 0) {
+            Write-HostTimestamp "  WARNING: $($Serviced -join ', ') came from your folder, so the ISO ships YOUR image, not the one this run serviced. The updates and drivers applied above are not in the finished ISO." -ForegroundColor Red
+        }
+        $SetupFiles = @($script:ExtraFileOverwrites | Where-Object { $_ -match '(?i)^(sources\\setup(host)?\.exe|boot\\|efi\\|bootmgr)' })
+        if ($SetupFiles.Count -gt 0) {
+            Write-HostTimestamp '  Warning: boot or Setup files were replaced. Windows Setup fails if those do not match the version inside boot.wim, and the wrong boot sector makes the ISO unbootable.' -ForegroundColor Yellow
+        }
+        if ($script:ExtraFileOverwrites -contains 'autounattend.xml') {
+            Write-HostTimestamp '  Note: autounattend.xml was replaced, so your folder''s copy is on the ISO rather than the one -UnattendPath supplied.' -ForegroundColor Yellow
+        }
+    }
+    if (-not $SkipTattoo -and @($script:ExtraFileOverwrites | Where-Object { $_ -match '(?i)^WISO-Build\\' }).Count -gt 0) {
+        Write-HostTimestamp '  Note: files under \WISO-Build are about to be replaced by the build record. Pass -SkipTattoo to keep yours.' -ForegroundColor Yellow
+    }
+    Write-Host $LineBreak
+}
+
 # --- Decide the output ISO name and volume label ---
 # The name describes what the ISO actually contains: Win11_Pro_x64_26100.4061_20260815-1332.iso. It is
 # built even when -OutputIsoPath overrides the path, because the volume label is derived from it.
@@ -4313,6 +4425,21 @@ if (-not $SkipTattoo) {
                     Signing  = if ($AllowUnsignedDrivers) { 'Unsigned and untrusted drivers accepted (-AllowUnsignedDrivers)' } else { 'Signed drivers only' }
                     Injected = 'Every serviced edition of install.wim, plus boot.wim index 2 (Windows Setup)'
                     Packages = @($script:DriverInfFiles | ForEach-Object { $_.Name })
+                }
+            }
+            else { '' }
+            ExtraFiles  = if ($ResolvedExtraFiles) {
+                [ordered]@{
+                    Source        = $ResolvedExtraFiles
+                    Sha256        = $script:ExtraFilesHash
+                    FileCount     = $script:ExtraFilesCopied
+                    ReplacedCount = $script:ExtraFileOverwrites.Count
+                    # Paths are relative to the root of the ISO, so this is exactly what a stock Microsoft
+                    # ISO would have had instead.
+                    Replaced      = $script:ExtraFileOverwrites.ToArray()
+                    # Every file that went on, hashed, so what is on the media can be told apart from what
+                    # the folder holds today.
+                    Files         = $script:ExtraFileRecords
                 }
             }
             else { '' }

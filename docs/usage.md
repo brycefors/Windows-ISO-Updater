@@ -198,3 +198,41 @@ Things worth knowing:
 - **Drivers go in after the updates**, so an inbox driver the cumulative update brings along cannot supersede the one you supplied.
 
 The alternative that needs no rebuild is a `$WinPEDriver$` folder at the root of the USB stick. Both answer files in [`Examples/`](../Examples) look for one on every drive, `drvload` each `.inf` into the running WinPE, then run `dism /Add-Driver` against the freshly applied image. That is the better choice for a driver that only one machine needs.
+
+## Adding Your Own Files to the ISO
+
+`-ExtraFilesPath` copies a folder onto the **root of the finished ISO**, keeping the folder structure. Use it for a scripts folder, an `$OEM$` tree, a `$WinPEDriver$` folder, an image you want to carry along, or anything else you want on the media.
+
+```shell
+:: Everything inside Media-Extras ends up at the root of the ISO
+.\Run-Windows-ISO-Updater.bat -ExtraFilesPath "D:\Media-Extras"
+```
+
+```text
+D:\Media-Extras\                 ->  <ISO root>\
+  Tools\Diag.ps1                     Tools\Diag.ps1
+  $OEM$\$$\Setup\Scripts\...         $OEM$\$$\Setup\Scripts\...
+  $WinPEDriver$\nic\e1i68x64.inf     $WinPEDriver$\nic\e1i68x64.inf
+```
+
+### Files that replace something already on the media
+
+The copy runs **last**, after the images have been serviced and after `-UnattendPath` has placed `autounattend.xml`, so a file in your folder deliberately wins over the media's own copy. Because that is easy to do by accident, **every file is logged as it goes on** and the ones that landed on top of something are marked:
+
+```text
+[08/16/2026|14:22:07]     \autounattend.xml (1.4 KB) REPLACED
+[08/16/2026|14:22:07]     \sources\install.wim (4692310.5 KB) REPLACED
+[08/16/2026|14:22:07]     \Tools\Diag.ps1 (12.4 KB)
+[08/16/2026|14:22:07]     \Tools\Nested\collect.cmd (0.6 KB)
+[08/16/2026|14:22:07]   Copied 4 file(s) to the root of the media.
+[08/16/2026|14:22:08]   2 of them REPLACED a file the media already had, marked above and listed in the build record.
+```
+
+The same list, with the SHA-256 and size of each file, goes into the [build record on the ISO](reference.md#the-build-record-on-the-iso), so months later you can still tell what is on the media apart from what the folder happens to hold today. Four cases get a louder warning, because they undo work the run just did:
+
+- **`sources\install.wim` or `sources\boot.wim`.** The ISO then ships *your* image, not the one this run spent an hour servicing, so none of the updates or drivers applied above are in the finished media. This is printed in red.
+- **Boot sectors, boot managers, or `sources\setup.exe` / `setuphost.exe`.** Windows Setup fails during installation if these do not match the version inside `boot.wim`, and a mismatched boot sector can leave the ISO unbootable.
+- **`autounattend.xml`.** Your folder's copy is on the ISO instead of the one `-UnattendPath` supplied.
+- **Anything under `WISO-Build`.** The build record is written after this step, so it wins. Pass `-SkipTattoo` if you want to keep your own copy there.
+
+Read-only attributes inherited from the source ISO do not block the copy, they are cleared first. The folder is build-affecting and hashed by content, so editing one of the files forces a rebuild on the next scheduled run.
