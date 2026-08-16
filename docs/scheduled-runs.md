@@ -36,6 +36,10 @@ never waits at a prompt. The task runs as **SYSTEM** with the highest privileges
 must be a local path SYSTEM can reach, not a mapped drive, and not a cloud-synced user folder such as
 `My Drive` or `OneDrive`.
 
+One task keeps one Windows version up to date. To schedule several, give each its own `-TaskName` and its
+own `-WorkPath`, and stagger the start times so two builds never overlap. See
+[Building Several Windows Versions Side by Side](usage.md#building-several-windows-versions-side-by-side).
+
 `-Schedule Monthly` uses `-ScheduleDay` as a day of the month (`1`-`31`), while `-Schedule Weekly` uses it
 as a weekday name.
 

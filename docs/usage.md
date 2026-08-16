@@ -57,15 +57,86 @@ A few differences worth knowing:
   edition out of the image right after extraction, and stops with exit code 1 if `-Server` was passed
   against client media or omitted against Server media, rather than downloading updates that DISM would
   refuse to apply.
-- **Give Server its own `-StampPath` if you also build client ISOs.** There is one `last-build.json` per
-  stamp folder, so a Server run and a Windows 11 run sharing the default folder overwrite each other's
-  state and both rebuild from scratch every time. `-AutoClean` has the same problem, it deletes the update
-  packages the other flavour downloaded.
+- **Give Server its own working folder if you also build client ISOs.** See
+  [Building Several Windows Versions Side by Side](#building-several-windows-versions-side-by-side).
 
-  ```shell
-  .\Run-Windows-ISO-Updater.bat -Server -IsoPath "C:\ISOs\Server2025.iso" -StampPath "C:\WISO-Work\Stamps\Server2025"
-  .\Run-Windows-ISO-Updater.bat -WindowsVersion 11 -StampPath "C:\WISO-Work\Stamps\Win11"
-  ```
+## Building Several Windows Versions Side by Side
+
+Everything the script writes lives under one working folder, `C:\WISO-Work` unless you pass `-WorkPath`.
+That is deliberate, because a single parameter moves the whole build to another drive, but it does mean a
+Windows 11 run and a Windows 10 or Server run share the same downloads, the same build stamps and the same
+scratch space. Nothing in the folder layout is scoped by version.
+
+**Give each version its own `-WorkPath`.** That one parameter separates all of it, and there is nothing
+else to configure.
+
+```shell
+:: Windows 11, the usual case
+.\Run-Windows-ISO-Updater.bat -WindowsVersion 11 -WorkPath "D:\WISO\Win11"
+
+:: Windows 10, completely independent of the run above
+.\Run-Windows-ISO-Updater.bat -WindowsVersion 10 -Release 22H2 -WorkPath "D:\WISO\Win10"
+
+:: Windows Server, which needs an ISO you supply
+.\Run-Windows-ISO-Updater.bat -Server -IsoPath "C:\ISOs\Server2025.iso" -WorkPath "D:\WISO\Server2025"
+```
+
+The same applies to two builds of the *same* Windows version that differ in a build-affecting way, such as
+one ISO with an answer file and one without, or one trimmed to Pro only and one with every edition. They
+are different outputs, so they need different working folders.
+
+### What actually collides
+
+If you would rather share most of the folders and split only what matters, this is what each one does when
+two versions share it:
+
+| Folder | Effect of sharing it |
+|---|---|
+| `Downloads` | **The worst one.** With no `-IsoPath`, the script reuses the largest `.iso` over 3 GB it finds here, and it does **not** check which Windows version that ISO is. A Windows 10 ISO left in the folder is picked up by a Windows 11 run. Split it with `-DownloadPath`, or always pass `-IsoPath`. |
+| `Stamps` | There is one `last-build.json` per stamp folder. Alternating versions overwrite each other's record, so every run decides it must rebuild and `-CheckOnly` always reports a rebuild is needed. Split it with `-StampPath`. |
+| `Downloads` (update packages) | `-AutoClean` deletes the `.msu`/`.cab` files recorded in stamp history that the newest build no longer uses, so it deletes the other version's cumulative update. Splitting `-DownloadPath` and `-StampPath` fixes this too. |
+| `Output` | Safe. Finished ISO names carry the version (`Win11_`, `Win10_`, `Server2025_`), so they coexist. Note that `-AutoClean` keeps the newest `-KeepIsoCount` (default 3) across **all** versions combined, not per version. |
+| `Logs` | Safe, but log rotation keeps the 30 most recent overall, so history is shorter the more versions you run. |
+| `ISO`, `Mount`, `Tools` | Safe between runs, since extraction wipes the `ISO` folder at the start of every build anyway. Not safe **during** a run, see below. |
+
+So the minimum split is `-DownloadPath` and `-StampPath`. A separate `-WorkPath` covers both and is easier
+to reason about later.
+
+### Do not run two builds at the same time
+
+The script assumes it is the only copy running. Two builds at once fight over the DISM mount folder and the
+extraction folder even if everything else is separate, and a DISM mount is tracked per WIM file, so the
+second run fails or corrupts the first. Run them one after another. Scheduled tasks should be given start
+times far enough apart that a build cannot still be going, or an hour or two apart.
+
+### A shared ISO library
+
+If you keep source ISOs in one place, point `-IsoPath` at the specific file rather than sharing a download
+folder. `-IsoPath` also accepts a folder, but it picks the largest ISO inside it, which is the same trap as
+a shared `Downloads` folder.
+
+```shell
+.\Run-Windows-ISO-Updater.bat -IsoPath "\\nas\isos\Win11_24H2.iso" -WorkPath "D:\WISO\Win11"
+```
+
+A source ISO on a network share or a cloud-synced folder is copied into the download folder first, so the
+library itself can live wherever is convenient. The working folder still has to be a local disk.
+
+### On a schedule
+
+Each version needs its own task name as well as its own working folder, otherwise registering the second
+one replaces the first.
+
+```shell
+.\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -Schedule PatchTuesday -AutoClean ^
+  -WindowsVersion 11 -WorkPath "D:\WISO\Win11" -TaskName "Windows ISO Updater - Win11"
+
+.\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -Schedule PatchTuesday -ScheduleTime 20:30 -AutoClean ^
+  -Server -IsoPath "C:\ISOs\Server2025.iso" -WorkPath "D:\WISO\Server2025" -TaskName "Windows ISO Updater - Server2025"
+```
+
+Both tasks run as SYSTEM, so every path has to be a local path SYSTEM can reach. See
+[Scheduled Runs](scheduled-runs.md) for the full details.
 
 ## Running It on a Schedule
 
