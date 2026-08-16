@@ -12,8 +12,11 @@ That makes it safe to schedule the script as often as you like; hourly is fine.
 ## Registering the task
 
 ```shell
-:: Monthly, on the 15th at 03:00 (a few days after Patch Tuesday) - the default
+:: Monthly, on the 15th at 03:00 - the default
 .\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -AutoClean -IsoPath "C:\ISOs\Win11_24H2.iso"
+
+:: Second Tuesday of every month, half an hour after Microsoft publishes - i.e. Patch Tuesday itself
+.\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -Schedule PatchTuesday -AutoClean
 
 :: Daily at 02:30
 .\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -Schedule Daily -ScheduleTime 02:30 -AutoClean
@@ -35,6 +38,25 @@ must be a local path SYSTEM can reach — not a mapped drive, and not a cloud-sy
 
 `-Schedule Monthly` uses `-ScheduleDay` as a day of the month (`1`-`31`); `-Schedule Weekly` uses it as a
 weekday name.
+
+### `-Schedule PatchTuesday`
+
+A slightly silly flag that happens to be the most sensible schedule here: it works out the second Tuesday
+of each month for you, rather than making you translate Patch Tuesday into a day number that drifts every
+month. `-ScheduleDay` is ignored.
+
+Microsoft publishes at around 10:00 Pacific, so the default start time is **10:30 Pacific converted into
+this machine's time zone** — 13:30 on the US east coast, 18:30 in the UK, and so on. Daylight saving is
+accounted for: the local equivalent is worked out for each of the next twelve Patch Tuesdays and the
+*latest* one wins, so a Pacific/local DST mismatch can make a run half an hour late but never early. A
+late run costs nothing; an early one finds nothing new and then waits a whole month.
+
+`-ScheduleTime` still overrides it, with a warning if you pick a time before the packages are published.
+
+Far enough east — anywhere 10:30 Pacific falls on the following local day — the task is registered for the
+**second and third local Wednesday** instead, since the Wednesday after the second Tuesday is not always in
+the same week of the month. One of those two runs lands just after the release and the other exits in a
+minute having found nothing new.
 
 ## What the stamp records
 

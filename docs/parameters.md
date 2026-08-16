@@ -58,7 +58,7 @@ See [Scheduled Runs](scheduled-runs.md) for how these fit together.
 | `-KeepIsoCount` | How many generated ISOs `-AutoClean` keeps (newest first). Defaults to `3`. |
 | `-RegisterScheduledTask` | Create (or update) a scheduled task that runs this script with the other parameters you passed, then exit without building. The task runs as `SYSTEM` with the highest privileges. |
 | `-UnregisterScheduledTask` | Delete the scheduled task named by `-TaskName`, then exit. |
-| `-Schedule` | How often the registered task runs: `Hourly`, `Daily`, `Weekly` or `Monthly`. Defaults to `Monthly`, which matches Microsoft's Patch Tuesday cadence. |
-| `-ScheduleTime` | Time of day the registered task starts, as 24-hour `HH:mm`. Defaults to `03:00`. |
-| `-ScheduleDay` | Which day the registered task runs: a weekday name for `-Schedule Weekly` (default `Sunday`), or a day number `1`-`31` for `-Schedule Monthly` (default `15`, a few days after Patch Tuesday). |
+| `-Schedule` | How often the registered task runs: `Hourly`, `Daily`, `Weekly`, `Monthly` or `PatchTuesday`. Defaults to `Monthly`. `PatchTuesday` runs on the second Tuesday of every month without you having to work out the date. |
+| `-ScheduleTime` | Time of day the registered task starts, as 24-hour `HH:mm`. Defaults to `03:00`, or for `-Schedule PatchTuesday` to whatever **10:30 Pacific** works out to in this machine's time zone, daylight saving included. |
+| `-ScheduleDay` | Which day the registered task runs: a weekday name for `-Schedule Weekly` (default `Sunday`), or a day number `1`-`31` for `-Schedule Monthly` (default `15`, a few days after Patch Tuesday). Ignored by `-Schedule PatchTuesday`. |
 | `-TaskName` | Name of the scheduled task to create or delete. Defaults to `Windows ISO Updater`. |

@@ -31,6 +31,9 @@ The full list is in [Command-Line Parameters](parameters.md).
 ```shell
 :: Rebuild monthly, on the 15th at 03:00, and clean up what earlier builds left behind
 .\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -Schedule Monthly -ScheduleDay 15 -ScheduleTime 03:00 -AutoClean
+
+:: Or rebuild on Patch Tuesday itself - the second Tuesday of every month, 10:30 Pacific in local time
+.\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -Schedule PatchTuesday -AutoClean
 ```
 
 The task runs the script with `-Scheduled`, which compares the run against the stamp left by the last

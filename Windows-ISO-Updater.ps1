@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.15.4   (date-based; stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.15.5   (date-based; stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10) installation ISO.
@@ -192,15 +192,15 @@ param(
     [Parameter(HelpMessage = 'Delete the scheduled task named by -TaskName, then exit')]
     [switch]$UnregisterScheduledTask,
 
-    [Parameter(HelpMessage = 'How often the registered task runs: Hourly, Daily, Weekly or Monthly. Defaults to Monthly, which matches Microsoft''s Patch Tuesday cadence')]
-    [ValidateSet('Hourly', 'Daily', 'Weekly', 'Monthly')]
+    [Parameter(HelpMessage = 'How often the registered task runs: Hourly, Daily, Weekly, Monthly or PatchTuesday. Defaults to Monthly. PatchTuesday runs on the second Tuesday of every month, half an hour after Microsoft publishes that month''s updates')]
+    [ValidateSet('Hourly', 'Daily', 'Weekly', 'Monthly', 'PatchTuesday')]
     [string]$Schedule = 'Monthly',
 
-    [Parameter(HelpMessage = 'Time of day the registered task starts, as HH:mm (24-hour). Defaults to 03:00')]
+    [Parameter(HelpMessage = 'Time of day the registered task starts, as HH:mm (24-hour). Defaults to 03:00, or for -Schedule PatchTuesday to whatever 10:30 Pacific (DST included) is in this machine''s time zone')]
     [ValidatePattern('^\d{1,2}:\d{2}$')]
     [string]$ScheduleTime = '03:00',
 
-    [Parameter(HelpMessage = 'Which day the registered task runs: a weekday name for -Schedule Weekly (default Sunday), or a day number 1-31 for -Schedule Monthly (default 15, a few days after Patch Tuesday)')]
+    [Parameter(HelpMessage = 'Which day the registered task runs: a weekday name for -Schedule Weekly (default Sunday), or a day number 1-31 for -Schedule Monthly (default 15, a few days after Patch Tuesday). Ignored by -Schedule PatchTuesday, which picks the day itself')]
     [string]$ScheduleDay,
 
     [Parameter(HelpMessage = 'Name of the scheduled task to create or delete. Defaults to "Windows ISO Updater"')]
@@ -216,7 +216,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1; shown in the log and recorded in the
 # build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.15.4'
+$ScriptVersion = '2026.08.15.5'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1440,6 +1440,48 @@ function Get-ScheduledTaskArgumentString {
     return ($Arguments -join ' ')
 }
 
+# Microsoft publishes Patch Tuesday updates around 10:00 Pacific, so -Schedule PatchTuesday aims for 10:30
+# Pacific translated into this machine's time zone. Pacific and local DST rules drift apart during the
+# year, so the latest local equivalent across the next twelve Patch Tuesdays is used: running late is
+# harmless (the stamp check exits in a minute or two), running early misses that month's updates for a
+# whole month. Returns $null when the Pacific zone cannot be resolved.
+function Get-PatchTuesdayStart {
+    $Pacific = $null
+    foreach ($Id in @('Pacific Standard Time', 'America/Los_Angeles')) {
+        try { $Pacific = [System.TimeZoneInfo]::FindSystemTimeZoneById($Id); break } catch { }
+    }
+    if (-not $Pacific) { return $null }
+
+    $LatestSameDay = [timespan]::Zero
+    $LatestNextDay = $null
+    $FirstOfThisMonth = Get-Date -Day 1 -Hour 0 -Minute 0 -Second 0 -Millisecond 0
+    for ($Index = 0; $Index -lt 12; $Index++) {
+        $FirstOfMonth = $FirstOfThisMonth.AddMonths($Index)
+        $ToTuesday = ([int][System.DayOfWeek]::Tuesday - [int]$FirstOfMonth.DayOfWeek + 7) % 7
+        $SecondTuesday = $FirstOfMonth.AddDays($ToTuesday + 7)
+        $PacificStart = [datetime]::new($SecondTuesday.Year, $SecondTuesday.Month, $SecondTuesday.Day, 10, 30, 0, [System.DateTimeKind]::Unspecified)
+        $LocalStart = [System.TimeZoneInfo]::ConvertTime($PacificStart, $Pacific, [System.TimeZoneInfo]::Local)
+        if ($LocalStart.Date -ne $SecondTuesday.Date) {
+            if ($null -eq $LatestNextDay -or $LocalStart.TimeOfDay -gt $LatestNextDay) { $LatestNextDay = $LocalStart.TimeOfDay }
+        }
+        elseif ($LocalStart.TimeOfDay -gt $LatestSameDay) {
+            $LatestSameDay = $LocalStart.TimeOfDay
+        }
+    }
+
+    # Where any month spills over midnight the whole schedule moves to the following local day, and only
+    # those months set the time - any month that did land on the Tuesday is then at most a few hours late.
+    $CrossesMidnight = ($null -ne $LatestNextDay)
+    $StartTime = if ($CrossesMidnight) { $LatestNextDay } else { $LatestSameDay }
+    $ZoneName = if ($Pacific.IsDaylightSavingTime((Get-Date))) { $Pacific.DaylightName } else { $Pacific.StandardName }
+
+    return [pscustomobject]@{
+        TimeOfDay       = $StartTime
+        CrossesMidnight = $CrossesMidnight
+        ZoneName        = $ZoneName
+    }
+}
+
 function Register-UpdaterScheduledTask {
     if (-not (Get-Command -Name Register-ScheduledTask -ErrorAction SilentlyContinue)) {
         throw 'The ScheduledTasks PowerShell module is not available on this machine.'
@@ -1448,16 +1490,31 @@ function Register-UpdaterScheduledTask {
         throw 'The path of this script could not be determined, so a scheduled task cannot point at it.'
     }
 
-    if ($ScheduleTime -notmatch '^(\d{1,2}):(\d{2})$') {
-        throw "-ScheduleTime '$ScheduleTime' is not a valid 24-hour HH:mm time."
+    $TimeText = $ScheduleTime
+    $PatchTuesday = $null
+    if ($Schedule -eq 'PatchTuesday') {
+        $PatchTuesday = Get-PatchTuesdayStart
+        if (-not $script:ScriptBoundParameters.ContainsKey('ScheduleTime')) {
+            $TimeText = if ($PatchTuesday) { ([datetime]::Today.Add($PatchTuesday.TimeOfDay)).ToString('HH:mm') } else { '10:30' }
+        }
+    }
+
+    if ($TimeText -notmatch '^(\d{1,2}):(\d{2})$') {
+        throw "-ScheduleTime '$TimeText' is not a valid 24-hour HH:mm time."
     }
     $Hour = [int]$Matches[1]
     $Minute = [int]$Matches[2]
     if ($Hour -gt 23 -or $Minute -gt 59) {
-        throw "-ScheduleTime '$ScheduleTime' is not a valid 24-hour HH:mm time."
+        throw "-ScheduleTime '$TimeText' is not a valid 24-hour HH:mm time."
     }
     # Anchor the trigger on today's date at that time.
     $Start = Get-Date -Hour $Hour -Minute $Minute -Second 0 -Millisecond 0
+
+    # Register-ScheduledTask rejects the MSFT_Task*Monthly*Trigger CIM classes outright ("the parameter is
+    # incorrect"), so a monthly schedule is registered with a placeholder weekly trigger and then rewritten
+    # through the task's own XML, where Task Scheduler does accept a monthly calendar trigger.
+    $CalendarXml = $null
+    $MonthsXml = '<Months><January /><February /><March /><April /><May /><June /><July /><August /><September /><October /><November /><December /></Months>'
 
     switch ($Schedule) {
         'Hourly' {
@@ -1482,16 +1539,32 @@ function Register-UpdaterScheduledTask {
             if ($DayNumber -notmatch '^\d{1,2}$' -or [int]$DayNumber -lt 1 -or [int]$DayNumber -gt 31) {
                 throw "-ScheduleDay '$DayNumber' is not a day of the month (use 1-31) for a monthly schedule."
             }
-            # There is no -Monthly switch on New-ScheduledTaskTrigger, so the trigger is built directly.
-            # DaysOfMonth is a bit mask: bit 0 is the 1st, bit 30 is the 31st.
-            $TriggerClass = Get-CimClass -ClassName MSFT_TaskMonthlyTrigger -Namespace Root/Microsoft/Windows/TaskScheduler -ErrorAction Stop
-            $Trigger = New-CimInstance -CimClass $TriggerClass -ClientOnly -Property @{
-                DaysOfMonth   = [int][math]::Pow(2, ([int]$DayNumber - 1))
-                MonthOfYear   = 4095   # all twelve months
-                StartBoundary = $Start.ToString('yyyy-MM-ddTHH:mm:ss')
-                Enabled       = $true
-            }
+            $Trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At $Start
+            $CalendarXml = "<ScheduleByMonth><DaysOfMonth><Day>$([int]$DayNumber)</Day></DaysOfMonth>$MonthsXml</ScheduleByMonth>"
             $When = "on day $DayNumber of every month at $($Start.ToString('HH:mm'))"
+        }
+        'PatchTuesday' {
+            if ($ScheduleDay) {
+                Write-HostTimestamp "-ScheduleDay '$ScheduleDay' is ignored by -Schedule PatchTuesday." -ForegroundColor Yellow
+            }
+            $PacificNote = ''
+            if ($PatchTuesday -and -not $script:ScriptBoundParameters.ContainsKey('ScheduleTime') -and $PatchTuesday.TimeOfDay -ne [timespan]::new(10, 30, 0)) {
+                $PacificNote = " (10:30 $($PatchTuesday.ZoneName) in local time)"
+            }
+            $Trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At $Start
+            if ($PatchTuesday -and $PatchTuesday.CrossesMidnight) {
+                # 10:30 Pacific lands on the next local day here, and the Wednesday after the second Tuesday
+                # is not always in week 2, so both weeks are triggered - the early one just exits.
+                $CalendarXml = "<ScheduleByMonthDayOfWeek><Weeks><Week>2</Week><Week>3</Week></Weeks><DaysOfWeek><Wednesday /></DaysOfWeek>$MonthsXml</ScheduleByMonthDayOfWeek>"
+                $When = "on the second and third Wednesday of every month at $($Start.ToString('HH:mm'))$PacificNote, which is the local morning after Patch Tuesday"
+            }
+            else {
+                $CalendarXml = "<ScheduleByMonthDayOfWeek><Weeks><Week>2</Week></Weeks><DaysOfWeek><Tuesday /></DaysOfWeek>$MonthsXml</ScheduleByMonthDayOfWeek>"
+                $When = "on the second Tuesday of every month at $($Start.ToString('HH:mm'))$PacificNote"
+                if ($PatchTuesday -and $Start.TimeOfDay -lt $PatchTuesday.TimeOfDay) {
+                    Write-HostTimestamp "-ScheduleTime $($Start.ToString('HH:mm')) is earlier than $(([datetime]::Today.Add($PatchTuesday.TimeOfDay)).ToString('HH:mm')) (10:30 $($PatchTuesday.ZoneName)), so the task may run before that month's updates are published." -ForegroundColor Yellow
+                }
+            }
         }
     }
 
@@ -1506,6 +1579,12 @@ function Register-UpdaterScheduledTask {
 
     Register-ScheduledTask -TaskName $TaskName -Trigger $Trigger -Action $Action -Principal $Principal `
         -Settings $Settings -Description 'Rebuilds an up-to-date Windows installation ISO (Windows-ISO-Updater). Skips the build when nothing has changed.' -Force -ErrorAction Stop | Out-Null
+
+    if ($CalendarXml) {
+        # No -User here: the exported XML already carries the principal, settings and action unchanged.
+        $TaskXml = (Export-ScheduledTask -TaskName $TaskName) -replace '(?s)<ScheduleByWeek>.*?</ScheduleByWeek>', $CalendarXml
+        Register-ScheduledTask -TaskName $TaskName -Xml $TaskXml -Force -ErrorAction Stop | Out-Null
+    }
 
     Write-HostTimestamp "Scheduled task '$TaskName' registered: runs $When as SYSTEM." -ForegroundColor Green
     Write-HostTimestamp "  Command: `"$Exe`" $ArgumentString" -ForegroundColor DarkGray
