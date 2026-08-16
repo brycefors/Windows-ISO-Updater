@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.11   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.12   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -41,7 +41,9 @@
 #      with the Windows ADK), preserving both the BIOS and
 #      UEFI boot sectors so the new ISO boots on legacy and modern PCs alike. An answer file supplied with
 #      -UnattendPath is placed at the root of the media as autounattend.xml, which Windows Setup reads
-#      automatically when the ISO is booted.
+#      automatically when the ISO is booted. A \WISO-Build folder is also written onto the media (turn it
+#      off with -SkipTattoo) recording what the ISO was made from, which updates applied or failed, what
+#      was kept and stripped, who built it and when, plus a copy of the script that built it.
 #   7. Records a "stamp" of the finished build (the source ISO's hash, the updates that went in, the
 #      parameters used and the ISO that came out) and keeps a history of them. The next run compares
 #      itself with that stamp first and exits in a minute or two when nothing has changed, which is what
@@ -112,6 +114,9 @@ param(
 
     [Parameter(HelpMessage = 'Path to an unattended answer file to place on the finished ISO as \autounattend.xml, so Windows Setup runs without prompting')]
     [string]$UnattendPath,
+
+    [Parameter(HelpMessage = 'Do not tattoo the finished ISO. By default a \WISO-Build folder is added to the media recording what this build was made from, which updates applied or failed, what was kept and stripped, who built it and when, plus a copy of the script that made it')]
+    [switch]$SkipTattoo,
 
     [Parameter(HelpMessage = 'Directory to download the ISO/updates into. Defaults to a Downloads folder inside the working folder. Needs several GB free')]
     [string]$DownloadPath,
@@ -228,7 +233,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.11'
+$ScriptVersion = '2026.08.16.12'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -348,6 +353,11 @@ $script:ScriptStartTime = Get-Date
 $script:StepTimings = [System.Collections.Generic.List[psobject]]::new()
 # Captured from the serviced image while it is still mounted, so the final report does not have to mount it again.
 $script:FinalBuildString = $null
+# Filled in as servicing happens, because by the time the tattoo is written the images are already
+# dismounted and DISM's own log is the only other record of which package landed on which image.
+$script:TattooServicing   = New-Object System.Collections.Generic.List[object]
+$script:TattooResidueMB   = 0
+$script:TattooResidueFound = New-Object System.Collections.Generic.List[string]
 
 function Get-TimeStamp {
     return (Get-Date -Format '[MM/dd/yyyy|HH:mm:ss]')
@@ -1188,11 +1198,35 @@ function Format-ShortHash {
     return '(none)'
 }
 
+# Describes the packages that went into a build. Hashing an LCU is not free, so this runs once and both
+# the media tattoo and the build stamp use the result.
+function Get-UpdateFileRecords {
+    param(
+        [string[]]$Paths,
+        [string]$DownloadDir
+    )
+    $Records = @()
+    foreach ($Path in @($Paths | Sort-Object -Unique)) {
+        $Item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+        if (-not $Item) { continue }
+        $Records += [ordered]@{
+            FileName           = $Item.Name
+            Kb                 = if ($Item.Name -match '(?i)kb(\d{6,})') { "KB$($Matches[1])" } else { '' }
+            SizeMB             = [math]::Round($Item.Length / 1MB, 1)
+            Sha256             = Get-Sha256 -Path $Item.FullName
+            # Only packages this script downloaded itself are ever eligible for -AutoClean.
+            FromDownloadFolder = ("$($Item.DirectoryName)".TrimEnd('\') -ieq "$DownloadDir".TrimEnd('\'))
+        }
+    }
+    return $Records
+}
+
 # The parameters that change what ends up inside the ISO. Folder, logging and scheduling parameters are
 # deliberately left out: moving the working folder does not make last month's ISO wrong.
 $script:BuildAffectingParameters = @(
     'WindowsVersion', 'Server', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
-    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'SkipUpdates', 'CompressEsd', 'VolumeLabel'
+    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'SkipUpdates', 'CompressEsd', 'VolumeLabel',
+    'SkipTattoo'
 )
 
 # Flattens those parameters (current values, not just the ones that were passed) into comparable text.
@@ -2158,14 +2192,32 @@ function Add-ServicingStack {
 # own /PackagePath target is NOT supported and corrupts the image (STATUS_SXS_FILE_HASH_MISMATCH / 0x80070228).
 #
 # Returns $true if DISM reported success (or the package was already present), $false on a real failure.
+# One line of the servicing story: which package was tried against which image and how it ended.
+function Add-ServicingResult {
+    param(
+        [string]$Image,
+        [string]$Package,
+        [string]$Result,
+        [string]$Detail
+    )
+    if (-not $Image) { return }
+    $Record = [ordered]@{ Image = $Image; Package = $Package; Result = $Result }
+    if ($Detail) { $Record['Detail'] = $Detail }
+    $script:TattooServicing.Add($Record)
+}
+
 function Add-UpdateGroup {
     param(
         [Parameter(Mandatory)][string]$MountDir,
         [Parameter(Mandatory)][object[]]$Group,
-        [string]$Label = 'update package'
+        [string]$Label = 'update package',
+        [string]$ImageLabel
     )
 
     if (-not $Group -or $Group.Count -eq 0) { return $true }
+
+    # The default label says nothing the package name does not, so it stays out of the build record.
+    $RecordDetail = if ($Label -eq 'update package') { '' } else { $Label }
 
     # Stage the whole group in a clean, isolated folder so DISM sees ONLY these files (no unrelated .msu).
     $Stage = Join-Path -Path $WorkRoot -ChildPath ('pkgstage_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -2192,10 +2244,12 @@ function Add-UpdateGroup {
 
             if ($ExitCode -eq 0 -or $ExitCode -eq 3010) {
                 Write-HostTimestamp '      Applied.' -ForegroundColor Green
+                Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Target) -Result 'Applied' -Detail $RecordDetail
                 return $true
             }
             if ($Output -match '0x800f081e') {
                 Write-HostTimestamp '      Already present / not applicable - skipping.' -ForegroundColor DarkGray
+                Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Target) -Result 'Skipped' -Detail 'Already present or not applicable (0x800F081E)'
                 return $true
             }
 
@@ -2213,11 +2267,13 @@ function Add-UpdateGroup {
             $ExitCode = $LASTEXITCODE
             if ($ExitCode -eq 0 -or $ExitCode -eq 3010) {
                 Write-HostTimestamp '      Applied.' -ForegroundColor Green
+                Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Target) -Result 'Applied' -Detail 'Applied after the servicing stack was brought forward (0x800F0823)'
                 return $true
             }
         }
 
         Write-HostTimestamp "      This package didn't apply (DISM exit code $ExitCode). Details are in C:\Windows\Logs\DISM\dism.log." -ForegroundColor DarkYellow
+        Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Target) -Result 'Failed' -Detail "DISM /Add-Package returned exit code $ExitCode"
         $Output | Where-Object { $_ -match '(?i)error|0x[0-9a-f]{8}' } | Select-Object -Last 8 | ForEach-Object {
             Write-Host "        $_" -ForegroundColor DarkGray
         }
@@ -2238,6 +2294,7 @@ function Add-UpdateGroup {
     }
     catch {
         Write-HostTimestamp "      This package couldn't be staged/applied: $($_.Exception.Message)" -ForegroundColor DarkYellow
+        Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Group[$Group.Count - 1]) -Result 'Failed' -Detail $_.Exception.Message
         return $false
     }
     finally {
@@ -2333,6 +2390,12 @@ function Remove-ImageResidue {
     }
     if ($FreedMB -ge 1) {
         Write-HostTimestamp ('    Stripped {0:N0} MB of servicing residue (logs and temp files Windows recreates on first boot).' -f $FreedMB) -ForegroundColor DarkGray
+    }
+
+    # Totalled across every image so the tattoo can state what this build removed.
+    $script:TattooResidueMB += $FreedMB
+    foreach ($Item in $Found) {
+        if (-not $script:TattooResidueFound.Contains($Item)) { $script:TattooResidueFound.Add($Item) }
     }
 }
 
@@ -2430,6 +2493,113 @@ function Show-FinalImageInfo {
 
     if ($BuildStr) { Write-HostTimestamp "Final OS build: $BuildStr" -ForegroundColor Cyan }
     else { Write-HostTimestamp "Final OS build: $($Images[0].Version) (revision unavailable)" -ForegroundColor Cyan }
+}
+
+# --- Build tattoo ---
+# The stamp lives on the build machine, which is no help to whoever is holding the ISO a year from now.
+# The tattoo is the same story written onto the media itself, so the finished ISO explains itself.
+
+# The parameters this run was started with, rebuilt as a command line. Only what was passed on the command
+# line appears, so defaults stay out of it and the answer file's contents are never reproduced here.
+function Get-ScriptCommandLine {
+    $Arguments = New-Object System.Collections.Generic.List[string]
+    $Arguments.Add((Split-Path -Leaf $script:ScriptPath))
+    foreach ($Name in @($script:ScriptBoundParameters.Keys)) {
+        $Value = $script:ScriptBoundParameters[$Name]
+        if ($Value -is [switch]) {
+            if ($Value.IsPresent) { $Arguments.Add("-$Name") }
+            continue
+        }
+        $Arguments.Add("-$Name")
+        foreach ($Item in @($Value)) { $Arguments.Add("`"$Item`"") }
+    }
+    return ($Arguments -join ' ')
+}
+
+# Renders the record as indented text. Deliberately generic, so a field added to the record shows up in
+# the report without this having to know about it.
+function Format-TattooText {
+    param(
+        $Value,
+        [int]$Indent = 0
+    )
+
+    $Pad = ' ' * ($Indent * 2)
+    $Lines = New-Object System.Collections.Generic.List[string]
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        foreach ($Key in @($Value.Keys)) {
+            $Item = $Value[$Key]
+            if ($Item -is [System.Collections.IDictionary]) {
+                $Lines.Add("$Pad${Key}:")
+                $Lines.AddRange([string[]]@(Format-TattooText -Value $Item -Indent ($Indent + 1)))
+                continue
+            }
+            if ($Item -is [System.Array] -or $Item -is [System.Collections.IList]) {
+                $Entries = @($Item)
+                if ($Entries.Count -eq 0) { $Lines.Add("$Pad${Key}: (none)"); continue }
+                $Lines.Add("$Pad${Key}:")
+                foreach ($Entry in $Entries) {
+                    if ($Entry -is [System.Collections.IDictionary]) {
+                        # Indented one level deeper than the bullet so the rest of the entry lines up under it.
+                        $Block = @(Format-TattooText -Value $Entry -Indent ($Indent + 2))
+                        if ($Block.Count -gt 0) { $Block[0] = "$Pad  - " + $Block[0].Substring(($Indent + 2) * 2) }
+                        $Lines.AddRange([string[]]$Block)
+                        $Lines.Add('')
+                    }
+                    else { $Lines.Add("$Pad  - $Entry") }
+                }
+                continue
+            }
+            $Text = if ($null -eq $Item -or "$Item" -eq '') { '(none)' } else { "$Item" }
+            $Lines.Add("$Pad${Key}: $Text")
+        }
+    }
+    else {
+        $Lines.Add("$Pad$Value")
+    }
+
+    return $Lines.ToArray()
+}
+
+# Writes the record folder into the extracted media, just before oscdimg packages it. Failing to do so
+# must never cost the build, so everything in here is best-effort.
+function Write-BuildTattoo {
+    param(
+        [Parameter(Mandatory)][string]$MediaRoot,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Info,
+        [string]$FolderName = 'WISO-Build',
+        [string]$ScriptSource
+    )
+
+    $Folder = Join-Path -Path $MediaRoot -ChildPath $FolderName
+    try {
+        if (Test-Path -LiteralPath $Folder) { Remove-Item -LiteralPath $Folder -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Path $Folder -Force -ErrorAction Stop | Out-Null
+
+        $Header = @(
+            'Windows ISO Updater - build record'
+            ('=' * 60)
+            'This folder was added by Windows-ISO-Updater and is not part of the original'
+            'Microsoft media. Windows Setup ignores it, and deleting it changes nothing.'
+            ''
+        )
+        Set-Content -LiteralPath (Join-Path $Folder 'build-info.txt') -Value ($Header + @(Format-TattooText -Value $Info)) -Encoding UTF8 -ErrorAction Stop
+        Set-Content -LiteralPath (Join-Path $Folder 'build-info.json') -Value (Format-Json -Json ($Info | ConvertTo-Json -Depth 8 -Compress)) -Encoding UTF8 -ErrorAction Stop
+
+        if ($ScriptSource -and (Test-Path -LiteralPath $ScriptSource -PathType Leaf)) {
+            Copy-Item -LiteralPath $ScriptSource -Destination (Join-Path $Folder (Split-Path -Leaf $ScriptSource)) -Force -ErrorAction Stop
+        }
+
+        $SizeKB = [math]::Round((Get-ChildItem -LiteralPath $Folder -File -Recurse -Force -ErrorAction SilentlyContinue |
+                    Measure-Object -Property Length -Sum).Sum / 1KB, 1)
+        Write-HostTimestamp "  Wrote \$FolderName to the media ($SizeKB KB): build-info.txt, build-info.json and a copy of the script." -ForegroundColor Green
+        return $true
+    }
+    catch {
+        Write-HostTimestamp "  Could not write the build record onto the media: $($_.Exception.Message). The ISO is unaffected." -ForegroundColor Yellow
+        return $false
+    }
 }
 
 Write-Host $LineBreak
@@ -3242,6 +3412,8 @@ $script:StampUpdateFiles = @()
 foreach ($Group in $UpdateGroups) { $script:StampUpdateFiles += @($Group) }
 if ($script:SetupDu) { $script:StampUpdateFiles += @($script:SetupDu) }
 if ($SafeOsGroup) { $script:StampUpdateFiles += @($SafeOsGroup) }
+# Hashed here, once, because both the media tattoo and the build stamp describe the same packages.
+$script:UpdateFileRecords = @(Get-UpdateFileRecords -Paths $script:StampUpdateFiles -DownloadDir $DlDir)
 
 # --- Resolve which editions to keep and which to service ---
 $InstallImages = @(Get-WindowsImage -ImagePath $InstallWimExtracted -ErrorAction Stop)
@@ -3350,7 +3522,7 @@ if ($UpdateGroups.Count -gt 0) {
                             Mount-WindowsImage -ImagePath $WinReWim -Index 1 -Path $WinReMount -ErrorAction Stop | Out-Null
                             # Per Microsoft, WinRE is serviced with the Safe OS Dynamic Update - NOT the LCU.
                             if ($SafeOsGroup) {
-                                Add-UpdateGroup -MountDir $WinReMount -Group $SafeOsGroup -Label 'Safe OS Dynamic Update' | Out-Null
+                                Add-UpdateGroup -MountDir $WinReMount -Group $SafeOsGroup -Label 'Safe OS Dynamic Update' -ImageLabel "winre.wim (inside index $Index, $EditionName)" | Out-Null
                             }
                             else {
                                 Write-HostTimestamp '      No Safe OS Dynamic Update available, so WinRE update integration is skipped.' -ForegroundColor DarkGray
@@ -3368,7 +3540,7 @@ if ($UpdateGroups.Count -gt 0) {
                 Write-HostTimestamp '    Applying updates to install.wim...'
                 $script:InstallApplyOk = $true
                 foreach ($Group in $UpdateGroups) {
-                    if (-not (Add-UpdateGroup -MountDir $MountDir -Group $Group)) { $script:InstallApplyOk = $false }
+                    if (-not (Add-UpdateGroup -MountDir $MountDir -Group $Group -ImageLabel "install.wim index $Index ($EditionName)")) { $script:InstallApplyOk = $false }
                 }
                 if (-not $script:InstallApplyOk) {
                     $script:ServicingFailures++
@@ -3409,9 +3581,11 @@ if ($UpdateGroups.Count -gt 0) {
                 & "$env:SystemRoot\System32\expand.exe" $Cab '-F:*' $MediaSources | Out-Null
                 if ($LASTEXITCODE -ne 0) {
                     Write-HostTimestamp "  expand.exe returned $LASTEXITCODE for $(Split-Path -Leaf $Cab), so the media Setup files were not fully refreshed." -ForegroundColor Yellow
+                    Add-ServicingResult -Image 'media sources folder' -Package (Split-Path -Leaf $Cab) -Result 'Failed' -Detail "expand.exe returned $LASTEXITCODE"
                 }
                 else {
                     Write-HostTimestamp "  Applied $(Split-Path -Leaf $Cab) to sources\." -ForegroundColor Green
+                    Add-ServicingResult -Image 'media sources folder' -Package (Split-Path -Leaf $Cab) -Result 'Applied' -Detail 'Setup Dynamic Update'
                 }
             }
         }
@@ -3430,7 +3604,7 @@ if ($UpdateGroups.Count -gt 0) {
                 try {
                     Reset-MountDirectory -Path $MountDir -ImagePath $BootWim
                     Mount-WindowsImage -ImagePath $BootWim -Index $BootImg.ImageIndex -Path $MountDir -ErrorAction Stop | Out-Null
-                    foreach ($Group in $UpdateGroups) { Add-UpdateGroup -MountDir $MountDir -Group $Group | Out-Null }
+                    foreach ($Group in $UpdateGroups) { Add-UpdateGroup -MountDir $MountDir -Group $Group -ImageLabel "boot.wim index $($BootImg.ImageIndex) ($($BootImg.ImageName))" | Out-Null }
                     & dism.exe /Image:"$MountDir" /Cleanup-Image /StartComponentCleanup | Out-Null
                     Remove-ImageResidue -MountDir $MountDir
 
@@ -3604,7 +3778,7 @@ if ($ResolvedUnattend) {
     Write-Host $LineBreak
 }
 
-# --- Recompile the ISO with oscdimg ---
+# --- Decide the output ISO name and volume label ---
 # The name describes what the ISO actually contains: Win11_Pro_x64_26100.4061_20260815-1332.iso. It is
 # built even when -OutputIsoPath overrides the path, because the volume label is derived from it.
 $DefaultIsoName = Get-DefaultIsoName -Images $InstallImages -Indexes $KeepIndexes -BuildString $script:FinalBuildString -FallbackVersion $ImageInfo.Version -Architecture $ImageArch
@@ -3619,6 +3793,83 @@ try {
 }
 catch { }
 
+# --- Tattoo the build details onto the media (-SkipTattoo) ---
+# Written into the extracted folder now, while oscdimg has not packaged it yet, so the finished ISO can
+# answer "where did this come from and what is in it" without the build machine being around.
+if (-not $SkipTattoo) {
+    Invoke-Task -Description 'Writing the build record onto the media...' -ScriptBlock {
+        $SourceItem = Get-Item -LiteralPath $ResolvedIso -ErrorAction SilentlyContinue
+        # Source indexes, because these are the editions as the ISO shipped them. Re-exporting renumbers
+        # whatever survives, which is why the kept list is by name.
+        $SourceEditions = @($InstallImages | ForEach-Object { "[$($_.ImageIndex)] $($_.ImageName)" })
+        $KeptNames      = @($InstallImages | Where-Object { $KeepIndexes -contains [int]$_.ImageIndex } | ForEach-Object { "$($_.ImageName)" })
+        $RemovedNames   = @($InstallImages | Where-Object { $KeepIndexes -notcontains [int]$_.ImageIndex } | ForEach-Object { "$($_.ImageName)" })
+        $UnpatchedNames = @($InstallImages | Where-Object { ($KeepIndexes -contains [int]$_.ImageIndex) -and ($ServiceIndexes -notcontains [int]$_.ImageIndex) } | ForEach-Object { "$($_.ImageName)" })
+        $Failed         = @($script:TattooServicing | Where-Object { $_.Result -eq 'Failed' })
+
+        $TattooInfo = [ordered]@{
+            Build       = [ordered]@{
+                Date          = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss K')
+                DateUtc       = (Get-Date).ToUniversalTime().ToString('o')
+                Outcome       = if ($Failed.Count -gt 0 -or [int]$script:ServicingFailures -gt 0) { 'Completed with servicing warnings' } else { 'Completed' }
+                ScriptVersion = $ScriptVersion
+                IsoFileName   = Split-Path -Leaf $OutputIsoPath
+                VolumeLabel   = $IsoVolumeLabel
+                Started       = $script:ScriptStartTime.ToString('yyyy-MM-dd HH:mm:ss')
+                LogFile       = $LogFile
+            }
+            BuiltBy     = [ordered]@{
+                Computer        = $env:COMPUTERNAME
+                User            = "$env:USERDOMAIN\$env:USERNAME"
+                OperatingSystem = "$($OsInfo.Caption) ($($OsInfo.Version))"
+                PowerShell      = "$($PSVersionTable.PSVersion)"
+                ScriptPath      = $script:ScriptPath
+                CommandLine     = Get-ScriptCommandLine
+            }
+            SourceMedia = [ordered]@{
+                FileName      = if ($SourceItem) { $SourceItem.Name } else { Split-Path -Leaf $ResolvedIso }
+                SizeGB        = if ($SourceItem) { [math]::Round($SourceItem.Length / 1GB, 2) } else { 0 }
+                Sha256        = $script:StampSourceHash
+                Product       = "$($ImageInfo.ProductName)"
+                Version       = $ImageVersionText
+                FeatureUpdate = $FeatureName
+                Architecture  = $ImageArch
+                Language      = "$($ImageInfo.DefaultLanguage)"
+                ImageCreated  = if ($ImageInfo.CreatedTime) { ([datetime]$ImageInfo.CreatedTime).ToString('yyyy-MM-dd') } else { '' }
+                Editions      = $SourceEditions
+            }
+            Contents    = [ordered]@{
+                FinalBuild         = if ($script:FinalBuildString) { $script:FinalBuildString } else { "$ImageVersionText (unchanged)" }
+                InstallImage       = Split-Path -Leaf $FinalInstallImage
+                EditionsKept       = $KeptNames
+                EditionsRemoved    = $RemovedNames
+                EditionsNotUpdated = $UnpatchedNames
+                AnswerFile         = if ($ResolvedUnattend) { "autounattend.xml (from $(Split-Path -Leaf $ResolvedUnattend), SHA-256 $(Format-ShortHash $script:UnattendHash))" } else { '' }
+                RecoveryImage      = if ($ServiceWinRE) { 'winre.wim serviced with the Safe OS Dynamic Update' } else { 'winre.wim left as it shipped (-ServiceWinRE was not used)' }
+            }
+            Stripped    = [ordered]@{
+                ComponentStore     = if ($UpdateGroups.Count -gt 0) { 'Superseded components removed (/StartComponentCleanup /ResetBase), so the images cannot be rolled back to their original patch level' } else { 'Untouched (nothing was serviced)' }
+                ServicingResidueMB = [math]::Round($script:TattooResidueMB, 0)
+                ResidueDetail      = 'CBS/DISM/DPX/MoSetup/WindowsUpdate logs, Windows\Temp, SoftwareDistribution\Download, WinREAgent and Panther logs. Windows recreates all of it on first boot'
+                # Only ever populated when the source ISO was captured from an installed machine rather
+                # than downloaded from Microsoft, which is worth knowing about the media you are holding.
+                # .ToArray() rather than @(), which throws "Argument types do not match" on 5.1.
+                CaptureLeftovers   = $script:TattooResidueFound.ToArray()
+            }
+            Updates     = [ordered]@{
+                CatalogSelection = @($script:ExpectedUpdateSet | Where-Object { $_ })
+                Packages         = @($script:UpdateFileRecords)
+                Servicing        = $script:TattooServicing.ToArray()
+                FailedCount      = $Failed.Count
+            }
+            Parameters  = Get-BuildParameterSet
+        }
+
+        Write-BuildTattoo -MediaRoot $ExtractDir -Info $TattooInfo -ScriptSource $script:ScriptPath | Out-Null
+    }
+}
+
+# --- Recompile the ISO with oscdimg ---
 # The two boot sectors extracted from the source media: etfsboot.com boots the ISO on legacy BIOS PCs,
 # efisys.bin boots it on modern UEFI PCs. Both are fed to oscdimg so the new ISO boots on either.
 $EtfsBoot = Join-Path $ExtractDir 'boot\etfsboot.com'
@@ -3696,19 +3947,7 @@ if (-not $NoStamp) {
         $SourceItem = Get-Item -LiteralPath $ResolvedIso -ErrorAction SilentlyContinue
         $OutputItem = Get-Item -LiteralPath $OutputIsoPath -ErrorAction SilentlyContinue
 
-        $UpdateRecords = @()
-        foreach ($Path in @($script:StampUpdateFiles | Sort-Object -Unique)) {
-            $Item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
-            if (-not $Item) { continue }
-            $UpdateRecords += [ordered]@{
-                FileName           = $Item.Name
-                Kb                 = if ($Item.Name -match '(?i)kb(\d{6,})') { "KB$($Matches[1])" } else { '' }
-                SizeMB             = [math]::Round($Item.Length / 1MB, 1)
-                Sha256             = Get-Sha256 -Path $Item.FullName
-                # Only packages this script downloaded itself are ever eligible for -AutoClean.
-                FromDownloadFolder = ("$($Item.DirectoryName)".TrimEnd('\') -ieq "$DlDir".TrimEnd('\'))
-            }
-        }
+        $UpdateRecords = @($script:UpdateFileRecords)
 
         $ParameterSet = Get-BuildParameterSet
         $OutputHash = $null
@@ -3788,6 +4027,9 @@ Write-Host $LineBreak
 
 Write-HostTimestamp 'Done. Your updated Windows installation ISO is ready:' -ForegroundColor Green
 Write-HostTimestamp "  $OutputIsoPath" -ForegroundColor Green
+if (-not $SkipTattoo) {
+    Write-HostTimestamp '  Open \WISO-Build on the ISO for the record of how it was built.' -ForegroundColor DarkGray
+}
 Write-Host ''
 if ($script:ServicingFailures -gt 0) {
     Write-HostTimestamp "Note: the cumulative update didn't apply to $($script:ServicingFailures) edition(s), so they kept their original patch level. The ISO is still valid and bootable - see C:\Windows\Logs\DISM\dism.log if you want the details." -ForegroundColor DarkYellow

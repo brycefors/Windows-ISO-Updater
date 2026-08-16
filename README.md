@@ -36,7 +36,7 @@ pass your own:
 | [Scheduled Runs](docs/scheduled-runs.md) | Running this from a scheduled task: build stamps, skipping runs that would change nothing, and `-AutoClean` housekeeping. |
 | [Unattended Installs](docs/unattended-installs.md) | `-UnattendPath`, plus two worked answer files: a no-OOBE lab machine and a sysprep gold image. |
 | [Design Notes](docs/design-notes.md) | Why the already-patched check works the way it does, why both `boot.wim` indexes are serviced, why you should not re-update an ISO this script built, why two builds are never the same size, and what Windows Update still offers afterwards. |
-| [Reference](docs/reference.md) | Step by step of a run, how files are downloaded, disk space, output locations, and logging. |
+| [Reference](docs/reference.md) | Step by step of a run, the build record written onto the finished ISO, how files are downloaded, disk space, output locations, and logging. |
 
 ## Important Notes
 

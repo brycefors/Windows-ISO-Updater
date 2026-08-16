@@ -12,8 +12,30 @@
 6.  **Refresh the media Setup files.** Expands the **Setup Dynamic Update** over the media's `sources` folder (updated Setup binaries, compatibility database and replacement component manifests), then copies the serviced `setup.exe`, `setuphost.exe` (Windows 11 24H2+) and boot manager files out of `boot.wim` index 2 onto the media. Windows Setup **fails during installation** if these loose files do not match the version inside `boot.wim`.
 7.  **Clean up and shrink.** Runs `DISM /Cleanup-Image /StartComponentCleanup /ResetBase`, strips the servicing residue DISM left inside the image (CBS and DISM logs, `Windows\Temp`, `$WinREAgent`, and anything a captured source image dragged in), re-exports `install.wim` to reclaim space, and re-exports `boot.wim` (which servicing inflates), preserving the bootable flag on the Windows Setup index. With `-CompressEsd` the install image is written as `install.esd` instead, using recovery compression. See [Why Two Identical Builds Aren't the Same Size](design-notes.md#why-two-identical-builds-arent-the-same-size).
 8.  **Add the answer file.** If `-UnattendPath` was supplied, copies it to the root of the media as `autounattend.xml`.
-9.  **Recompile the ISO.** Uses `oscdimg` to build a new bootable ISO, preserving both the **BIOS (`etfsboot.com`)** and **UEFI (`efisys.bin`)** boot sectors so the media boots on legacy and modern PCs alike. The ISO is given a volume label describing its contents, e.g. `WIN11_MULTI_X64_26100_4652`, which is what File Explorer shows and what Rufus and Ventoy copy onto the USB stick. Override it with `-VolumeLabel`.
-10. **Clean up.** Removes the extracted working files, leaving the finished ISO.
+9.  **Tattoo the media.** Writes a `\WISO-Build` folder onto the media describing the build, unless `-SkipTattoo` was passed. See [The Build Record on the ISO](#the-build-record-on-the-iso).
+10. **Recompile the ISO.** Uses `oscdimg` to build a new bootable ISO, preserving both the **BIOS (`etfsboot.com`)** and **UEFI (`efisys.bin`)** boot sectors so the media boots on legacy and modern PCs alike. The ISO is given a volume label describing its contents, e.g. `WIN11_MULTI_X64_26100_4652`, which is what File Explorer shows and what Rufus and Ventoy copy onto the USB stick. Override it with `-VolumeLabel`.
+11. **Clean up.** Removes the extracted working files, leaving the finished ISO.
+
+## The Build Record on the ISO
+
+The build stamp stays on the machine that did the building, which is no use to whoever is holding the ISO a year later, so the same story is written onto the media itself:
+
+```text
+\WISO-Build\
+  build-info.txt           <- the report, readable in Notepad
+  build-info.json          <- the same data for scripts
+  Windows-ISO-Updater.ps1  <- the exact script that built the ISO
+```
+
+It costs about half a megabyte, Windows Setup ignores it, and deleting it off a USB stick changes nothing. It records:
+
+- **The source media**, by file name, SHA-256, product name, version, feature update, architecture, language and the full list of editions it shipped with.
+- **Every update**, by KB and SHA-256, and the result of applying each one to each image, so a package that failed on `boot.wim` but applied to `install.wim` is visible without digging through `dism.log`.
+- **What was kept and what was stripped**: the editions kept, the editions removed, any edition left in the ISO that was not updated, whether the component store was reset, and how much servicing residue was deleted.
+- **Who built it**: machine name, user, operating system, PowerShell version, script version and the command line that was used.
+- **When**, both in local time and UTC.
+
+Pass `-SkipTattoo` to leave the media untouched. The switch is build-affecting, so toggling it forces one rebuild.
 
 ## How Files Are Downloaded
 
