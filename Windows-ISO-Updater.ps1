@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10) installation ISO.
@@ -216,7 +216,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.2'
+$ScriptVersion = '2026.08.16.3'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1159,13 +1159,55 @@ function Get-BuildStampHistory {
     return $Stamps.ToArray()
 }
 
+# Windows PowerShell 5.1 indents nested JSON to the column of its opening brace, so the deeper parts of
+# a stamp end up far off to the right. Re-indent the compressed form to a fixed two spaces instead.
+function Format-Json {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Json,
+        [int]$IndentWidth = 2
+    )
+    $Builder = New-Object System.Text.StringBuilder
+    $Newline = [Environment]::NewLine
+    $Depth = 0
+    $InString = $false
+    for ($i = 0; $i -lt $Json.Length; $i++) {
+        $Char = $Json[$i]
+        if ($InString) {
+            [void]$Builder.Append($Char)
+            # A backslash escapes whatever follows, so consume that before looking for the closing quote.
+            if ($Char -eq '\' -and $i + 1 -lt $Json.Length) { [void]$Builder.Append($Json[++$i]) }
+            elseif ($Char -eq '"') { $InString = $false }
+            continue
+        }
+        if ($Char -eq '"') { $InString = $true; [void]$Builder.Append($Char); continue }
+        if ($Char -eq ':') { [void]$Builder.Append(': '); continue }
+        if ($Char -eq ',') { [void]$Builder.Append(",$Newline" + (' ' * ($Depth * $IndentWidth))); continue }
+        if ($Char -eq '{' -or $Char -eq '[') {
+            [void]$Builder.Append($Char)
+            $Close = if ($Char -eq '{') { '}' } else { ']' }
+            # An empty object or array stays on one line rather than spending three lines on nothing.
+            if ($i + 1 -lt $Json.Length -and $Json[$i + 1] -eq $Close) { [void]$Builder.Append($Close); $i++; continue }
+            $Depth++
+            [void]$Builder.Append($Newline + (' ' * ($Depth * $IndentWidth)))
+            continue
+        }
+        if ($Char -eq '}' -or $Char -eq ']') {
+            $Depth--
+            [void]$Builder.Append($Newline + (' ' * ($Depth * $IndentWidth)) + $Char)
+            continue
+        }
+        [void]$Builder.Append($Char)
+    }
+    return $Builder.ToString()
+}
+
 function Write-BuildStamp {
     param([Parameter(Mandatory)]$Stamp)
     try {
         foreach ($Dir in @($StampRoot, $StampHistoryDir)) {
             if (-not (Test-Path -LiteralPath $Dir)) { New-Item -ItemType Directory -Path $Dir -Force -ErrorAction Stop | Out-Null }
         }
-        $Json = $Stamp | ConvertTo-Json -Depth 8
+        $Json = Format-Json -Json ($Stamp | ConvertTo-Json -Depth 8 -Compress)
         Set-Content -LiteralPath $StampFile -Value $Json -Encoding UTF8 -ErrorAction Stop
         $HistoryFile = Join-Path -Path $StampHistoryDir -ChildPath ("stamp_{0}.json" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
         Set-Content -LiteralPath $HistoryFile -Value $Json -Encoding UTF8 -ErrorAction Stop
