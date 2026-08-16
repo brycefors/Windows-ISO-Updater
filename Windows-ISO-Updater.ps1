@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.14   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.15   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -235,7 +235,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.14'
+$ScriptVersion = '2026.08.16.15'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2110,6 +2110,39 @@ function Dismount-ImageDiscard {
     return $false
 }
 
+# Deletes a directory that Administrator rights alone cannot touch. What DISM leaves behind when a mount
+# is interrupted is owned by TrustedInstaller and carries the image's own ACLs, so Remove-Item fails with
+# "You need permission from TrustedInstaller" and every later run then fails too. Well-known SIDs are used
+# rather than account names so this still works on a non-English Windows.
+function Remove-DirectoryForce {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+
+    Write-HostTimestamp "    Leftover files at $Path are locked down by TrustedInstaller, taking ownership of them..." -ForegroundColor Yellow
+    & takeown.exe /F "$Path" /A /R /D Y 2>&1 | Out-Null
+    & icacls.exe "$Path" /grant '*S-1-5-32-544:(OI)(CI)F' /T /C /Q 2>&1 | Out-Null
+    & attrib.exe -R -S -H "$Path\*" /S /D 2>&1 | Out-Null
+
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-HostTimestamp '    Removed them.' -ForegroundColor Green
+        return $true
+    }
+
+    # A handle held by the servicing stack usually goes away on its own a moment later.
+    Start-Sleep -Seconds 3
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-HostTimestamp '    Removed them.' -ForegroundColor Green
+        return $true
+    }
+    return $false
+}
+
 # Ensures a mount directory is clean and ready to receive a fresh WIM mount. A previous run that crashed
 # or was killed can leave an image still mounted (or a corrupt mount point) there, which makes the next
 # Mount-WindowsImage fail. DISM tracks a mount by WIM file + index as well as by directory, so a mount
@@ -2158,12 +2191,8 @@ function Reset-MountDirectory {
     }
 
     # Only safe once nothing is mounted here - deleting a tracked mount directory is what orphans it.
-    if (Test-Path -LiteralPath $Path) {
-        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
-        if (Test-Path -LiteralPath $Path) {
-            Start-Sleep -Seconds 2
-            Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
-        }
+    if (-not (Remove-DirectoryForce -Path $Path)) {
+        throw "The mount folder $Path still holds files from a failed run and could not be deleted, even after taking ownership. Reboot to release the handles, then start the build again."
     }
     New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop | Out-Null
 }
@@ -3770,7 +3799,7 @@ if ($UpdateGroups.Count -gt 0) {
     }
 
     # 4) Re-export install.wim below (outside this block) to reclaim the space freed by the cleanup.
-    Remove-Item -LiteralPath $MountDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-DirectoryForce -Path $MountDir | Out-Null
 }
 
 # --- Re-export install.wim (shrink after servicing and/or drop editions with -KeepEditions) ---
