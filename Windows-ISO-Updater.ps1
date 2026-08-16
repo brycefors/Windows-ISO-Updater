@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.17   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.18   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -235,7 +235,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.17'
+$ScriptVersion = '2026.08.16.18'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2079,12 +2079,103 @@ function Get-IsoVolumeLabel {
     return $Label.Trim('_')
 }
 
+# Last resort for a mount that nothing in this session can release. At boot the WIM filter driver has not
+# re-attached anything yet, so a task running as SYSTEM (which outranks the TrustedInstaller ACLs DISM
+# leaves on the files) can clear the folder before anything claims it. The task deletes itself afterwards
+# so a machine is never left with a stray task from a failed build.
+function Register-MountCleanupTask {
+    param([Parameter(Mandatory)][string[]]$Path)
+
+    if (-not (Get-Command -Name Register-ScheduledTask -ErrorAction SilentlyContinue)) { return $false }
+
+    $CleanupTaskName = 'Windows-ISO-Updater Mount Cleanup'
+    $ToolsDir = Join-Path -Path $WorkRoot -ChildPath 'Tools'
+    $CleanupScript = Join-Path -Path $ToolsDir -ChildPath 'Clear-StaleMount.ps1'
+    $CleanupLog = Join-Path -Path $LogDir -ChildPath 'mount-cleanup.log'
+    $PathList = ($Path | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ', '
+
+    # Runs unattended at boot, so it leaves a log rather than failing silently. Everything here is the
+    # teardown DISM should have done itself: strip the reparse point and attributes the WIM filter leaves
+    # on a half-released mount, drop the registry entry that /Cleanup-Mountpoints skips when the mount is
+    # too broken for DISM to recognise, and only then take ownership and delete.
+    $Body = @"
+`$ErrorActionPreference = 'SilentlyContinue'
+Start-Transcript -Path '$CleanupLog' -Append | Out-Null
+`$Targets = @($PathList)
+
+foreach (`$Target in `$Targets) {
+    if (-not (Test-Path -LiteralPath `$Target)) { continue }
+    "Stripping reparse point and attributes from `$Target"
+    & fsutil.exe reparsepoint delete "`$Target"
+    & attrib.exe -R -S -H "`$Target" /S /D
+}
+
+# DISM's own list of mounts. An entry here that no longer matches reality is what makes every later mount
+# fail, and it outlives both a reboot and /Cleanup-Mountpoints. Matched on any value holding the path
+# rather than one named value, so a layout change cannot make this delete the wrong key.
+`$MountedKey = 'HKLM:\SOFTWARE\Microsoft\WIMMount\Mounted Images'
+foreach (`$Entry in (Get-ChildItem -LiteralPath `$MountedKey)) {
+    `$Values = Get-ItemProperty -LiteralPath `$Entry.PSPath
+    foreach (`$Prop in `$Values.PSObject.Properties) {
+        if (`$Prop.Value -isnot [string]) { continue }
+        foreach (`$Target in `$Targets) {
+            if (`$Prop.Value.TrimEnd('\') -ieq `$Target.TrimEnd('\')) {
+                "Removing orphaned WIMMount registration `$(`$Entry.PSChildName) for `$Target"
+                Remove-Item -LiteralPath `$Entry.PSPath -Recurse -Force
+            }
+        }
+    }
+}
+
+& dism.exe /English /Cleanup-Mountpoints
+
+foreach (`$Target in `$Targets) {
+    if (-not (Test-Path -LiteralPath `$Target)) { continue }
+    "Taking ownership of `$Target and deleting it"
+    & takeown.exe /F "`$Target" /A /R /D Y
+    & icacls.exe "`$Target" /grant '*S-1-5-32-544:(OI)(CI)F' /T /C /Q
+    Remove-Item -LiteralPath `$Target -Recurse -Force
+    if (Test-Path -LiteralPath `$Target) { "STILL PRESENT: `$Target" } else { "Removed `$Target" }
+}
+
+Stop-Transcript | Out-Null
+Unregister-ScheduledTask -TaskName '$CleanupTaskName' -Confirm:`$false
+Remove-Item -LiteralPath '$CleanupScript' -Force
+"@
+
+    try {
+        New-Item -ItemType Directory -Path $ToolsDir -Force -ErrorAction Stop | Out-Null
+        Set-Content -LiteralPath $CleanupScript -Value $Body -Encoding UTF8 -ErrorAction Stop
+        # SYSTEM runs this file, so nobody below Administrator may be able to rewrite it first.
+        & icacls.exe "$CleanupScript" /inheritance:r /grant '*S-1-5-18:(F)' '*S-1-5-32-544:(F)' /Q 2>&1 | Out-Null
+
+        # The inbox Windows PowerShell, not $PSHOME, so the task does not depend on whichever host started this run.
+        $Exe = Join-Path -Path $env:SystemRoot -ChildPath 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $Action = New-ScheduledTaskAction -Execute $Exe -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$CleanupScript`""
+        $Trigger = New-ScheduledTaskTrigger -AtStartup
+        $Principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+        Register-ScheduledTask -TaskName $CleanupTaskName -Trigger $Trigger -Action $Action -Principal $Principal `
+            -Settings $Settings -Description 'One-shot cleanup of a stale DISM mount folder left behind by Windows-ISO-Updater. Removes itself after it runs.' `
+            -Force -ErrorAction Stop | Out-Null
+    }
+    catch {
+        Write-HostTimestamp "    Could not register the boot-time cleanup task: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    }
+
+    Write-HostTimestamp "    Registered the scheduled task '$CleanupTaskName' to clear it as SYSTEM at the next boot." -ForegroundColor Green
+    Write-HostTimestamp "      It strips the reparse point, deletes the orphaned WIMMount registry entry, then takes ownership and deletes the folder, logging to $CleanupLog." -ForegroundColor DarkGray
+    return $true
+}
+
 # Throws away a mount without letting DISM's errors escape. Dismount-WindowsImage raises a terminating
 # COMException that -ErrorAction cannot suppress, so every discard has to be wrapped or it fills the
-# transcript with stack traces from cleanup paths that already know the mount may be gone. -Escalate adds
-# the recovery for a mount abandoned by a dead process, which answers the managed call with "The request
-# is not supported" and has to be re-attached with dism.exe first, then falls back to dropping the mount
-# point registration outright for one that no longer survives a re-attach.
+# transcript with stack traces from cleanup paths that already know the mount may be gone. -Escalate then
+# walks dism.exe up from a plain discard, to re-attaching a mount abandoned by a dead process (which
+# answers the managed call with "The request is not supported"), to dropping the registration outright for
+# one that survived a reboot and can no longer be re-attached at all.
 function Dismount-ImageDiscard {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -2100,16 +2191,33 @@ function Dismount-ImageDiscard {
         Write-HostTimestamp "      Discard failed: $($_.Exception.Message)" -ForegroundColor Yellow
     }
 
-    Write-HostTimestamp '      Re-attaching the mount with dism.exe so it can be released...' -ForegroundColor Yellow
-    & dism.exe /English /Remount-Image "/MountDir:$Path" 2>&1 | Out-Null
+    # dism.exe reaches mounts the managed API will not touch, so ask it to discard before re-attaching
+    # anything. Re-attaching a mount that did not need it is what turns a dormant mount back into a live one.
+    Write-HostTimestamp '      Asking dism.exe to discard it...' -ForegroundColor Yellow
     & dism.exe /English /Unmount-Image "/MountDir:$Path" /Discard 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Write-HostTimestamp '      Released it.' -ForegroundColor Green
         return $true
     }
+    $DiscardCode = $LASTEXITCODE
 
-    # A mount that survived a reboot cannot be re-attached at all, so the registration itself has to go.
-    Write-HostTimestamp ('      Re-attaching failed (exit code 0x{0:X8}), dropping the mount point registration instead...' -f $LASTEXITCODE) -ForegroundColor Yellow
+    Write-HostTimestamp ('      dism.exe could not discard it either (exit code 0x{0:X8}), re-attaching the mount first...' -f $DiscardCode) -ForegroundColor Yellow
+    & dism.exe /English /Remount-Image "/MountDir:$Path" 2>&1 | Out-Null
+    $RemountCode = $LASTEXITCODE
+    if ($RemountCode -eq 0) {
+        & dism.exe /English /Unmount-Image "/MountDir:$Path" /Discard 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-HostTimestamp '      Released it.' -ForegroundColor Green
+            return $true
+        }
+        Write-HostTimestamp ('      It re-attached but still would not release (exit code 0x{0:X8}).' -f $LASTEXITCODE) -ForegroundColor Yellow
+    }
+    else {
+        Write-HostTimestamp ('      It cannot be re-attached (exit code 0x{0:X8}), which is what a mount that outlived a reboot looks like.' -f $RemountCode) -ForegroundColor Yellow
+    }
+
+    # Nothing can revive this mount, so the registration itself is what has to go.
+    Write-HostTimestamp '      Dropping the mount point registration instead...' -ForegroundColor Yellow
     & dism.exe /English /Cleanup-Mountpoints 2>&1 | Out-Null
     $StillMounted = @(Get-WindowsImage -Mounted -ErrorAction SilentlyContinue |
             Where-Object { $_.Path -and $_.Path.TrimEnd('\') -ieq $Path.TrimEnd('\') })
@@ -2199,11 +2307,17 @@ function Reset-MountDirectory {
     $Stale = & $FindStale
     if ($Stale) {
         $Detail = ($Stale | ForEach-Object { "$(if ($_.ImagePath) { Split-Path $_.ImagePath -Leaf } else { 'image' }) index $($_.ImageIndex)" }) -join ', '
+        if (Register-MountCleanupTask -Path $Path) {
+            throw "An image is still mounted ($Detail) and nothing this script can do from a running session will release it. Reboot and start the build again - the cleanup task clears it on the way up."
+        }
         throw "An image is still mounted ($Detail) and DISM will reject the next mount. Every automatic recovery has already been tried, including 'dism /Cleanup-Mountpoints'. Reboot, then run 'dism /Cleanup-Mountpoints' from an elevated prompt before starting the build again."
     }
 
     # Only safe once nothing is mounted here - deleting a tracked mount directory is what orphans it.
     if (-not (Remove-DirectoryForce -Path $Path)) {
+        if (Register-MountCleanupTask -Path $Path) {
+            throw "The mount folder $Path could not be deleted, even after taking ownership. Reboot and start the build again - the cleanup task clears it on the way up."
+        }
         throw "The mount folder $Path still holds files from a failed run and could not be deleted, even after taking ownership. Reboot to release the handles, then start the build again."
     }
     New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop | Out-Null
