@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.8   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.9   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -122,6 +122,10 @@ param(
     [Parameter(HelpMessage = 'Full path for the recompiled ISO. Defaults to an auto-generated name in the Output folder under the working folder')]
     [string]$OutputIsoPath,
 
+    [Parameter(HelpMessage = 'Volume label written into the finished ISO, which is what File Explorer shows and what Rufus and Ventoy copy onto the USB stick. Defaults to a label describing the contents, such as WIN11_MULTI_X64_26100_4652. Maximum 32 characters, no spaces')]
+    [ValidatePattern('^[A-Za-z0-9._-]{1,32}$')]
+    [string]$VolumeLabel,
+
     [Parameter(HelpMessage = 'Full path to oscdimg.exe if the Windows ADK is installed in a non-standard location')]
     [string]$OscdimgPath,
 
@@ -224,7 +228,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.8'
+$ScriptVersion = '2026.08.16.9'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1188,7 +1192,7 @@ function Format-ShortHash {
 # deliberately left out: moving the working folder does not make last month's ISO wrong.
 $script:BuildAffectingParameters = @(
     'WindowsVersion', 'Server', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
-    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'SkipUpdates', 'CompressEsd'
+    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'SkipUpdates', 'CompressEsd', 'VolumeLabel'
 )
 
 # Flattens those parameters (current values, not just the ones that were passed) into comparable text.
@@ -2014,6 +2018,31 @@ function Get-DefaultIsoName {
     return (($Parts -join '_') + '.iso')
 }
 
+# Builds the ISO's volume label from the generated file name, so the media describes itself the same way
+# the file does. oscdimg writes no label unless -l is passed, and unlabelled media turns up as a generic
+# "DVD_ROM" in File Explorer and in the Rufus volume label box.
+function Get-IsoVolumeLabel {
+    param([Parameter(Mandatory)][string]$IsoFileName)
+
+    # Windows shows 32 characters, and only A-Z, 0-9 and underscore survive every reader, so the build
+    # timestamp is dropped (the label describes contents, not when it was made) and the rest is folded.
+    $MaxLength = 32
+    $Base = [System.IO.Path]::GetFileNameWithoutExtension($IsoFileName) -replace '_\d{8}-\d{4}$', ''
+    $Label = ($Base.ToUpperInvariant() -replace '[^A-Z0-9]', '_') -replace '_+', '_'
+
+    # Too long drops the architecture first, then shortens the edition, so the Windows release and the
+    # build number (the two things worth reading off a USB stick) always survive intact.
+    if ($Label.Length -gt $MaxLength) { $Label = $Label -replace '_(X64|X86|ARM64|AMD64)_', '_' }
+    if ($Label.Length -gt $MaxLength -and $Label -match '^([A-Z0-9]+)_([A-Z0-9]+)_(.+)$') {
+        $Room = $MaxLength - ($Matches[1].Length + $Matches[3].Length + 2)
+        if ($Room -ge 3) {
+            $Label = '{0}_{1}_{2}' -f $Matches[1], $Matches[2].Substring(0, [Math]::Min($Matches[2].Length, $Room)), $Matches[3]
+        }
+    }
+    if ($Label.Length -gt $MaxLength) { $Label = $Label.Substring(0, $MaxLength) }
+    return $Label.Trim('_')
+}
+
 # Ensures a mount directory is clean and ready to receive a fresh WIM mount. A previous run that crashed
 # or was killed can leave an image still mounted (or a corrupt mount point) there, which makes the next
 # Mount-WindowsImage fail. DISM tracks a mount by WIM file + index as well as by directory, so a mount
@@ -2213,6 +2242,85 @@ function Add-UpdateGroup {
     }
     finally {
         Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Deletes servicing residue from a mounted image before it is committed. Windows recreates all of it on
+# first boot, and its size varies with how chatty DISM was, which is the main reason two builds from the
+# same source ISO and the same update come out different sizes.
+function Remove-ImageResidue {
+    param([Parameter(Mandatory)][string]$MountDir)
+
+    # Folder contents to clear, keeping the folder itself so nothing has to recreate it.
+    $ClearFolders = @(
+        'Windows\Logs\CBS'
+        'Windows\Logs\DISM'
+        'Windows\Logs\DPX'
+        'Windows\Logs\MoSetup'
+        'Windows\Logs\WindowsUpdate'
+        'Windows\Temp'
+        'Windows\SoftwareDistribution\Download'
+    )
+    # Whole items to remove.
+    $DeleteItems = @('$WinREAgent')
+    # None of these belong in clean Microsoft media, so finding one says the source ISO was built from a
+    # captured image rather than downloaded from Microsoft. They are removed either way.
+    $Suspect = @(
+        'Windows.old'
+        '$WINDOWS.~BT'
+        '$WINDOWS.~WS'
+        '$Recycle.Bin'
+        'System Volume Information'
+        'pagefile.sys'
+        'hiberfil.sys'
+        'swapfile.sys'
+    )
+
+    $FreedMB = 0
+    $Found = New-Object System.Collections.Generic.List[string]
+
+    # Get-ChildItem on a file path returns that file, so one expression sizes folders and files alike.
+    $Measure = {
+        param($Path)
+        $Sum = (Get-ChildItem -LiteralPath $Path -File -Recurse -Force -ErrorAction SilentlyContinue |
+                Measure-Object -Property Length -Sum).Sum
+        if ($Sum) { return ($Sum / 1MB) }
+        return 0
+    }
+
+    foreach ($Relative in $ClearFolders) {
+        $Full = Join-Path -Path $MountDir -ChildPath $Relative
+        if (-not (Test-Path -LiteralPath $Full -PathType Container)) { continue }
+        foreach ($Child in @(Get-ChildItem -LiteralPath $Full -Force -ErrorAction SilentlyContinue)) {
+            $FreedMB += & $Measure $Child.FullName
+            Remove-Item -LiteralPath $Child.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Only the logs in Panther, because a captured image can keep the answer file that built it there.
+    $Panther = Join-Path -Path $MountDir -ChildPath 'Windows\Panther'
+    if (Test-Path -LiteralPath $Panther -PathType Container) {
+        foreach ($Log in @(Get-ChildItem -LiteralPath $Panther -File -Recurse -Force -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Extension -in '.log', '.etl', '.evtx' })) {
+            $FreedMB += ($Log.Length / 1MB)
+            Remove-Item -LiteralPath $Log.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    foreach ($Relative in ($DeleteItems + $Suspect)) {
+        $Full = Join-Path -Path $MountDir -ChildPath $Relative
+        if (-not (Test-Path -LiteralPath $Full)) { continue }
+        if ($Suspect -contains $Relative) { $Found.Add($Relative) }
+        $FreedMB += & $Measure $Full
+        Remove-Item -LiteralPath $Full -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($Found.Count -gt 0) {
+        Write-HostTimestamp "    Removed leftovers that clean Microsoft media never contains: $($Found -join ', ')" -ForegroundColor Yellow
+        Write-HostTimestamp '      These come from the source image, not from this build, so it was captured from an installed machine. Exclude them at capture time, or use official Microsoft media.' -ForegroundColor Yellow
+    }
+    if ($FreedMB -ge 1) {
+        Write-HostTimestamp ('    Stripped {0:N0} MB of servicing residue (logs and temp files Windows recreates on first boot).' -f $FreedMB) -ForegroundColor DarkGray
     }
 }
 
@@ -3224,6 +3332,7 @@ if ($UpdateGroups.Count -gt 0) {
                             else {
                                 Write-HostTimestamp '      No Safe OS Dynamic Update available, so WinRE update integration is skipped.' -ForegroundColor DarkGray
                             }
+                            Remove-ImageResidue -MountDir $WinReMount
                             Dismount-WindowsImage -Path $WinReMount -Save -ErrorAction Stop | Out-Null
                         }
                         catch {
@@ -3246,6 +3355,8 @@ if ($UpdateGroups.Count -gt 0) {
                 Write-HostTimestamp '    Cleaning up the component store (/StartComponentCleanup /ResetBase)...'
                 # ResetBase permanently removes superseded components, shrinking the image. This is slow.
                 & dism.exe /Image:"$MountDir" /Cleanup-Image /StartComponentCleanup /ResetBase | Out-Null
+
+                Remove-ImageResidue -MountDir $MountDir
 
                 # Grabbed here because the image is already mounted, since mounting the finished image later
                 # just to read this one value costs several minutes.
@@ -3298,6 +3409,7 @@ if ($UpdateGroups.Count -gt 0) {
                     Mount-WindowsImage -ImagePath $BootWim -Index $BootImg.ImageIndex -Path $MountDir -ErrorAction Stop | Out-Null
                     foreach ($Group in $UpdateGroups) { Add-UpdateGroup -MountDir $MountDir -Group $Group | Out-Null }
                     & dism.exe /Image:"$MountDir" /Cleanup-Image /StartComponentCleanup | Out-Null
+                    Remove-ImageResidue -MountDir $MountDir
 
                     # Index 2 is the Windows Setup image. The cumulative update raises the version of the
                     # Setup and boot-manager binaries INSIDE this image, so the copies sitting loose on the
@@ -3470,11 +3582,13 @@ if ($ResolvedUnattend) {
 }
 
 # --- Recompile the ISO with oscdimg ---
-# Default the output path to the finished-ISO folder, named after what the ISO actually contains:
-# Win11_Pro_x64_26100.4061_20260815-1332.iso.
+# The name describes what the ISO actually contains: Win11_Pro_x64_26100.4061_20260815-1332.iso. It is
+# built even when -OutputIsoPath overrides the path, because the volume label is derived from it.
+$DefaultIsoName = Get-DefaultIsoName -Images $InstallImages -Indexes $KeepIndexes -BuildString $script:FinalBuildString -FallbackVersion $ImageInfo.Version -Architecture $ImageArch
 if (-not $OutputIsoPath) {
-    $OutputIsoPath = Join-Path -Path $FinishedIsoDir -ChildPath (Get-DefaultIsoName -Images $InstallImages -Indexes $KeepIndexes -BuildString $script:FinalBuildString -FallbackVersion $ImageInfo.Version -Architecture $ImageArch)
+    $OutputIsoPath = Join-Path -Path $FinishedIsoDir -ChildPath $DefaultIsoName
 }
+$IsoVolumeLabel = if ($VolumeLabel) { $VolumeLabel } else { Get-IsoVolumeLabel -IsoFileName $DefaultIsoName }
 # Make sure the destination folder exists before oscdimg writes the ISO into it.
 try {
     $OutDir = Split-Path -Path $OutputIsoPath -Parent
@@ -3512,11 +3626,12 @@ Invoke-Task -Description "Recompiling the bootable ISO to $OutputIsoPath ..." -S
 
     # oscdimg switches: -m (ignore the 4 GB image size limit), -o (de-duplicate identical files to save
     # space), -u2 (write a pure UDF file system, required for the large install.wim), -udfver102 (UDF
-    # revision 1.02 for broad compatibility). -bootdata makes the ISO bootable, and the last two arguments
-    # are the source folder to package and the output ISO path.
-    $OscdimgArgs = @('-m', '-o', '-u2', '-udfver102')
+    # revision 1.02 for broad compatibility), -l (volume label). -bootdata makes the ISO bootable, and the
+    # last two arguments are the source folder to package and the output ISO path.
+    $OscdimgArgs = @('-m', '-o', '-u2', '-udfver102', "-l$IsoVolumeLabel")
     if ($BootArg) { $OscdimgArgs += "-bootdata:$BootArg" }
     $OscdimgArgs += @($ExtractDir, $OutputIsoPath)
+    Write-HostTimestamp "  Volume label: $IsoVolumeLabel" -ForegroundColor DarkGray
 
     # Run oscdimg and wait for it to finish, then verify it actually produced the ISO.
     Write-HostTimestamp "  Running: `"$Oscdimg`" $($OscdimgArgs -join ' ')"

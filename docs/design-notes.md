@@ -69,3 +69,19 @@ The intended setup is a pristine ISO kept somewhere permanent, with its own work
 ```
 
 `-AutoClean` prunes old outputs and superseded update packages on its own, and because it only deletes files a stamp recorded, the source ISO is never touched.
+
+## Why Two Identical Builds Aren't the Same Size
+
+The finished ISO's SHA-256 changes on **every** build, even from the same source and the same update, because `oscdimg` writes timestamps into the ISO and the output file name embeds the build date and time. Byte-identical output was never a goal. Size, though, should be stable to within a few megabytes, and a bigger gap than that is worth explaining.
+
+Offline servicing writes into the image as it works: `Windows\Logs\CBS`, `Windows\Logs\DISM`, `$WinREAgent` state, temp files. How much it writes depends on how chatty DISM was on that particular run, and all of it used to be committed and exported with the image. That was the main source of run-to-run size drift, so every image is now stripped of it just before `Dismount-WindowsImage -Save`:
+
+* Contents of `Windows\Logs\CBS`, `Logs\DISM`, `Logs\DPX`, `Logs\MoSetup`, `Logs\WindowsUpdate`, `Windows\Temp` and `Windows\SoftwareDistribution\Download`, keeping the folders themselves.
+* `$WinREAgent`.
+* Only the `.log`, `.etl` and `.evtx` files in `Windows\Panther`. The folder is left in place and any XML in it is kept, because a captured image can legitimately keep the answer file that built it there.
+
+Windows recreates all of it on first boot. The same pass also removes `Windows.old`, `$WINDOWS.~BT`, `$WINDOWS.~WS`, `$Recycle.Bin`, `System Volume Information`, `pagefile.sys`, `hiberfil.sys` and `swapfile.sys`, and **warns** when it finds any of them, because none belong in clean Microsoft media. Finding one means the source ISO was built from a captured machine rather than downloaded from Microsoft, which is worth knowing on the first build rather than on the first deployed machine. DISM's default capture exclusion list does not exclude them, so a naive `/Capture-Image` carries them into every deployment.
+
+What remains after that is genuine variance in what `/ResetBase` managed to reclaim, which depends on the component store's state at that moment. Running the cleanup more than once does not help, since a completed `/ResetBase` has already removed every superseded component and a second pass rescans the whole store to reclaim nothing. It also runs per edition, so repeating it is expensive.
+
+If two builds still differ by hundreds of megabytes, compare their stamps rather than guessing. A `Result` of `SuccessWithWarnings` means a package failed to apply to at least one edition and that ISO is genuinely under-patched.

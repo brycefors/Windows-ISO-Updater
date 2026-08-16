@@ -26,6 +26,7 @@ The script supports the following optional parameters:
 | `-DownloadPath` | Directory to download the ISO/updates into. Defaults to a `Downloads` folder inside the working folder. |
 | `-WorkPath` | Working folder used to extract and service the media. Defaults to `<SystemDrive>\WISO-Work`. Must be on a local disk: a UNC path, a mapped network drive, or a drive letter that does not exist in the current session is rejected before the build starts. Give each Windows version its own, otherwise they share downloads and build stamps ([why](usage.md#building-several-windows-versions-side-by-side)). |
 | `-OutputIsoPath` | Full path for the recompiled ISO. Defaults to the `Output\` folder under the working folder, named after the contents and the patched build, e.g. `Win11_Pro_x64_26100.4061_20260815-1332.iso`. |
+| `-VolumeLabel` | Volume label written into the finished ISO, which is what File Explorer shows and what Rufus and Ventoy copy onto the USB stick. Defaults to a label describing the contents, e.g. `WIN11_MULTI_X64_26100_4652`. Maximum 32 characters, letters, digits, `_`, `-` and `.` only, no spaces. |
 | `-OscdimgPath` | Full path to `oscdimg.exe` if the Windows ADK is installed in a non-standard location. |
 | `-SkipOscdimgDownload` | Do not download a standalone `oscdimg.exe` from Microsoft's symbol server. Require the Windows ADK instead. |
 | `-InstallAdk` | If `oscdimg.exe` is not found and cannot be downloaded, download and silently install the ADK Deployment Tools from Microsoft. |
