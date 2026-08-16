@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.4   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.5   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -112,7 +112,7 @@ param(
     [Parameter(HelpMessage = 'Path to an unattended answer file to place on the finished ISO as \autounattend.xml, so Windows Setup runs without prompting')]
     [string]$UnattendPath,
 
-    [Parameter(HelpMessage = 'Directory to download the ISO/updates into (defaults to the script folder). Needs several GB free')]
+    [Parameter(HelpMessage = 'Directory to download the ISO/updates into. Defaults to a Downloads folder inside the working folder. Needs several GB free')]
     [string]$DownloadPath,
 
     [Parameter(HelpMessage = 'Working folder used to extract and service the media. Must be on a fast drive with lots of free space. Defaults to <SystemDrive>\WISO-Work')]
@@ -223,7 +223,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.4'
+$ScriptVersion = '2026.08.16.5'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2815,8 +2815,12 @@ $ImageIsServer = "$($ImageInfo.ImageName) $($ImageInfo.EditionId)" -match '(?i)s
 if ($ImageIsServer -and -not $Server) {
     Write-HostTimestamp "This looks like Windows Server media ($($ImageInfo.ImageName)), but -Server was not passed, so client updates will be searched for and will not apply. Re-run with -Server." -ForegroundColor Yellow
 }
-elseif ($Server -and -not $ImageIsServer) {
-    Write-HostTimestamp "-Server was passed, but this looks like client media ($($ImageInfo.ImageName)), so Server updates will be searched for and will not apply. Re-run without -Server." -ForegroundColor Yellow
+elseif ($Server -and $ImageInfo -and -not $ImageIsServer) {
+    # EditionId is not localised, so this holds on non-English media too.
+    Write-HostTimestamp "-Server was passed, but this is client media, not Windows Server: $($ImageInfo.ImageName) (edition '$($ImageInfo.EditionId)')." -ForegroundColor Red
+    Write-HostTimestamp '  Server updates would be downloaded and DISM would refuse to apply them, so this run stops here. Re-run without -Server, or point -IsoPath at Windows Server media.' -ForegroundColor Red
+    Stop-Transcript | Out-Null
+    exit 1
 }
 Write-Host $LineBreak
 

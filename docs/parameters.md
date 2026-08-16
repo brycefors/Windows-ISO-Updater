@@ -9,7 +9,7 @@ The script supports the following optional parameters:
 | `-Unattended` | Runs the script without any confirmation prompts. |
 | `-IsoPath` | Path to an existing Windows ISO to update instead of downloading one from Microsoft. Omit it and the script reuses the largest `.iso` over 3 GB found in the download folder. |
 | `-WindowsVersion` | Windows version to download/update: `10` or `11`. Defaults to `11`. |
-| `-Server` | Service **Windows Server** media (2016 through 2025) instead of a client ISO. Server ISOs cannot be downloaded automatically, so supply one with `-IsoPath` or drop it into the download folder. `-WindowsVersion`, `-Release` and `-Language` are then ignored, and the catalog is searched for the Server cumulative update instead of the client one. |
+| `-Server` | Service **Windows Server** media (2016 through 2025) instead of a client ISO. Server ISOs cannot be downloaded automatically, so supply one with `-IsoPath` or drop it into the download folder. `-WindowsVersion`, `-Release` and `-Language` are then ignored, and the catalog is searched for the Server cumulative update instead of the client one. Passing this against client media is a fatal error. |
 | `-Release` | Fido release to request (e.g. `24H2`, `23H2`) or `Latest`. Defaults to `Latest`. |
 | `-Language` | ISO language as named by Microsoft/Fido (e.g. `English`, `"English International"`). Defaults to `English`. |
 | `-Edition` | Which edition inside `install.wim` to service: `All` (default) or an edition name like `"Windows 11 Pro"`. |
@@ -23,7 +23,7 @@ The script supports the following optional parameters:
 | `-SkipUpdates` | Skip update integration entirely and just extract and recompile the ISO. |
 | `-CompressEsd` | Export the finished image as `install.esd` (LZMS "recovery" compression) instead of `install.wim`. Typically **25-40% smaller**, which can bring the image under the 4 GB FAT32 limit for UEFI USB sticks, but the export is slow and the finished media cannot be serviced again without converting it back. |
 | `-UnattendPath` | Path to an unattended answer file to place on the finished ISO as `\autounattend.xml`, so Windows Setup runs without prompting. |
-| `-DownloadPath` | Directory to download the ISO/updates into. Defaults to the script folder. |
+| `-DownloadPath` | Directory to download the ISO/updates into. Defaults to a `Downloads` folder inside the working folder. |
 | `-WorkPath` | Working folder used to extract and service the media. Defaults to `<SystemDrive>\WISO-Work`. |
 | `-OutputIsoPath` | Full path for the recompiled ISO. Defaults to the `Output\` folder under the working folder, named after the contents and the patched build, e.g. `Win11_Pro_x64_26100.4061_20260815-1332.iso`. |
 | `-OscdimgPath` | Full path to `oscdimg.exe` if the Windows ADK is installed in a non-standard location. |
