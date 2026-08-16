@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.23   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.24   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -27,9 +27,9 @@
 #      (on by default, disable with -SkipDotNet) - from the Microsoft Update Catalog. You may
 #      instead point at your own .msu/.cab files with -UpdatePath.
 #   4. Integrates the update(s) offline with DISM into install.wim (by default the other editions are
-#      dropped and only the kept ones are serviced - on client media the highest edition plus Home, e.g.
-#      Pro and Home, or on Server media the most upgradeable one, Standard over Datacenter - so use
-#      -KeepAllEditions or -KeepEditions to change this), boot.wim (Windows Setup / WinPE), and
+#      dropped and only the kept ones are serviced - on client media Enterprise, Pro and Home, whichever
+#      of them the media carries, or on Server media the most upgradeable one, Standard over Datacenter -
+#      so use -KeepAllEditions or -KeepEditions to change this), boot.wim (Windows Setup / WinPE), and
 #      optionally winre.wim (recovery).
 #   5. Refreshes the loose Setup files on the media: first applies the Setup Dynamic Update to the
 #      sources folder (on by default, disable with -SkipSetupDU), then overwrites sources\setup.exe,
@@ -84,10 +84,10 @@ param(
     [Parameter(HelpMessage = 'Which edition inside install.wim to service: "All" (default) or an edition name like "Windows 11 Pro"')]
     [string]$Edition = 'All',
 
-    [Parameter(HelpMessage = 'Editions to KEEP in the final ISO, removing the rest to slim it down. Accepts edition names like "Windows 11 Pro" (partial matches allowed) or index numbers, comma-separated. Overrides the default of keeping the highest edition plus Home')]
+    [Parameter(HelpMessage = 'Editions to KEEP in the final ISO, removing the rest to slim it down. Accepts edition names like "Windows 11 Pro" (partial matches allowed) or index numbers, comma-separated. Overrides the default of keeping Enterprise, Pro and Home')]
     [string[]]$KeepEditions,
 
-    [Parameter(HelpMessage = 'Keep every edition in the final ISO. By default only some are kept to speed up servicing and shrink the ISO: on client media the highest edition present plus Home (e.g. Pro and Home), or on Server media the most upgradeable one (Standard over Datacenter, since Standard can be upgraded in place but Datacenter cannot be downgraded)')]
+    [Parameter(HelpMessage = 'Keep every edition in the final ISO. By default only some are kept to speed up servicing and shrink the ISO: on client media Enterprise, Pro and Home, whichever of them the media carries, or on Server media the most upgradeable one (Standard over Datacenter, since Standard can be upgraded in place but Datacenter cannot be downgraded)')]
     [switch]$KeepAllEditions,
 
     [Parameter(HelpMessage = 'Only list the editions/indexes inside the ISO''s install.wim and exit (does not download updates or build anything). Useful for choosing -Edition/-KeepEditions values')]
@@ -238,7 +238,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.23'
+$ScriptVersion = '2026.08.16.24'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1980,9 +1980,10 @@ function Get-EditionRank {
     return $Rank
 }
 
-# Chooses the editions to keep when the user has not named any: the top-ranked one, plus Home on client
-# media so a single ISO can still install either consumer edition. Server media keeps one, because its
-# tiers are a licence choice rather than something the person at the keyboard picks during Setup.
+# Chooses the editions to keep when the user has not named any: Enterprise, Pro and Home on client media,
+# whichever of them the media actually carries, so one ISO covers the business and consumer tiers. Server
+# media keeps one, because its tiers are a licence choice rather than something the person at the keyboard
+# picks during Setup.
 function Select-DefaultEditions {
     param(
         [Parameter(Mandatory)][object[]]$Images,
@@ -1996,13 +1997,24 @@ function Select-DefaultEditions {
             @{ Expression = { [int]$_.ImageIndex } })
     if ($Ranked.Count -eq 0) { return @() }
 
-    $Keep = @($Ranked[0])
-    if (-not $ServerMedia) {
-        $HomeImage = $Ranked | Where-Object { "$($_.ImageName)" -match '(?i)home' } | Select-Object -First 1
-        if ($HomeImage -and [int]$HomeImage.ImageIndex -ne [int]$Keep[0].ImageIndex) { $Keep += $HomeImage }
+    $Keep = New-Object System.Collections.Generic.List[object]
+    if ($ServerMedia) {
+        [void]$Keep.Add($Ranked[0])
     }
-    # Highest edition first, so it lands at index 1 after the re-export renumbers the image and an answer
-    # file selecting by /IMAGE/INDEX still gets the edition it used to.
+    else {
+        # Highest tier first, so the top edition lands at index 1 after the re-export renumbers the image
+        # and an answer file selecting by /IMAGE/INDEX still gets the edition it used to.
+        foreach ($Tier in '(?i)enterprise', '(?i)pro', '(?i)home|core') {
+            $Best = $Ranked |
+                Where-Object { "$($_.ImageName)" -match $Tier -and "$($_.ImageName)" -notmatch '(?i)education|workstation' } |
+                Where-Object { $Keep.ImageIndex -notcontains [int]$_.ImageIndex } |
+                Select-Object -First 1
+            if ($Best) { [void]$Keep.Add($Best) }
+        }
+        # Media carrying none of the three (an Education- or LTSC-only build under another name) still
+        # needs something to service.
+        if ($Keep.Count -eq 0) { [void]$Keep.Add($Ranked[0]) }
+    }
     return @($Keep | ForEach-Object { [int]$_.ImageIndex })
 }
 
@@ -3792,7 +3804,7 @@ elseif ($InstallImages.Count -gt 1) {
     $KeepIndexes = @(Select-DefaultEditions -Images $InstallImages -ServerMedia:$Server)
     $KeptNames = $InstallImages | Where-Object { $KeepIndexes -contains [int]$_.ImageIndex } | ForEach-Object { $_.ImageName }
     $DroppedNames = $InstallImages | Where-Object { $KeepIndexes -notcontains [int]$_.ImageIndex } | ForEach-Object { $_.ImageName }
-    $EditionRule = if ($Server) { 'the most upgradeable edition' } elseif ($KeepIndexes.Count -gt 1) { 'the highest edition and Home' } else { 'the highest edition' }
+    $EditionRule = if ($Server) { 'the most upgradeable edition' } elseif ($KeepIndexes.Count -gt 1) { 'the Enterprise, Pro and Home editions the media carries' } else { 'one edition' }
     Write-HostTimestamp "Keeping only $EditionRule to speed up the build: $($KeptNames -join ', '). Use -KeepAllEditions to keep them all, or -KeepEditions to choose." -ForegroundColor Cyan
     if ($Server) { Write-HostTimestamp '  Standard can be upgraded to Datacenter in place with DISM /Set-Edition, but Datacenter can never be downgraded, so Standard is the safer edition to ship.' -ForegroundColor DarkGray }
     if ($DroppedNames) { Write-HostTimestamp "Removing from the ISO: $($DroppedNames -join ', ')" -ForegroundColor Yellow }

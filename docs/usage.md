@@ -155,15 +155,15 @@ See [Scheduled Runs](scheduled-runs.md).
 
 ## Removing Editions (Slimming the ISO)
 
-A Windows ISO's `install.wim` usually contains many editions (Home, Home N, Pro, Education, etc.). **By default the script keeps the highest edition plus Home** and removes the rest, which speeds up servicing and produces a smaller ISO. On typical consumer media that means Pro and Home, so one ISO still installs either. If the media has no Home edition (business and VL media, for example), only the highest edition is kept. On Server media the rule is different: a single edition, the *most upgradeable* one, Standard over Datacenter, because Standard can be upgraded in place but Datacenter cannot be downgraded. Use `-KeepAllEditions` to keep every edition, or `-KeepEditions` to choose exactly which ones to keep.
+A Windows ISO's `install.wim` usually contains many editions (Home, Home N, Pro, Education, etc.). **By default the script keeps Enterprise, Pro and Home** and removes the rest, which speeds up servicing and produces a smaller ISO. Only the ones the media actually carries are kept, so typical consumer media gives you Pro and Home while business and VL media give you Enterprise and Pro. If the media has none of the three (Education-only media, for example) the highest edition present is kept. On Server media the rule is different: a single edition, the *most upgradeable* one, Standard over Datacenter, because Standard can be upgraded in place but Datacenter cannot be downgraded. Use `-KeepAllEditions` to keep every edition, or `-KeepEditions` to choose exactly which ones to keep.
 
-Both kept editions are serviced, so a two-edition build takes roughly twice as long as a one-edition build. Pass `-KeepEditions "Windows 11 Pro"` if you only need one and want the shorter run.
+Every kept edition is serviced, so a two-edition build takes roughly twice as long as a one-edition build. Pass `-KeepEditions "Windows 11 Pro"` if you only need one and want the shorter run.
 
 ```shell
 :: See what editions are inside the ISO first (downloads/uses the ISO, then just lists and exits)
 .\Run-Windows-ISO-Updater.bat -ListEditions
 
-:: Keep EVERY edition instead of just Pro and Home
+:: Keep EVERY edition instead of just the default set
 .\Run-Windows-ISO-Updater.bat -KeepAllEditions
 
 :: Build an updated ISO containing ONLY Windows 11 Pro (by name)
