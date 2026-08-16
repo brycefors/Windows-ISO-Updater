@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.6   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.7   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -223,7 +223,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.6'
+$ScriptVersion = '2026.08.16.7'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2043,6 +2043,54 @@ function Reset-MountDirectory {
     New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop | Out-Null
 }
 
+# Pulls the servicing stack update out of a combined SSU+LCU .msu and applies it on its own. Windows rejects
+# a cumulative update with 0x800F0823 when the image's stack is older than the update needs, and DISM does
+# not always take the stack out of the combined package by itself when servicing offline.
+function Add-ServicingStack {
+    param(
+        [Parameter(Mandatory)][string]$MountDir,
+        [Parameter(Mandatory)][string]$PackagePath,
+        [Parameter(Mandatory)][string]$StageDir
+    )
+
+    $SsuDir = Join-Path -Path $StageDir -ChildPath 'ssu'
+    try {
+        New-Item -ItemType Directory -Path $SsuDir -Force -ErrorAction Stop | Out-Null
+
+        # Try the usual SSU-*.cab name first, because pulling every cab out unpacks the multi-GB LCU payload
+        # as well.
+        $Ssu = $null
+        foreach ($Pattern in @('-F:*SSU*.cab', '-F:*.cab')) {
+            & expand.exe "$PackagePath" $Pattern "$SsuDir" | Out-Null
+            $Ssu = Get-ChildItem -LiteralPath $SsuDir -Filter '*.cab' -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '(?i)ssu|servicingstack' } |
+                Sort-Object -Property Length -Descending |
+                Select-Object -First 1
+            if ($Ssu) { break }
+        }
+        if (-not $Ssu) {
+            Write-HostTimestamp '      No servicing stack package is bundled inside this update, so it cannot be applied on its own.' -ForegroundColor DarkYellow
+            return $false
+        }
+
+        Write-HostTimestamp "      Applying the bundled servicing stack update first: $($Ssu.Name)" -ForegroundColor DarkYellow
+        & dism.exe "/Image:$MountDir" '/Add-Package' "/PackagePath:$($Ssu.FullName)" | Out-Null
+        if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 3010) {
+            Write-HostTimestamp '      Servicing stack updated.' -ForegroundColor Green
+            return $true
+        }
+        Write-HostTimestamp "      The servicing stack update did not apply either (exit code $LASTEXITCODE)." -ForegroundColor DarkYellow
+        return $false
+    }
+    catch {
+        Write-HostTimestamp "      Could not extract the servicing stack from the update: $($_.Exception.Message)" -ForegroundColor DarkYellow
+        return $false
+    }
+    finally {
+        Remove-Item -LiteralPath $SsuDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # Applies ONE update "group" to a mounted image using Microsoft's documented checkpoint-cumulative-update
 # method. A group is an ordered set of related packages with the TARGET package LAST (e.g. [checkpoint, LCU]
 # or just [.NET CU]).
@@ -2101,13 +2149,32 @@ function Add-UpdateGroup {
             }
         }
 
+        # 0x800F0823 is CBS_E_NEW_SERVICING_STACK_REQUIRED, so retrying the same package can never work
+        # until the image's servicing stack is brought forward.
+        if (($Output -match '0x800f0823') -and (Add-ServicingStack -MountDir $MountDir -PackagePath $Target -StageDir $Stage)) {
+            Write-HostTimestamp '      Retrying the update now the servicing stack is current...' -ForegroundColor DarkYellow
+            $Output = & dism.exe "/Image:$MountDir" '/Add-Package' "/PackagePath:$Target" 2>&1
+            $ExitCode = $LASTEXITCODE
+            if ($ExitCode -eq 0 -or $ExitCode -eq 3010) {
+                Write-HostTimestamp '      Applied.' -ForegroundColor Green
+                return $true
+            }
+        }
+
         Write-HostTimestamp "      This package didn't apply (DISM exit code $ExitCode). Details are in C:\Windows\Logs\DISM\dism.log." -ForegroundColor DarkYellow
         $Output | Where-Object { $_ -match '(?i)error|0x[0-9a-f]{8}' } | Select-Object -Last 8 | ForEach-Object {
             Write-Host "        $_" -ForegroundColor DarkGray
         }
-        # A hash mismatch here just means the base image's files don't match their manifests - usually a
-        # repacked/UUP ISO rather than a clean Microsoft one. It's informational, not a crash.
-        if ($Output -match '0x80070228' -or $Output -match '(?i)Unattend\.xml') {
+        # Both failures mention "Unattend.xml", which is a red herring, so the error code decides the advice.
+        if ($Output -match '0x800f0823') {
+            Write-HostTimestamp '      Tip: 0x800F0823 means the image needs a newer servicing stack than it has, and the one' -ForegroundColor DarkGray
+            Write-HostTimestamp '      bundled in this update did not take. Base media several years older than the update is the' -ForegroundColor DarkGray
+            Write-HostTimestamp '      usual cause. Try newer media, or apply the standalone SSU for this release to the mounted' -ForegroundColor DarkGray
+            Write-HostTimestamp '      image by hand before re-running.' -ForegroundColor DarkGray
+        }
+        elseif ($Output -match '0x80070228' -or $Output -match '(?i)Unattend\.xml') {
+            # A hash mismatch here just means the base image's files don't match their manifests - usually a
+            # repacked/UUP ISO rather than a clean Microsoft one. It's informational, not a crash.
             Write-HostTimestamp '      Tip: this is typically the base image, not the update - the install.wim files did not match' -ForegroundColor DarkGray
             Write-HostTimestamp '      their manifests (common with repacked/UUP ISOs). A clean official Microsoft ISO usually resolves it.' -ForegroundColor DarkGray
         }
@@ -2291,12 +2358,38 @@ Write-Host "  Downloads        : $DlDir"
 if (-not $IsoPath) { Write-Host '                     (drop your own .iso here and it is used instead of downloading one)' -ForegroundColor DarkGray }
 Write-Host "  Logs             : $LogDir"
 if (-not $NoStamp) { Write-Host "  Build stamps     : $StampRoot" }
-$IsoNameExample = if ($Server) { 'Server2025_DatacenterGUI_x64_<build>.<UBR>_<date-time>.iso' } else { 'Win11_Pro_x64_<build>.<UBR>_<date-time>.iso' }
+$IsoNameExample = if ($Server) { 'Server2025_StandardGUI_x64_<build>.<UBR>_<date-time>.iso' } else { 'Win11_Pro_x64_<build>.<UBR>_<date-time>.iso' }
 Write-Host "  Finished ISO     : $(if ($OutputIsoPath) { $OutputIsoPath } else { Join-Path $FinishedIsoDir $IsoNameExample })"
 Write-Host ''
 Write-Host '  Nothing outside these folders is changed. -WorkPath moves all of it, and -DownloadPath, -LogPath' -ForegroundColor DarkGray
 Write-Host '  and -OutputIsoPath override the individual folders.' -ForegroundColor DarkGray
 Write-Host $LineBreak
+
+# --- Clean up leftovers from an interrupted run ---
+# Add-UpdateGroup stages each package in its own pkgstage_* folder and deletes it in a finally block, but a
+# run that was killed outright never reaches that, leaving several GB behind. Cleared before the free space
+# check so the reading reflects what is really available.
+$StaleStages = @(Get-ChildItem -LiteralPath $WorkRoot -Directory -Filter 'pkgstage_*' -ErrorAction SilentlyContinue)
+if ($StaleStages.Count -gt 0) {
+    $StageFreedMB = 0
+    $StageRemoved = 0
+    foreach ($Stale in $StaleStages) {
+        try {
+            $StageSizeMB = (Get-ChildItem -LiteralPath $Stale.FullName -File -Recurse -ErrorAction SilentlyContinue |
+                    Measure-Object -Property Length -Sum).Sum / 1MB
+            Remove-Item -LiteralPath $Stale.FullName -Recurse -Force -ErrorAction Stop
+            $StageRemoved++
+            $StageFreedMB += $StageSizeMB
+        }
+        catch {
+            Write-HostTimestamp "  Could not remove the leftover staging folder '$($Stale.Name)': $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+    if ($StageRemoved -gt 0) {
+        Write-HostTimestamp ('Removed {0} update staging folder(s) left behind by an interrupted run, freeing {1:N0} MB.' -f $StageRemoved, $StageFreedMB) -ForegroundColor DarkGray
+        Write-Host $LineBreak
+    }
+}
 
 # --- Disk space check ---
 # DISM mounts and services images inside the working folder, which a network share cannot support.
