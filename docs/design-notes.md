@@ -2,6 +2,32 @@
 
 # Design Notes
 
+## Why the ISO Has to Come From You
+
+The script does not download a Windows ISO on its own. You pass one with `-IsoPath` or drop one into the download folder, and if neither is there the run stops and tells you so. The automatic download exists, but it is opt-in behind `-UseFido`, and that is deliberate.
+
+It leans on the community [Fido](https://github.com/pbatard/Fido) helper, which asks Microsoft's software-download servers for a link the same way the download page does. Microsoft treats repeated automated requests as abuse, and blocks are common enough that they should be expected rather than treated as a fault:
+
+- *"Error: Sentinel marked this request as rejected"*
+- a *715-123130* error on the download page
+- a link that resolves but returns an HTML error page instead of 8 GB of ISO
+
+The block is usually per-IP and temporary, so `-UseFido` retries a few times with a growing delay (`-FidoRetryCount`, two extra attempts by default), and the script can then offer Microsoft's Media Creation Tool because MCT talks to different servers and often still works. Both are workarounds for a problem you can avoid outright, and neither is something to build a monthly routine on.
+
+Making the download opt-in also keeps third-party code out of a default run. Fido is not signed, so the script has to verify its source, size, contents and behaviour before executing it (see [Important Notes](../README.md#important-notes)). None of that happens unless you ask for it.
+
+**Download the ISO once, keep it, and point every build at it.** Get it from [microsoft.com/software-download](https://www.microsoft.com/software-download), the Media Creation Tool, the Microsoft Evaluation Center, your Volume Licensing Service Center or a Visual Studio subscription:
+
+```shell
+.\Run-Windows-ISO-Updater.bat -IsoPath "D:\ISOs\Win11_24H2_original.iso"
+```
+
+That is faster on every run after the first, it does not depend on Microsoft's mood, and it is the only option for Windows Server media, which neither Fido nor MCT serves at all.
+
+It matters most for scheduled tasks. A blocked link request in an unattended run has nothing to fall back on, since the Media Creation Tool cannot run headless, so a task that depends on the automatic download eventually fails for reasons outside your control. A pristine source ISO kept on disk makes the run deterministic, and every build then re-reads the same source, which is exactly what the [rebuild-avoidance model](scheduled-runs.md#when-a-run-decides-to-rebuild) expects.
+
+The one thing to watch is that a source ISO **ages**. It never stops working, because the cumulative update is cumulative, but media several years older than the update can run into `0x800F0823` (*the image needs a newer servicing stack*). Refresh the source ISO once a year or so, and the drift takes care of itself.
+
 ## How the Already-Patched Check Works
 
 Integrating a cumulative update is the expensive part of a run (mount, apply, component cleanup, re-export), so the script checks whether the image already has that update before downloading it. Re-applying a present update is harmless (DISM returns `0x800f081e`, "not applicable", and the script treats that as success), but it costs the better part of an hour.

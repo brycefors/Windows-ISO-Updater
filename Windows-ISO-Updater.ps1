@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.12   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.13   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -12,16 +12,15 @@
 # spending an hour downloading and installing the same cumulative update after Setup finishes.
 #
 # It performs the following actions:
-#   1. Obtains the matching official Microsoft ISO (via the community "Fido" helper, which queries
-#      Microsoft's own software-download servers) and downloads it - unless you supply one with -IsoPath.
-#      Blocked link requests are retried with a backoff (-FidoRetryCount), and if they still fail the
-#      script can open Microsoft's Media Creation Tool for you instead (-UseMct) - MCT talks to different
-#      servers, but it has no headless mode, so you click through its last few pages yourself.
-#      RECOMMENDED: download the ISO yourself and pass it with -IsoPath. Microsoft rate-limits and can
-#      temporarily block IPs that make repeated ISO requests, which breaks the automatic download. Using
-#      your own ISO avoids this (the script also reuses any ISO already in the download folder).
-#      With -Server there is no automatic download at all, because neither Fido nor the Media Creation
-#      Tool serves Windows Server media, so the ISO has to come from you.
+#   1. Takes the ISO from you: -IsoPath, or any ISO already sitting in the download folder. Nothing is
+#      downloaded automatically unless you ask for it, because Microsoft rate-limits and can temporarily
+#      block IPs that make repeated ISO requests, which makes an automatic download the least dependable
+#      part of a run. -UseFido opts into fetching the matching official Microsoft ISO with the community
+#      "Fido" helper (which queries Microsoft's own software-download servers), retrying blocked link
+#      requests with a backoff (-FidoRetryCount). -UseMct instead opens Microsoft's Media Creation Tool,
+#      which talks to different servers but has no headless mode, so you click through its last few pages
+#      yourself. Either way there is no automatic download for -Server, because neither source serves
+#      Windows Server media.
 #   2. Extracts the ISO to a writable working folder.
 #   3. Detects the Windows feature-update (e.g. 24H2) and architecture from the image, then downloads the
 #      latest combined Servicing Stack + Cumulative Update (LCU) - and the .NET cumulative update
@@ -140,6 +139,9 @@ param(
     [Parameter(HelpMessage = 'Skip the standalone oscdimg.exe download from the Microsoft symbol server and require the Windows ADK instead')]
     [switch]$SkipOscdimgDownload,
 
+    [Parameter(HelpMessage = 'Download the ISO with the Fido helper when you have not supplied one. Off by default, because Microsoft blocks the download-link requests Fido makes often enough that passing your own ISO with -IsoPath is the more reliable way to run this')]
+    [switch]$UseFido,
+
     [Parameter(HelpMessage = 'Override the URL used to fetch the Fido download helper')]
     [string]$FidoUrl = 'https://github.com/pbatard/Fido/raw/master/Fido.ps1',
 
@@ -150,7 +152,7 @@ param(
     [ValidateRange(0, 10)]
     [int]$FidoRetryCount = 2,
 
-    [Parameter(HelpMessage = 'Skip Fido and get the ISO with Microsoft''s Media Creation Tool instead. MCT cannot run headless, so you click through its wizard and save the ISO into the download folder')]
+    [Parameter(HelpMessage = 'Get the ISO with Microsoft''s Media Creation Tool instead of supplying one yourself or using -UseFido. MCT cannot run headless, so you click through its wizard and save the ISO into the download folder')]
     [switch]$UseMct,
 
     [Parameter(HelpMessage = 'Override the URL used to download the Media Creation Tool')]
@@ -233,7 +235,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.12'
+$ScriptVersion = '2026.08.16.13'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2796,11 +2798,21 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
         Write-Host "      NOTE: Server media cannot be downloaded automatically, so drop the ISO in that folder" -ForegroundColor Yellow
         Write-Host "            or re-run with -IsoPath." -ForegroundColor Yellow
     }
-    else {
+    elseif ($UseFido) {
         Write-Host "  - Download the matching official Windows $WindowsVersion ISO from Microsoft (~8 GB)"
         Write-Host "      TIP: Microsoft can rate-limit/block repeated ISO downloads. The script retries, and can" -ForegroundColor Yellow
         Write-Host "           then offer Microsoft's Media Creation Tool instead. To skip all that, download the" -ForegroundColor Yellow
         Write-Host "           ISO yourself and re-run with -IsoPath." -ForegroundColor Yellow
+    }
+    elseif ($UseMct) {
+        Write-Host "  - Open Microsoft's Media Creation Tool so you can download the ISO with it (~8 GB)"
+        Write-Host "      NOTE: MCT has no headless mode, so you click through its last few pages and save the" -ForegroundColor Yellow
+        Write-Host "            ISO into the download folder. The script waits, then picks it up." -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "  - Use the ISO it finds in the download folder: $DlDir"
+        Write-Host "      NOTE: no ISO is downloaded automatically. Drop one into that folder or re-run with" -ForegroundColor Yellow
+        Write-Host "            -IsoPath, or add -UseFido to have the script fetch one from Microsoft." -ForegroundColor Yellow
     }
     Write-Host "  - Extract it to $ExtractDir"
     if ($KeepEditions -and $KeepEditions.Count -gt 0) {
@@ -2962,7 +2974,8 @@ else {
             Stop-Transcript | Out-Null
             exit 10
         }
-        # -UseMct skips Fido entirely, otherwise Fido is tried first and MCT is offered if it is blocked.
+        # Fido is opt-in, so without -UseFido this lands on the same fallbacks a blocked link request
+        # would: the Media Creation Tool, or instructions for supplying the ISO by hand.
         if ($UseMct) {
             $ResolvedIso = Get-IsoViaMct -Version $WindowsVersion -Language $Language -Architecture $WinInfo.Architecture -DownloadDir $DlDir
             if (-not $ResolvedIso) {
@@ -2972,18 +2985,26 @@ else {
             }
         }
         else {
-            Invoke-Task -Description 'Obtaining the Windows ISO download link from Microsoft...' -ScriptBlock {
-                $script:IsoUrl = Get-WindowsIsoUrl -Version $WindowsVersion -Release $Release -Language $Language -Architecture $WinInfo.Architecture
+            if ($UseFido) {
+                Invoke-Task -Description 'Obtaining the Windows ISO download link from Microsoft...' -ScriptBlock {
+                    $script:IsoUrl = Get-WindowsIsoUrl -Version $WindowsVersion -Release $Release -Language $Language -Architecture $WinInfo.Architecture
+                }
+            }
+            else {
+                Write-HostTimestamp 'No ISO was supplied or found in the download folder, and nothing is downloaded automatically unless you ask for it.' -ForegroundColor Yellow
+                Write-HostTimestamp '  Add -UseFido to have the script fetch the ISO from Microsoft, or -UseMct to get it with the Media Creation Tool.' -ForegroundColor Yellow
             }
             if (-not $script:IsoUrl) {
-                Write-HostTimestamp 'Could not obtain a download link. Microsoft may be rate-limiting/blocking your IP for repeated ISO requests.' -ForegroundColor Yellow
+                if ($UseFido) {
+                    Write-HostTimestamp 'Could not obtain a download link. Microsoft may be rate-limiting/blocking your IP for repeated ISO requests.' -ForegroundColor Yellow
+                }
 
                 # The Media Creation Tool uses different Microsoft endpoints, so it usually still works when
                 # the download-link API is blocked - but it needs someone to click through its wizard.
                 $CanPrompt = -not ($Unattended -or $SkipInteractive)
                 if ($CanPrompt) {
                     Write-Host ''
-                    $Answer = Read-Host "Microsoft's Media Creation Tool uses different servers and usually still works. Open it now? (Y/N)"
+                    $Answer = Read-Host "Microsoft's Media Creation Tool uses different servers and can fetch the ISO instead. Open it now? (Y/N)"
                     if ($Answer -match '(?i)^\s*(y|yes)\s*$') {
                         $ResolvedIso = Get-IsoViaMct -Version $WindowsVersion -Language $Language -Architecture $WinInfo.Architecture -DownloadDir $DlDir
                     }

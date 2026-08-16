@@ -9,9 +9,10 @@ The easiest and recommended way to run this script is by using the `Run-Windows-
 ## Recommended Method: Using the Batch File
 
 1.  **Download Files:** Make sure both `Run-Windows-ISO-Updater.bat` and `Windows-ISO-Updater.ps1` are saved in the **same folder**. (If the `.ps1` is missing, the batch file will download it automatically.)
-2.  **Run the Batch File:** Double-click the `Run-Windows-ISO-Updater.bat` file.
-3.  **Administrator Prompt:** A User Account Control (UAC) window will appear asking for administrative privileges. Click **Yes**.
-4.  **Follow Prompts:** The script opens in a new window, summarizes what it will do, and asks for confirmation before downloading and building.
+2.  **Provide an ISO:** Drop a Windows ISO into `C:\WISO-Work\Downloads`, or pass one with `-IsoPath`. The script does not fetch one for you unless you add `-UseFido` or `-UseMct` ([why](design-notes.md#why-the-iso-has-to-come-from-you)).
+3.  **Run the Batch File:** Double-click the `Run-Windows-ISO-Updater.bat` file.
+4.  **Administrator Prompt:** A User Account Control (UAC) window will appear asking for administrative privileges. Click **Yes**.
+5.  **Follow Prompts:** The script opens in a new window, summarizes what it will do, and asks for confirmation before building.
 
 ## Running with Parameters (from Command Line)
 
