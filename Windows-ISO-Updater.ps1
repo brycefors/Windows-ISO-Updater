@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.15   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.16   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -235,7 +235,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.15'
+$ScriptVersion = '2026.08.16.16'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2782,6 +2782,35 @@ if ($StaleStages.Count -gt 0) {
         Write-Host $LineBreak
     }
 }
+
+# A run killed while an image was mounted leaves the mount folders full of files owned by TrustedInstaller,
+# and DISM will not mount into a directory that is not empty. Released here rather than at first use so the
+# problem surfaces in seconds instead of after the download and extraction have already run.
+$MountsCleared = $false
+foreach ($StaleName in @('Mount', 'WinREMount', 'BuildCheck')) {
+    $StalePath = Join-Path -Path $WorkRoot -ChildPath $StaleName
+    if (-not (Test-Path -LiteralPath $StalePath)) { continue }
+
+    if (-not (Get-ChildItem -LiteralPath $StalePath -Force -ErrorAction SilentlyContinue)) {
+        Remove-Item -LiteralPath $StalePath -Force -ErrorAction SilentlyContinue
+        continue
+    }
+
+    Write-HostTimestamp "A previous run left files behind in $StalePath, clearing them..." -ForegroundColor Yellow
+    try {
+        # Releases any mount DISM still tracks there first, because deleting a tracked mount folder orphans it.
+        Reset-MountDirectory -Path $StalePath
+        Remove-Item -LiteralPath $StalePath -Force -ErrorAction SilentlyContinue
+        Write-HostTimestamp '  Cleared.' -ForegroundColor Green
+        $MountsCleared = $true
+    }
+    catch {
+        Write-HostTimestamp "  $($_.Exception.Message)" -ForegroundColor Red
+        Stop-Transcript | Out-Null
+        exit 1
+    }
+}
+if ($MountsCleared) { Write-Host $LineBreak }
 
 # --- Disk space check ---
 # DISM mounts and services images inside the working folder, which a network share cannot support.
