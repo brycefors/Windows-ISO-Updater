@@ -53,10 +53,10 @@ A few differences worth knowing:
   four.
 - Microsoft only publishes a **Setup Dynamic Update** for Server 2025 and newer, so on older Server media
   the script reports that none was found and refreshes the media Setup files from `boot.wim` alone.
-- **Passing `-Server` with client media is a fatal error.** The script reads the edition out of the image
-  right after extraction and stops with exit code 1 rather than downloading Server updates that DISM would
-  refuse to apply. The opposite case, Server media without `-Server`, is only a warning, since a client
-  cumulative update simply will not be found.
+- **A mismatch between the media and the switch is a fatal error, both ways round.** The script reads the
+  edition out of the image right after extraction, and stops with exit code 1 if `-Server` was passed
+  against client media or omitted against Server media, rather than downloading updates that DISM would
+  refuse to apply.
 - **Give Server its own `-StampPath` if you also build client ISOs.** There is one `last-build.json` per
   stamp folder, so a Server run and a Windows 11 run sharing the default folder overwrite each other's
   state and both rebuild from scratch every time. `-AutoClean` has the same problem, it deletes the update

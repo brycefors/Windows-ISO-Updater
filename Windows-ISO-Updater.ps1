@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.5   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.6   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -63,7 +63,7 @@ param(
     [Parameter(HelpMessage = 'Runs the script without any confirmation prompts')]
     [switch]$Unattended,
 
-    [Parameter(HelpMessage = 'Path to an existing Windows ISO to update instead of downloading one from Microsoft')]
+    [Parameter(HelpMessage = 'Path to an existing Windows ISO to update instead of downloading one from Microsoft. May also be a folder, in which case the largest .iso over 3 GB directly inside it is used (the search is not recursive)')]
     [string]$IsoPath,
 
     [Parameter(HelpMessage = 'Windows version to download/update: 10 or 11. Defaults to 11')]
@@ -223,7 +223,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.5'
+$ScriptVersion = '2026.08.16.6'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -291,7 +291,9 @@ $Host.UI.RawUI.WindowTitle = "Windows ISO Updater - Running as Administrator - $
 # ("An error occurred applying the Unattend.xml file from the .msu package"). They also need lots of free
 # space and, ideally, no spaces in the path (oscdimg's -bootdata dislikes spaces, so short paths are used
 # to work around it regardless).
-$WorkRoot   = if ($WorkPath) { $WorkPath } else { Join-Path -Path $env:SystemDrive -ChildPath 'WISO-Work' }
+# Made absolute without requiring it to exist yet, so the drive checks further down see a qualifier even
+# when a relative -WorkPath was passed.
+$WorkRoot   = if ($WorkPath) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($WorkPath) } else { Join-Path -Path $env:SystemDrive -ChildPath 'WISO-Work' }
 $ExtractDir = Join-Path -Path $WorkRoot -ChildPath 'ISO'
 $MountDir   = Join-Path -Path $WorkRoot -ChildPath 'Mount'
 # Where a standalone oscdimg.exe is cached if it has to be downloaded, so later runs reuse it.
@@ -389,7 +391,9 @@ function Get-DriveFreeGB {
     param([string]$Path)
     try {
         $Qualifier = (Split-Path -Path $Path -Qualifier -ErrorAction SilentlyContinue)
-        if (-not $Qualifier) { $Qualifier = $env:SystemDrive }
+        # A UNC path has no qualifier, and guessing the system drive would report a number for the wrong
+        # volume, so say nothing rather than something false.
+        if (-not $Qualifier) { return $null }
         $Drive = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$Qualifier'" -ErrorAction Stop
         if ($Drive -and $Drive.FreeSpace) {
             return [math]::Round($Drive.FreeSpace / 1GB, 2)
@@ -397,6 +401,22 @@ function Get-DriveFreeGB {
     }
     catch { }
     return $null
+}
+
+# True when a path is not on a local disk: a UNC share, a mapped network drive, or a drive letter that does
+# not exist in this session. Mappings are per-logon-session, so a mapped drive that works interactively is
+# simply absent when the scheduled task runs.
+function Test-RemotePath {
+    param([Parameter(Mandatory)][string]$Path)
+    if ("$Path" -match '^\\\\') { return $true }
+    $Qualifier = try { Split-Path -Path $Path -Qualifier -ErrorAction SilentlyContinue } catch { $null }
+    if (-not $Qualifier) { return $false }
+    try {
+        $Drive = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$Qualifier'" -ErrorAction Stop
+        if (-not $Drive) { return $true }
+        return ([int]$Drive.DriveType -eq 4)
+    }
+    catch { return $false }   # WMI is not answering, so assume local and carry on as before
 }
 
 # An export stages a second copy of the image beside the original, so both must fit at the same time.
@@ -822,6 +842,17 @@ function Get-IsoViaMct {
     $Answer = Read-Host 'If you saved it somewhere else, enter the full path to the ISO now (or press Enter to cancel)'
     if ($Answer -and (Test-Path -LiteralPath $Answer.Trim('"'))) { return (Resolve-Path -LiteralPath $Answer.Trim('"')).Path }
     return $null
+}
+
+# Picks the Windows ISO out of a folder: the largest .iso over 3 GB, so driver discs and other small images
+# sharing the folder are skipped. Not recursive, because an ISO library is usually one folder deep and
+# walking a whole drive to guess would be worse than being told.
+function Find-LargestIso {
+    param([Parameter(Mandatory)][string]$Directory)
+    return (Get-ChildItem -LiteralPath $Directory -Filter '*.iso' -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -gt 3GB } |
+            Sort-Object -Property Length -Descending |
+            Select-Object -First 1)
 }
 
 # Maps a Windows build number to its marketing feature-update name (used to build catalog search queries).
@@ -2268,6 +2299,14 @@ Write-Host '  and -OutputIsoPath override the individual folders.' -ForegroundCo
 Write-Host $LineBreak
 
 # --- Disk space check ---
+# DISM mounts and services images inside the working folder, which a network share cannot support.
+if (Test-RemotePath -Path $WorkRoot) {
+    Write-HostTimestamp "The working folder is not on a local disk: $WorkRoot" -ForegroundColor Red
+    Write-HostTimestamp '  A UNC path, a mapped network drive, or a drive letter that does not exist in this session cannot be used to mount and service images. Point -WorkPath at a local drive with plenty of free space.' -ForegroundColor Red
+    Stop-Transcript | Out-Null
+    exit 1
+}
+
 # The download (~8 GB), extracted media (~8 GB), the mounted image, and the re-exported image all coexist
 # during the build, so the working drive needs plenty of headroom.
 $FreeGB = Get-DriveFreeGB -Path $WorkRoot
@@ -2430,48 +2469,58 @@ if (-not $ListEditions -and -not $CheckOnly) {
 # --- Obtain the ISO ---
 $ResolvedIso = $null
 if ($IsoPath) {
-    if (Test-Path -LiteralPath $IsoPath) {
+    if (Test-Path -LiteralPath $IsoPath -PathType Container) {
+        $FolderIso = Find-LargestIso -Directory $IsoPath
+        if (-not $FolderIso) {
+            Write-HostTimestamp "-IsoPath '$IsoPath' is a folder, but it holds no .iso larger than 3 GB. The search is not recursive, so an ISO in a subfolder is not found. Cannot continue." -ForegroundColor Red
+            Stop-Transcript | Out-Null
+            exit 1
+        }
+        $ResolvedIso = $FolderIso.FullName
+        Write-HostTimestamp "Using the largest ISO in '$IsoPath': $ResolvedIso ($([math]::Round($FolderIso.Length / 1GB, 2)) GB)" -ForegroundColor Green
+    }
+    elseif (Test-Path -LiteralPath $IsoPath -PathType Leaf) {
         $ResolvedIso = (Resolve-Path -LiteralPath $IsoPath).Path
         Write-HostTimestamp "Using the provided ISO: $ResolvedIso" -ForegroundColor Green
-
-        # If the ISO sits on a cloud-synced path, copy it to the local download folder first. Mounting and
-        # reading a cloud placeholder during the long extraction is slow and unreliable, while a local
-        # copy is not. -CheckOnly only ever reads the file to hash it, so it is not worth moving gigabytes
-        # for.
-        if (($ResolvedIso -match $CloudPattern -or $ResolvedIso -match '(?i)OneDrive') -and
-            -not ($DlDir -match $CloudPattern -or $DlDir -match '(?i)OneDrive') -and -not $CheckOnly) {
-            $LocalIso = Join-Path -Path $DlDir -ChildPath (Split-Path -Leaf $ResolvedIso)
-            $SourceLen = (Get-Item -LiteralPath $ResolvedIso).Length
-            if ((Test-Path -LiteralPath $LocalIso) -and ((Get-Item -LiteralPath $LocalIso).Length -eq $SourceLen)) {
-                Write-HostTimestamp "  A local copy already exists - using it: $LocalIso" -ForegroundColor Green
-                $ResolvedIso = $LocalIso
-            }
-            else {
-                try {
-                    Invoke-Task -Description "The ISO is on a cloud-synced path, so it is copied to a local disk first ($([math]::Round($SourceLen / 1GB, 2)) GB): $LocalIso ..." -ScriptBlock {
-                        Copy-Item -LiteralPath $ResolvedIso -Destination $LocalIso -Force -ErrorAction Stop
-                        Write-HostTimestamp '  Copy complete.' -ForegroundColor Green
-                    }
-                    $ResolvedIso = $LocalIso
-                }
-                catch {
-                    Write-HostTimestamp "  Could not copy the ISO locally ($($_.Exception.Message)). Proceeding from the cloud path - this may be slow or fail." -ForegroundColor Yellow
-                }
-            }
-        }
     }
     else {
         Write-HostTimestamp "The ISO path '$IsoPath' does not exist. Cannot continue." -ForegroundColor Red
         Stop-Transcript | Out-Null
         exit 1
     }
+
+    # If the ISO sits on a cloud-synced or network path, copy it to the local download folder first.
+    # Mounting and reading a placeholder or an SMB share during the long extraction is slow and unreliable,
+    # while a local copy is not, and Mount-DiskImage wants a local file anyway. -CheckOnly only ever reads
+    # the file to hash it, so it is not worth moving gigabytes for.
+    $IsoIsCloud = ($ResolvedIso -match $CloudPattern -or $ResolvedIso -match '(?i)OneDrive')
+    $IsoIsRemote = Test-RemotePath -Path $ResolvedIso
+    $DlDirIsCloud = ($DlDir -match $CloudPattern -or $DlDir -match '(?i)OneDrive')
+    if (($IsoIsCloud -or $IsoIsRemote) -and -not $DlDirIsCloud -and -not (Test-RemotePath -Path $DlDir) -and -not $CheckOnly) {
+        $RemoteKind = if ($IsoIsRemote) { 'a network path' } else { 'a cloud-synced path' }
+        $LocalIso = Join-Path -Path $DlDir -ChildPath (Split-Path -Leaf $ResolvedIso)
+        $SourceLen = (Get-Item -LiteralPath $ResolvedIso).Length
+        if ((Test-Path -LiteralPath $LocalIso) -and ((Get-Item -LiteralPath $LocalIso).Length -eq $SourceLen)) {
+            Write-HostTimestamp "  A local copy already exists - using it: $LocalIso" -ForegroundColor Green
+            $ResolvedIso = $LocalIso
+        }
+        else {
+            try {
+                Invoke-Task -Description "The ISO is on $RemoteKind, so it is copied to a local disk first ($([math]::Round($SourceLen / 1GB, 2)) GB): $LocalIso ..." -ScriptBlock {
+                    Copy-Item -LiteralPath $ResolvedIso -Destination $LocalIso -Force -ErrorAction Stop
+                    Write-HostTimestamp '  Copy complete.' -ForegroundColor Green
+                }
+                $ResolvedIso = $LocalIso
+            }
+            catch {
+                Write-HostTimestamp "  Could not copy the ISO locally ($($_.Exception.Message)). Proceeding from $RemoteKind - this may be slow or fail." -ForegroundColor Yellow
+            }
+        }
+    }
 }
 else {
     # Reuse an already-downloaded ISO in the download folder if present, otherwise resolve + download one.
-    $ExistingIso = Get-ChildItem -Path $DlDir -Filter '*.iso' -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Length -gt 3GB } |
-        Sort-Object -Property Length -Descending |
-        Select-Object -First 1
+    $ExistingIso = Find-LargestIso -Directory $DlDir
     if ($ExistingIso) {
         $ResolvedIso = $ExistingIso.FullName
         Write-HostTimestamp "An ISO is already downloaded - reusing it: $ResolvedIso ($([math]::Round($ExistingIso.Length / 1GB, 2)) GB)" -ForegroundColor Green
@@ -2810,13 +2859,16 @@ Write-HostTimestamp "Image build    : $ImageVersionText$(if ($FeatureName) { " (
 Write-HostTimestamp "Image arch     : $ImageArch"
 
 # -Server picks an entirely different family of catalog queries, so a mismatch would fetch an update that
-# DISM then refuses to apply. Say so now rather than an hour into the run.
+# DISM then refuses to apply. Stop now rather than an hour into the run. EditionId is not localised, so
+# this holds on non-English media too.
 $ImageIsServer = "$($ImageInfo.ImageName) $($ImageInfo.EditionId)" -match '(?i)server'
 if ($ImageIsServer -and -not $Server) {
-    Write-HostTimestamp "This looks like Windows Server media ($($ImageInfo.ImageName)), but -Server was not passed, so client updates will be searched for and will not apply. Re-run with -Server." -ForegroundColor Yellow
+    Write-HostTimestamp "This is Windows Server media, but -Server was not passed: $($ImageInfo.ImageName) (edition '$($ImageInfo.EditionId)')." -ForegroundColor Red
+    Write-HostTimestamp '  Client updates would be downloaded and DISM would refuse to apply them, so this run stops here. Re-run with -Server.' -ForegroundColor Red
+    Stop-Transcript | Out-Null
+    exit 1
 }
 elseif ($Server -and $ImageInfo -and -not $ImageIsServer) {
-    # EditionId is not localised, so this holds on non-English media too.
     Write-HostTimestamp "-Server was passed, but this is client media, not Windows Server: $($ImageInfo.ImageName) (edition '$($ImageInfo.EditionId)')." -ForegroundColor Red
     Write-HostTimestamp '  Server updates would be downloaded and DISM would refuse to apply them, so this run stops here. Re-run without -Server, or point -IsoPath at Windows Server media.' -ForegroundColor Red
     Stop-Transcript | Out-Null

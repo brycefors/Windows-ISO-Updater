@@ -7,9 +7,9 @@ The script supports the following optional parameters:
 | Parameter | Description |
 |---|---|
 | `-Unattended` | Runs the script without any confirmation prompts. |
-| `-IsoPath` | Path to an existing Windows ISO to update instead of downloading one from Microsoft. Omit it and the script reuses the largest `.iso` over 3 GB found in the download folder. |
+| `-IsoPath` | Path to an existing Windows ISO to update instead of downloading one from Microsoft. May also be a **folder**, in which case the largest `.iso` over 3 GB directly inside it is used. That search is **not recursive**, so an ISO in a subfolder is not found. Omit the parameter entirely and the same rule is applied to the download folder. An ISO on a cloud-synced or network path is copied to the download folder first. |
 | `-WindowsVersion` | Windows version to download/update: `10` or `11`. Defaults to `11`. |
-| `-Server` | Service **Windows Server** media (2016 through 2025) instead of a client ISO. Server ISOs cannot be downloaded automatically, so supply one with `-IsoPath` or drop it into the download folder. `-WindowsVersion`, `-Release` and `-Language` are then ignored, and the catalog is searched for the Server cumulative update instead of the client one. Passing this against client media is a fatal error. |
+| `-Server` | Service **Windows Server** media (2016 through 2025) instead of a client ISO. Server ISOs cannot be downloaded automatically, so supply one with `-IsoPath` or drop it into the download folder. `-WindowsVersion`, `-Release` and `-Language` are then ignored, and the catalog is searched for the Server cumulative update instead of the client one. A mismatch is fatal both ways round: passing this against client media, or omitting it against Server media, stops the run. |
 | `-Release` | Fido release to request (e.g. `24H2`, `23H2`) or `Latest`. Defaults to `Latest`. |
 | `-Language` | ISO language as named by Microsoft/Fido (e.g. `English`, `"English International"`). Defaults to `English`. |
 | `-Edition` | Which edition inside `install.wim` to service: `All` (default) or an edition name like `"Windows 11 Pro"`. |
@@ -24,7 +24,7 @@ The script supports the following optional parameters:
 | `-CompressEsd` | Export the finished image as `install.esd` (LZMS "recovery" compression) instead of `install.wim`. Typically **25-40% smaller**, which can bring the image under the 4 GB FAT32 limit for UEFI USB sticks, but the export is slow and the finished media cannot be serviced again without converting it back. |
 | `-UnattendPath` | Path to an unattended answer file to place on the finished ISO as `\autounattend.xml`, so Windows Setup runs without prompting. |
 | `-DownloadPath` | Directory to download the ISO/updates into. Defaults to a `Downloads` folder inside the working folder. |
-| `-WorkPath` | Working folder used to extract and service the media. Defaults to `<SystemDrive>\WISO-Work`. |
+| `-WorkPath` | Working folder used to extract and service the media. Defaults to `<SystemDrive>\WISO-Work`. Must be on a local disk: a UNC path, a mapped network drive, or a drive letter that does not exist in the current session is rejected before the build starts. |
 | `-OutputIsoPath` | Full path for the recompiled ISO. Defaults to the `Output\` folder under the working folder, named after the contents and the patched build, e.g. `Win11_Pro_x64_26100.4061_20260815-1332.iso`. |
 | `-OscdimgPath` | Full path to `oscdimg.exe` if the Windows ADK is installed in a non-standard location. |
 | `-SkipOscdimgDownload` | Do not download a standalone `oscdimg.exe` from Microsoft's symbol server. Require the Windows ADK instead. |
