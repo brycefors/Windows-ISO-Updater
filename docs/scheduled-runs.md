@@ -86,7 +86,7 @@ A rebuild happens if any of these is true:
 
 * there is no stamp yet (first run),
 * the source ISO's SHA-256 differs from the one in the stamp,
-* a build-affecting parameter changed, including editing the `-UnattendPath` answer file in place,
+* a build-affecting parameter changed, including editing the `-UnattendPath` answer file in place or dropping a newer driver into the `-DriverPath` folder,
 * the catalog is offering a different, newer or additional update than the stamp recorded,
 * the ISO the last build produced is no longer on disk.
 

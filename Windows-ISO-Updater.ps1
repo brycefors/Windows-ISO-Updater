@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.24   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.25   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -30,7 +30,8 @@
 #      dropped and only the kept ones are serviced - on client media Enterprise, Pro and Home, whichever
 #      of them the media carries, or on Server media the most upgradeable one, Standard over Datacenter -
 #      so use -KeepAllEditions or -KeepEditions to change this), boot.wim (Windows Setup / WinPE), and
-#      optionally winre.wim (recovery).
+#      optionally winre.wim (recovery). -DriverPath also injects a folder of .inf driver packages into
+#      every serviced edition and into boot.wim index 2, so Setup itself can see the hardware.
 #   5. Refreshes the loose Setup files on the media: first applies the Setup Dynamic Update to the
 #      sources folder (on by default, disable with -SkipSetupDU), then overwrites sources\setup.exe,
 #      sources\setuphost.exe and the boot managers from the serviced boot.wim - Windows Setup fails if
@@ -113,6 +114,12 @@ param(
 
     [Parameter(HelpMessage = 'Path to an unattended answer file to place on the finished ISO as \autounattend.xml, so Windows Setup runs without prompting')]
     [string]$UnattendPath,
+
+    [Parameter(HelpMessage = 'Folder of driver packages (.inf and their .sys/.cat files) to inject into the images. Searched recursively. Every serviced edition of install.wim gets them, and so does boot.wim index 2, so Windows Setup itself can see storage controllers and network adapters the media has no driver for')]
+    [string]$DriverPath,
+
+    [Parameter(HelpMessage = 'Inject drivers even when they are unsigned or signed by a certificate the image does not trust. Off by default. 64-bit Windows refuses to load an unsigned driver at boot unless test signing is enabled, so this is only useful for drivers whose certificate is added separately')]
+    [switch]$AllowUnsignedDrivers,
 
     [Parameter(HelpMessage = 'Do not tattoo the finished ISO. By default a \WISO-Build folder is added to the media recording what this build was made from, which updates applied or failed, what was kept and stripped, who built it and when, plus a copy of the script that made it')]
     [switch]$SkipTattoo,
@@ -238,7 +245,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.24'
+$ScriptVersion = '2026.08.16.25'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -363,6 +370,9 @@ $script:FinalBuildString = $null
 $script:TattooServicing   = New-Object System.Collections.Generic.List[object]
 $script:TattooResidueMB   = 0
 $script:TattooResidueFound = New-Object System.Collections.Generic.List[string]
+# The -DriverPath set, resolved once during validation and reused by every image the run services.
+$script:DriverInfFiles = @()
+$script:DriverHash     = $null
 
 function Get-TimeStamp {
     return (Get-Date -Format '[MM/dd/yyyy|HH:mm:ss]')
@@ -1196,6 +1206,20 @@ function Get-TextSha256 {
     finally { $Sha.Dispose() }
 }
 
+# One hash covering every file under a folder, so swapping a driver for a newer one forces a rebuild even
+# though the folder path never changed.
+function Get-FolderContentHash {
+    param([Parameter(Mandatory)][string]$Path)
+    $Root = (Resolve-Path -LiteralPath $Path).Path.TrimEnd('\')
+    $Parts = New-Object System.Collections.Generic.List[string]
+    $Files = @(Get-ChildItem -LiteralPath $Root -File -Recurse -Force -ErrorAction SilentlyContinue | Sort-Object -Property FullName)
+    foreach ($File in $Files) {
+        $Relative = $File.FullName.Substring($Root.Length).TrimStart('\').ToLowerInvariant()
+        [void]$Parts.Add("$Relative=$(Get-Sha256 -Path $File.FullName)")
+    }
+    return (Get-TextSha256 -Text ($Parts -join '|'))
+}
+
 function Format-ShortHash {
     param([string]$Hash)
     if ($Hash -and $Hash.Length -ge 12) { return $Hash.Substring(0, 12) }
@@ -1231,7 +1255,7 @@ function Get-UpdateFileRecords {
 $script:BuildAffectingParameters = @(
     'WindowsVersion', 'Server', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
     'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'SkipUpdates', 'CompressEsd', 'VolumeLabel',
-    'SkipTattoo', 'StripImageResidue'
+    'SkipTattoo', 'StripImageResidue', 'DriverPath', 'AllowUnsignedDrivers'
 )
 
 # Flattens those parameters (current values, not just the ones that were passed) into comparable text.
@@ -1248,6 +1272,8 @@ function Get-BuildParameterSet {
     # The answer file is copied onto the media, so its CONTENT is part of the build - editing it in place
     # has to force a rebuild even though the path never changed.
     $Set['Unattend'] = if ($script:UnattendHash) { $script:UnattendHash } else { '' }
+    # Same for the drivers, which are injected into the images rather than copied onto the media.
+    $Set['Drivers'] = if ($script:DriverHash) { $script:DriverHash } else { '' }
     return $Set
 }
 
@@ -2575,6 +2601,47 @@ function Add-UpdateGroup {
     }
 }
 
+# Injects the -DriverPath packages into a mounted image. Each .inf is added on its own rather than letting
+# DISM recurse the folder, so one driver the image rejects cannot take the whole set down with it.
+# Returns $true when every package went in.
+function Add-ImageDrivers {
+    param(
+        [Parameter(Mandatory)][string]$MountDir,
+        [AllowEmptyCollection()][object[]]$InfFiles,
+        [string]$ImageLabel
+    )
+
+    if (-not $InfFiles -or $InfFiles.Count -eq 0) { return $true }
+
+    Write-HostTimestamp "    Injecting $($InfFiles.Count) driver package(s)..."
+    $Added  = 0
+    $Failed = New-Object System.Collections.Generic.List[string]
+    foreach ($Inf in $InfFiles) {
+        try {
+            Add-WindowsDriver -Path $MountDir -Driver $Inf.FullName -ForceUnsigned:$AllowUnsignedDrivers -ErrorAction Stop | Out-Null
+            $Added++
+        }
+        catch {
+            [void]$Failed.Add($Inf.Name)
+            Write-HostTimestamp "      $($Inf.Name): $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    if ($Failed.Count -eq 0) {
+        Write-HostTimestamp "      $Added driver package(s) added." -ForegroundColor Green
+        Add-ServicingResult -Image $ImageLabel -Package "$Added driver package(s)" -Result 'Applied' -Detail 'Injected from -DriverPath'
+        return $true
+    }
+
+    Write-HostTimestamp "      $Added added, $($Failed.Count) rejected. A rejected driver is usually unsigned, built for another architecture, or not a real driver package." -ForegroundColor Yellow
+    if (-not $AllowUnsignedDrivers) {
+        Write-HostTimestamp '      Pass -AllowUnsignedDrivers if the rejected ones are unsigned and you accept that risk.' -ForegroundColor DarkGray
+    }
+    $Result = if ($Added -gt 0) { 'Partial' } else { 'Failed' }
+    Add-ServicingResult -Image $ImageLabel -Package "$($InfFiles.Count) driver package(s)" -Result $Result -Detail "$Added added, rejected: $(($Failed | Select-Object -First 10) -join ', ')"
+    return $false
+}
+
 # Deletes servicing residue from a mounted image before it is committed. Windows recreates all of it on
 # first boot, and its size varies with how chatty DISM was, which is the main reason two builds from the
 # same source ISO and the same update come out different sizes.
@@ -3111,6 +3178,39 @@ if ($UnattendPath) {
     Write-Host $LineBreak
 }
 
+# --- Validate the driver folder ---
+$ResolvedDriverPath = $null
+if ($DriverPath) {
+    if (-not (Test-Path -LiteralPath $DriverPath -PathType Container)) {
+        Write-HostTimestamp "The driver folder '$DriverPath' does not exist. Cannot continue." -ForegroundColor Red
+        Stop-Transcript | Out-Null
+        exit 1
+    }
+    $ResolvedDriverPath = (Resolve-Path -LiteralPath $DriverPath).Path
+    $script:DriverInfFiles = @(Get-ChildItem -LiteralPath $ResolvedDriverPath -Filter '*.inf' -File -Recurse -Force -ErrorAction SilentlyContinue |
+            Sort-Object -Property FullName)
+    if ($script:DriverInfFiles.Count -eq 0) {
+        Write-HostTimestamp "No .inf files were found anywhere under '$ResolvedDriverPath'. Extract the vendor's driver package first - an .exe or .msi installer cannot be injected into an image." -ForegroundColor Red
+        Stop-Transcript | Out-Null
+        exit 1
+    }
+    # Hashed for the build stamp: dropping a newer driver in has to force a rebuild even though the path
+    # never changed.
+    $script:DriverHash = Get-FolderContentHash -Path $ResolvedDriverPath
+    $DriverSizeMB = [math]::Round((Get-ChildItem -LiteralPath $ResolvedDriverPath -File -Recurse -Force -ErrorAction SilentlyContinue |
+                Measure-Object -Property Length -Sum).Sum / 1MB, 1)
+    Write-HostTimestamp "Drivers        : $($script:DriverInfFiles.Count) .inf package(s) in $ResolvedDriverPath ($DriverSizeMB MB)" -ForegroundColor Green
+    if ($AllowUnsignedDrivers) {
+        Write-HostTimestamp '  -AllowUnsignedDrivers is set, so DISM will accept drivers the image does not trust. 64-bit Windows still refuses to load an unsigned driver at boot unless test signing is on.' -ForegroundColor Yellow
+    }
+    # WinPE runs entirely from a RAM disk, so a large driver set in boot.wim can leave a machine unable to
+    # start Setup at all.
+    if ($DriverSizeMB -gt 500) {
+        Write-HostTimestamp "  That is a large set to add to boot.wim, which Windows Setup loads into memory. Consider narrowing it to the storage and network drivers Setup actually needs." -ForegroundColor Yellow
+    }
+    Write-Host $LineBreak
+}
+
 # --- Interactive confirmation ---
 if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -not $CheckOnly) {
     Write-Host "This tool builds an updated Windows installation ISO. It will:"
@@ -3146,7 +3246,7 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
         Write-Host "  - Keep ALL editions in the final ISO (-KeepAllEditions)"
     }
     else {
-        $EditionRule = if ($Server) { 'the most upgradeable edition (Standard over Datacenter, and the Desktop Experience over Server Core)' } else { 'the highest edition present plus Home (e.g. Pro and Home)' }
+        $EditionRule = if ($Server) { 'the most upgradeable edition (Standard over Datacenter, and the Desktop Experience over Server Core)' } else { 'Enterprise, Pro and Home, whichever of them this media carries' }
         Write-Host "  - Keep ONLY $EditionRule to speed up the build. Use -KeepAllEditions to keep them all" -ForegroundColor Yellow
     }
     if (-not $SkipUpdates) {
@@ -3166,6 +3266,9 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
     }
     if ($CompressEsd) {
         Write-Host "  - Export the image as install.esd with recovery compression (-CompressEsd): a much smaller ISO, but a slow export and the media cannot be serviced again afterwards" -ForegroundColor Yellow
+    }
+    if ($ResolvedDriverPath) {
+        Write-Host "  - Inject $($script:DriverInfFiles.Count) driver package(s) from $ResolvedDriverPath into every serviced edition and into boot.wim index 2 (Windows Setup)" -ForegroundColor Yellow
     }
     if ($ResolvedUnattend) {
         Write-Host "  - Place your answer file on the media as autounattend.xml, so Setup runs unattended: $ResolvedUnattend" -ForegroundColor Yellow
@@ -3840,7 +3943,8 @@ if ($UnservicedKept.Count -gt 0 -and -not $SkipUpdates) {
 }
 
 # --- Service the images ---
-if ($UpdateGroups.Count -gt 0) {
+# Drivers alone are reason enough to mount everything, so this runs with no updates to apply too.
+if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
     # Tracks editions whose update set failed to apply, so we can warn loudly at the end.
     $script:ServicingFailures = 0
     # Start from a clean mount directory, discarding any stale mount a previous crashed run left behind.
@@ -3892,9 +3996,14 @@ if ($UpdateGroups.Count -gt 0) {
                     Write-HostTimestamp "    Note: the cumulative update didn't apply to index $Index ($EditionName), so this edition kept its original patch level. The ISO will still build." -ForegroundColor DarkYellow
                 }
 
-                Write-HostTimestamp '    Cleaning up the component store (/StartComponentCleanup /ResetBase)...'
-                # ResetBase permanently removes superseded components, shrinking the image. This is slow.
-                & dism.exe /Image:"$MountDir" /Cleanup-Image /StartComponentCleanup /ResetBase | Out-Null
+                # After the updates, so a driver is never superseded by an inbox one the cumulative update brings in.
+                Add-ImageDrivers -MountDir $MountDir -InfFiles $script:DriverInfFiles -ImageLabel "install.wim index $Index ($EditionName)" | Out-Null
+
+                if ($UpdateGroups.Count -gt 0) {
+                    Write-HostTimestamp '    Cleaning up the component store (/StartComponentCleanup /ResetBase)...'
+                    # ResetBase permanently removes superseded components, shrinking the image. This is slow.
+                    & dism.exe /Image:"$MountDir" /Cleanup-Image /StartComponentCleanup /ResetBase | Out-Null
+                }
 
                 Remove-ImageResidue -MountDir $MountDir
 
@@ -3950,7 +4059,12 @@ if ($UpdateGroups.Count -gt 0) {
                     Reset-MountDirectory -Path $MountDir -ImagePath $BootWim
                     Mount-WindowsImage -ImagePath $BootWim -Index $BootImg.ImageIndex -Path $MountDir -ErrorAction Stop | Out-Null
                     foreach ($Group in $UpdateGroups) { Add-UpdateGroup -MountDir $MountDir -Group $Group -ImageLabel "boot.wim index $($BootImg.ImageIndex) ($($BootImg.ImageName))" | Out-Null }
-                    & dism.exe /Image:"$MountDir" /Cleanup-Image /StartComponentCleanup | Out-Null
+                    # Only index 2 needs the drivers: that is the image Setup boots into, and it has to see
+                    # the disk and the network card. Index 1 is loaded into a RAM disk and never installs.
+                    if ([int]$BootImg.ImageIndex -eq 2) {
+                        Add-ImageDrivers -MountDir $MountDir -InfFiles $script:DriverInfFiles -ImageLabel "boot.wim index 2 ($($BootImg.ImageName))" | Out-Null
+                    }
+                    if ($UpdateGroups.Count -gt 0) { & dism.exe /Image:"$MountDir" /Cleanup-Image /StartComponentCleanup | Out-Null }
                     Remove-ImageResidue -MountDir $MountDir
 
                     # Index 2 is the Windows Setup image. The cumulative update raises the version of the
@@ -4192,6 +4306,16 @@ if (-not $SkipTattoo) {
                 AnswerFile         = if ($ResolvedUnattend) { "autounattend.xml (from $(Split-Path -Leaf $ResolvedUnattend), SHA-256 $(Format-ShortHash $script:UnattendHash))" } else { '' }
                 RecoveryImage      = if ($ServiceWinRE) { 'winre.wim serviced with the Safe OS Dynamic Update' } else { 'winre.wim left as it shipped (-ServiceWinRE was not used)' }
             }
+            Drivers     = if ($ResolvedDriverPath) {
+                [ordered]@{
+                    Source   = $ResolvedDriverPath
+                    Sha256   = $script:DriverHash
+                    Signing  = if ($AllowUnsignedDrivers) { 'Unsigned and untrusted drivers accepted (-AllowUnsignedDrivers)' } else { 'Signed drivers only' }
+                    Injected = 'Every serviced edition of install.wim, plus boot.wim index 2 (Windows Setup)'
+                    Packages = @($script:DriverInfFiles | ForEach-Object { $_.Name })
+                }
+            }
+            else { '' }
             Stripped    = [ordered]@{
                 ComponentStore     = if ($UpdateGroups.Count -gt 0) { 'Superseded components removed (/StartComponentCleanup /ResetBase), so the images cannot be rolled back to their original patch level' } else { 'Untouched (nothing was serviced)' }
                 ServicingResidueMB = [math]::Round($script:TattooResidueMB, 0)

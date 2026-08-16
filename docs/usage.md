@@ -174,3 +174,27 @@ Every kept edition is serviced, so a two-edition build takes roughly twice as lo
 ```
 
 `-KeepEditions` accepts edition names (partial matches allowed) or index numbers, and overrides the default. Only the kept editions are serviced and re-exported, so the removed editions are gone from the final `install.wim`. It works with `-SkipUpdates` too, if you only want to trim editions without integrating updates.
+
+## Adding Drivers
+
+`-DriverPath` points at a folder of driver packages and injects them into the images. The folder is searched **recursively** for `.inf` files, and each one is added to every serviced edition of `install.wim` and to `boot.wim` index 2.
+
+```shell
+:: Add a folder of extracted drivers to the images
+.\Run-Windows-ISO-Updater.bat -DriverPath "D:\Drivers\OptiPlex-7010"
+
+:: Trim the drivers into the ISO without integrating any updates
+.\Run-Windows-ISO-Updater.bat -SkipUpdates -DriverPath "D:\Drivers\OptiPlex-7010"
+```
+
+Things worth knowing:
+
+- **The drivers must be extracted.** A vendor `.exe` or `.msi` installer cannot be injected into an image, only the `.inf` and the `.sys`/`.cat` files beside it. Most vendors publish a driver CAB or a `/e` extraction switch for exactly this.
+- **`boot.wim` index 2 matters as much as `install.wim`.** Index 2 is the image Windows Setup boots into, so this is what stops *"We couldn't find any drives"* on a machine with a storage controller the media has no driver for. Index 1 is skipped deliberately, because it is loaded into a RAM disk and never installs anything.
+- **Keep the set small.** Everything added to `boot.wim` has to fit in memory when Setup starts, so a whole vendor driver pack is a bad idea. Storage and network drivers are the ones Setup actually needs. The script warns above 500 MB.
+- **The architecture has to match.** An x64 driver injected into an ARM64 image is simply rejected, and so is a driver signed by a certificate the image does not trust. Each rejection is reported by name and the rest still go in, so one bad package does not lose the build.
+- **`-AllowUnsignedDrivers` relaxes the signature check** in DISM. It does not make Windows load the driver: 64-bit Windows still refuses an unsigned kernel driver at boot unless test signing is on, so this is only useful when the certificate is being trusted some other way.
+- **It is build-affecting.** The stamp records a hash of the whole folder, so swapping in a newer driver forces a rebuild on the next scheduled run even though the path did not change.
+- **Drivers go in after the updates**, so an inbox driver the cumulative update brings along cannot supersede the one you supplied.
+
+The alternative that needs no rebuild is a `$WinPEDriver$` folder at the root of the USB stick. Both answer files in [`Examples/`](../Examples) look for one on every drive, `drvload` each `.inf` into the running WinPE, then run `dism /Add-Driver` against the freshly applied image. That is the better choice for a driver that only one machine needs.
