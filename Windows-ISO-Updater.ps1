@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.9   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.10   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -228,7 +228,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.9'
+$ScriptVersion = '2026.08.16.10'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2278,6 +2278,7 @@ function Remove-ImageResidue {
 
     $FreedMB = 0
     $Found = New-Object System.Collections.Generic.List[string]
+    $Stuck = New-Object System.Collections.Generic.List[string]
 
     # Get-ChildItem on a file path returns that file, so one expression sizes folders and files alike.
     $Measure = {
@@ -2292,8 +2293,10 @@ function Remove-ImageResidue {
         $Full = Join-Path -Path $MountDir -ChildPath $Relative
         if (-not (Test-Path -LiteralPath $Full -PathType Container)) { continue }
         foreach ($Child in @(Get-ChildItem -LiteralPath $Full -Force -ErrorAction SilentlyContinue)) {
-            $FreedMB += & $Measure $Child.FullName
+            # The image's TrustedInstaller permissions can defeat Remove-Item, so only count what really went.
+            $ChildMB = & $Measure $Child.FullName
             Remove-Item -LiteralPath $Child.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $Child.FullName)) { $FreedMB += $ChildMB }
         }
     }
 
@@ -2302,22 +2305,31 @@ function Remove-ImageResidue {
     if (Test-Path -LiteralPath $Panther -PathType Container) {
         foreach ($Log in @(Get-ChildItem -LiteralPath $Panther -File -Recurse -Force -ErrorAction SilentlyContinue |
                     Where-Object { $_.Extension -in '.log', '.etl', '.evtx' })) {
-            $FreedMB += ($Log.Length / 1MB)
             Remove-Item -LiteralPath $Log.FullName -Force -ErrorAction SilentlyContinue
+            if (-not (Test-Path -LiteralPath $Log.FullName)) { $FreedMB += ($Log.Length / 1MB) }
         }
     }
 
     foreach ($Relative in ($DeleteItems + $Suspect)) {
         $Full = Join-Path -Path $MountDir -ChildPath $Relative
         if (-not (Test-Path -LiteralPath $Full)) { continue }
-        if ($Suspect -contains $Relative) { $Found.Add($Relative) }
-        $FreedMB += & $Measure $Full
+        $Before = & $Measure $Full
         Remove-Item -LiteralPath $Full -Recurse -Force -ErrorAction SilentlyContinue
+        # Windows.old is a full Windows tree, so parts of it can refuse to go and would otherwise be counted.
+        $Survived = Test-Path -LiteralPath $Full
+        $FreedMB += if ($Survived) { $Before - (& $Measure $Full) } else { $Before }
+        if ($Suspect -contains $Relative) {
+            $Found.Add($Relative)
+            if ($Survived) { $Stuck.Add($Relative) }
+        }
     }
 
     if ($Found.Count -gt 0) {
-        Write-HostTimestamp "    Removed leftovers that clean Microsoft media never contains: $($Found -join ', ')" -ForegroundColor Yellow
+        Write-HostTimestamp "    Found leftovers that clean Microsoft media never contains: $($Found -join ', ')" -ForegroundColor Yellow
         Write-HostTimestamp '      These come from the source image, not from this build, so it was captured from an installed machine. Exclude them at capture time, or use official Microsoft media.' -ForegroundColor Yellow
+    }
+    if ($Stuck.Count -gt 0) {
+        Write-HostTimestamp "      Could not fully remove $($Stuck -join ', '). The image's permissions denied it, so what is left will ship in the ISO." -ForegroundColor Yellow
     }
     if ($FreedMB -ge 1) {
         Write-HostTimestamp ('    Stripped {0:N0} MB of servicing residue (logs and temp files Windows recreates on first boot).' -f $FreedMB) -ForegroundColor DarkGray
