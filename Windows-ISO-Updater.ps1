@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.21   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.22   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -201,6 +201,9 @@ param(
     [Parameter(HelpMessage = 'After a successful build, delete the update packages this script downloaded for previous builds and all but the newest generated ISOs')]
     [switch]$AutoClean,
 
+    [Parameter(HelpMessage = 'Leave the mounted images exactly as DISM left them: do not strip servicing logs, temp files or leftovers such as $Recycle.Bin before committing. The ISO comes out larger')]
+    [switch]$SkipImageCleanup,
+
     [Parameter(HelpMessage = 'How many generated ISOs -AutoClean keeps (newest first). Defaults to 3')]
     [ValidateRange(1, 100)]
     [int]$KeepIsoCount = 3,
@@ -235,7 +238,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.21'
+$ScriptVersion = '2026.08.16.22'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1228,7 +1231,7 @@ function Get-UpdateFileRecords {
 $script:BuildAffectingParameters = @(
     'WindowsVersion', 'Server', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
     'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'SkipUpdates', 'CompressEsd', 'VolumeLabel',
-    'SkipTattoo'
+    'SkipTattoo', 'SkipImageCleanup'
 )
 
 # Flattens those parameters (current values, not just the ones that were passed) into comparable text.
@@ -2565,6 +2568,11 @@ function Add-UpdateGroup {
 # same source ISO and the same update come out different sizes.
 function Remove-ImageResidue {
     param([Parameter(Mandatory)][string]$MountDir)
+
+    if ($SkipImageCleanup) {
+        Write-HostTimestamp '    Leaving the servicing residue in place (-SkipImageCleanup).' -ForegroundColor Yellow
+        return
+    }
 
     # Folder contents to clear, keeping the folder itself so nothing has to recreate it.
     $ClearFolders = @(
@@ -4175,7 +4183,7 @@ if (-not $SkipTattoo) {
             Stripped    = [ordered]@{
                 ComponentStore     = if ($UpdateGroups.Count -gt 0) { 'Superseded components removed (/StartComponentCleanup /ResetBase), so the images cannot be rolled back to their original patch level' } else { 'Untouched (nothing was serviced)' }
                 ServicingResidueMB = [math]::Round($script:TattooResidueMB, 0)
-                ResidueDetail      = 'CBS/DISM/DPX/MoSetup/WindowsUpdate logs, Windows\Temp, SoftwareDistribution\Download, WinREAgent and Panther logs. Windows recreates all of it on first boot'
+                ResidueDetail      = if ($SkipImageCleanup) { 'Nothing was stripped (-SkipImageCleanup), so the images still carry their servicing logs and temp files' } else { 'CBS/DISM/DPX/MoSetup/WindowsUpdate logs, Windows\Temp, SoftwareDistribution\Download, WinREAgent and Panther logs. Windows recreates all of it on first boot' }
                 # Only ever populated when the source ISO was captured from an installed machine rather
                 # than downloaded from Microsoft, which is worth knowing about the media you are holding.
                 # .ToArray() rather than @(), which throws "Argument types do not match" on 5.1.
