@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.19   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.20   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -235,7 +235,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.19'
+$ScriptVersion = '2026.08.16.20'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2918,6 +2918,25 @@ Write-Host ''
 Write-Host '  Nothing outside these folders is changed. -WorkPath moves all of it, and -DownloadPath, -LogPath' -ForegroundColor DarkGray
 Write-Host '  and -OutputIsoPath override the individual folders.' -ForegroundColor DarkGray
 Write-Host $LineBreak
+
+# --- One run at a time per work folder ---
+# Everything past this point assumes it owns the mount directories, so a second run sharing a work folder
+# would discard the first one's live mount as if it were stale. Keyed on the work folder, so runs pointed
+# at different -WorkPath folders are still free to go side by side. The mutex is never released explicitly:
+# Windows drops it when the process ends, and a waiter that inherits an abandoned one is the owner anyway.
+$WorkKeyBytes = [System.Security.Cryptography.SHA256]::Create().ComputeHash(
+    [System.Text.Encoding]::Unicode.GetBytes($WorkRoot.TrimEnd('\').ToLowerInvariant()))
+$WorkKey = ([System.BitConverter]::ToString($WorkKeyBytes) -replace '-', '').Substring(0, 16)
+$script:RunMutex = New-Object System.Threading.Mutex($false, "Global\WindowsIsoUpdater_$WorkKey")
+$HaveRunMutex = $false
+try { $HaveRunMutex = $script:RunMutex.WaitOne(0) }
+catch [System.Threading.AbandonedMutexException] { $HaveRunMutex = $true }
+if (-not $HaveRunMutex) {
+    Write-HostTimestamp "Another Windows-ISO-Updater run is already using $WorkRoot." -ForegroundColor Red
+    Write-HostTimestamp '  Wait for it to finish, or start this one with a different -WorkPath so the two do not share a mount folder.' -ForegroundColor Red
+    Stop-Transcript | Out-Null
+    exit 1
+}
 
 # --- Clean up leftovers from an interrupted run ---
 # Add-UpdateGroup stages each package in its own pkgstage_* folder and deletes it in a finally block, but a
