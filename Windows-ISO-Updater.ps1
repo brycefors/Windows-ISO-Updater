@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.16   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.17   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -235,7 +235,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.16'
+$ScriptVersion = '2026.08.16.17'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2083,7 +2083,8 @@ function Get-IsoVolumeLabel {
 # COMException that -ErrorAction cannot suppress, so every discard has to be wrapped or it fills the
 # transcript with stack traces from cleanup paths that already know the mount may be gone. -Escalate adds
 # the recovery for a mount abandoned by a dead process, which answers the managed call with "The request
-# is not supported" and can only be released by re-attaching it with dism.exe first.
+# is not supported" and has to be re-attached with dism.exe first, then falls back to dropping the mount
+# point registration outright for one that no longer survives a re-attach.
 function Dismount-ImageDiscard {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -2106,7 +2107,18 @@ function Dismount-ImageDiscard {
         Write-HostTimestamp '      Released it.' -ForegroundColor Green
         return $true
     }
-    Write-HostTimestamp "      dism.exe could not release it either (exit code $LASTEXITCODE)." -ForegroundColor Yellow
+
+    # A mount that survived a reboot cannot be re-attached at all, so the registration itself has to go.
+    Write-HostTimestamp ('      Re-attaching failed (exit code 0x{0:X8}), dropping the mount point registration instead...' -f $LASTEXITCODE) -ForegroundColor Yellow
+    & dism.exe /English /Cleanup-Mountpoints 2>&1 | Out-Null
+    $StillMounted = @(Get-WindowsImage -Mounted -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -and $_.Path.TrimEnd('\') -ieq $Path.TrimEnd('\') })
+    if ($StillMounted.Count -eq 0) {
+        Write-HostTimestamp '      Released it.' -ForegroundColor Green
+        return $true
+    }
+
+    Write-HostTimestamp '      The mount is still registered with DISM.' -ForegroundColor Yellow
     return $false
 }
 
@@ -2181,13 +2193,13 @@ function Reset-MountDirectory {
 
     # Clearing a corrupt mount point can make a mount that refused to discard discardable, so try once more.
     foreach ($M in (& $FindStale)) {
-        if ($M.Path) { Dismount-ImageDiscard -Path $M.Path | Out-Null }
+        if ($M.Path) { Dismount-ImageDiscard -Path $M.Path -Escalate | Out-Null }
     }
 
     $Stale = & $FindStale
     if ($Stale) {
         $Detail = ($Stale | ForEach-Object { "$(if ($_.ImagePath) { Split-Path $_.ImagePath -Leaf } else { 'image' }) index $($_.ImageIndex)" }) -join ', '
-        throw "An image is still mounted ($Detail) and DISM will reject the next mount. Run 'dism /Cleanup-Mountpoints' from an elevated prompt, or reboot, then start the build again."
+        throw "An image is still mounted ($Detail) and DISM will reject the next mount. Every automatic recovery has already been tried, including 'dism /Cleanup-Mountpoints'. Reboot, then run 'dism /Cleanup-Mountpoints' from an elevated prompt before starting the build again."
     }
 
     # Only safe once nothing is mounted here - deleting a tracked mount directory is what orphans it.
