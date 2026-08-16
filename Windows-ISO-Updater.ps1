@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.15.6   (date-based; stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.1   (date-based; stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10) installation ISO.
@@ -216,7 +216,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1; shown in the log and recorded in the
 # build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.15.6'
+$ScriptVersion = '2026.08.16.1'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2497,6 +2497,14 @@ if (-not $NoStamp) {
             $StampArch    = "$($script:PreviousStamp.Image.CatalogArch)"
             $script:ExpectedUpdateSet = Get-ExpectedUpdateSet -FeatureName $StampFeature -CatalogArch $StampArch
             $script:ExpectedUpdateFor = "$StampFeature|$StampArch"
+
+            # Says out loud that the catalog really was queried - a run that finishes in a second
+            # otherwise looks like it only compared local files and never asked Microsoft anything.
+            if ($script:ExpectedUpdateSet -and -not $SkipUpdates -and -not $UpdatePath) {
+                $Listed = @($script:ExpectedUpdateSet | ForEach-Object { $_ -replace '^(\w+)=(.+)@(.+)$', '$1 $2 (published $3)' })
+                Write-HostTimestamp "  The Microsoft Update Catalog was checked for Windows $WindowsVersion $StampFeature $StampArch; newest available:" -ForegroundColor DarkGray
+                foreach ($Item in $Listed) { Write-HostTimestamp "    $Item" -ForegroundColor DarkGray }
+            }
         }
 
         $script:StampDecision = Test-RebuildNeeded -Stamp $script:PreviousStamp -SourceHash $script:StampSourceHash `
