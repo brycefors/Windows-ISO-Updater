@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.20   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.21   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -235,7 +235,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.20'
+$ScriptVersion = '2026.08.16.21'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2187,6 +2187,23 @@ Remove-Item -LiteralPath '$CleanupScript' -Force
     return $true
 }
 
+# Finds broken mounts that belong to someone else. Neither /Cleanup-Mountpoints nor
+# Clear-WindowsCorruptMountPoint can be scoped to a folder, and both release every corrupt mount on the
+# machine, so checking first is the only way to keep a recovery here from wrecking another run under a
+# different -WorkPath, or somebody's MDT or ADK session. A mount reporting Ok is left out because the
+# global cleanups do not touch healthy mounts, and a status that cannot be read counts as at risk.
+function Get-ForeignBrokenMount {
+    $Root = $WorkRoot.TrimEnd('\')
+    try {
+        return @(Get-WindowsImage -Mounted -ErrorAction SilentlyContinue | Where-Object {
+                $_.Path -and
+                -not (($_.Path.TrimEnd('\') -ieq $Root) -or ($_.Path -ilike "$Root\*")) -and
+                ("$($_.MountStatus)" -ne 'Ok')
+            })
+    }
+    catch { return @() }
+}
+
 # Throws away a mount without letting DISM's errors escape. Dismount-WindowsImage raises a terminating
 # COMException that -ErrorAction cannot suppress, so every discard has to be wrapped or it fills the
 # transcript with stack traces from cleanup paths that already know the mount may be gone. -Escalate then
@@ -2234,6 +2251,14 @@ function Dismount-ImageDiscard {
     }
 
     # Nothing can revive this mount, so the registration itself is what has to go.
+    $Foreign = @(Get-ForeignBrokenMount)
+    if ($Foreign.Count -gt 0) {
+        Write-HostTimestamp "      Not running /Cleanup-Mountpoints: it would also release $($Foreign.Count) broken mount(s) outside $WorkRoot." -ForegroundColor Yellow
+        foreach ($Other in $Foreign) { Write-HostTimestamp "        $($Other.Path)" -ForegroundColor DarkGray }
+        Write-HostTimestamp '        Clear those yourself, or run this build with a -WorkPath nothing else is using.' -ForegroundColor Yellow
+        return $false
+    }
+
     Write-HostTimestamp '      Dropping the mount point registration instead...' -ForegroundColor Yellow
     & dism.exe /English /Cleanup-Mountpoints 2>&1 | Out-Null
     $StillMounted = @(Get-WindowsImage -Mounted -ErrorAction SilentlyContinue |
@@ -2333,7 +2358,14 @@ function Reset-MountDirectory {
     }
 
     # Releases mounts whose directory was deleted from under DISM, the only way back from an orphaned mount.
-    try { Clear-WindowsCorruptMountPoint -ErrorAction SilentlyContinue | Out-Null } catch { }
+    $ForeignBroken = @(Get-ForeignBrokenMount)
+    if ($ForeignBroken.Count -gt 0) {
+        Write-HostTimestamp "    Skipping the corrupt mount point cleanup: $($ForeignBroken.Count) broken mount(s) outside $WorkRoot would be released too." -ForegroundColor Yellow
+        foreach ($Other in $ForeignBroken) { Write-HostTimestamp "      $($Other.Path)" -ForegroundColor DarkGray }
+    }
+    else {
+        try { Clear-WindowsCorruptMountPoint -ErrorAction SilentlyContinue | Out-Null } catch { }
+    }
 
     # Clearing a corrupt mount point can make a mount that refused to discard discardable, so try once more.
     foreach ($M in (& $FindStale)) {
