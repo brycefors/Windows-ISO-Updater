@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.15.5   (date-based; stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.15.6   (date-based; stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10) installation ISO.
@@ -216,12 +216,22 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1; shown in the log and recorded in the
 # build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.15.5'
+$ScriptVersion = '2026.08.15.6'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
     $Unattended = $true
     $SkipInteractive = $true
+}
+
+# Verify this is running on Windows. $IsWindows only exists on PowerShell 6+, where it is the reliable
+# test; Windows PowerShell 5.1 is Windows-only, so its absence is itself the answer. This has to come
+# before anything that touches CIM, DISM or the registry, all of which are Windows-only.
+if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+    Write-Host "This script must be run on Windows. You are currently running $($PSVersionTable.OS)." -ForegroundColor Red
+    Write-Host "It relies on Windows-only components (DISM, CIM/WMI and the Windows ADK) to service the image." -ForegroundColor Red
+    Start-Sleep -Seconds 10
+    exit 1
 }
 
 # Verify this is running on PowerShell 5 or higher
