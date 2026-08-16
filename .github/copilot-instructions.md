@@ -5,8 +5,9 @@
 A single-purpose Windows automation repo. `Windows-ISO-Updater.ps1` downloads a Windows 10 or 11 ISO,
 services the images inside it offline with DISM (LCU, .NET, Setup Dynamic Update, optional WinRE), and
 recompiles a bootable ISO with `oscdimg.exe`. `Run-Windows-ISO-Updater.bat` is the double-click entry
-point, `docs/` is the manual, `Examples/` holds two answer files, and `tools/Update-Version.ps1` stamps
-versions from a git hook.
+point, `docs/` is the manual, `Examples/` holds two answer files, `tools/Update-Version.ps1` stamps
+versions from a git hook, and `tools/Test-Dependencies.ps1` checks that the external things the script
+pins (oscdimg hash, Fido, the MCT and ADK fwlinks, the Update Catalog HTML) are still valid.
 
 There is no build, no test suite, and no package manifest. The script is the product.
 
