@@ -1,8 +1,9 @@
 # Windows ISO Updater
-# Version: 2026.08.16.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.4   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
-# This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10) installation ISO.
+# This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
+# Windows Server 2016-2025) installation ISO.
 # It downloads the latest official Microsoft ISO, downloads the latest cumulative update(s) from the
 # Microsoft Update Catalog, integrates those updates directly into the Windows images inside the ISO,
 # and then recompiles a brand-new, bootable ISO that already contains this month's patches.
@@ -19,13 +20,16 @@
 #      RECOMMENDED: download the ISO yourself and pass it with -IsoPath. Microsoft rate-limits and can
 #      temporarily block IPs that make repeated ISO requests, which breaks the automatic download. Using
 #      your own ISO avoids this (the script also reuses any ISO already in the download folder).
+#      With -Server there is no automatic download at all, because neither Fido nor the Media Creation
+#      Tool serves Windows Server media, so the ISO has to come from you.
 #   2. Extracts the ISO to a writable working folder.
 #   3. Detects the Windows feature-update (e.g. 24H2) and architecture from the image, then downloads the
 #      latest combined Servicing Stack + Cumulative Update (LCU) - and the .NET cumulative update
 #      (on by default, disable with -SkipDotNet) - from the Microsoft Update Catalog. You may
 #      instead point at your own .msu/.cab files with -UpdatePath.
-#   4. Integrates the update(s) offline with DISM into install.wim (by default only the highest edition
-#      present - e.g. Pro over Home - is kept and serviced, so use -KeepAllEditions or -KeepEditions to
+#   4. Integrates the update(s) offline with DISM into install.wim (by default only one edition is kept
+#      and serviced - the highest client edition, e.g. Pro over Home, or on Server media the most
+#      upgradeable one, Standard over Datacenter - so use -KeepAllEditions or -KeepEditions to
 #      change this), boot.wim (Windows Setup / WinPE), and optionally winre.wim (recovery).
 #   5. Refreshes the loose Setup files on the media: first applies the Setup Dynamic Update to the
 #      sources folder (on by default, disable with -SkipSetupDU), then overwrites sources\setup.exe,
@@ -66,6 +70,9 @@ param(
     [ValidateSet('10', '11')]
     [string]$WindowsVersion = '11',
 
+    [Parameter(HelpMessage = 'Service Windows Server media (2016 through 2025) instead of a client ISO. Server ISOs cannot be downloaded automatically, so supply one with -IsoPath or drop it into the download folder. -WindowsVersion, -Release and -Language are then ignored')]
+    [switch]$Server,
+
     [Parameter(HelpMessage = 'Fido release to request (e.g. 24H2, 23H2) or "Latest". Defaults to Latest')]
     [string]$Release = 'Latest',
 
@@ -75,10 +82,10 @@ param(
     [Parameter(HelpMessage = 'Which edition inside install.wim to service: "All" (default) or an edition name like "Windows 11 Pro"')]
     [string]$Edition = 'All',
 
-    [Parameter(HelpMessage = 'Editions to KEEP in the final ISO, removing the rest to slim it down. Accepts edition names like "Windows 11 Pro" (partial matches allowed) or index numbers, comma-separated. Overrides the default of keeping only the highest edition')]
+    [Parameter(HelpMessage = 'Editions to KEEP in the final ISO, removing the rest to slim it down. Accepts edition names like "Windows 11 Pro" (partial matches allowed) or index numbers, comma-separated. Overrides the default of keeping only one edition')]
     [string[]]$KeepEditions,
 
-    [Parameter(HelpMessage = 'Keep every edition in the final ISO. By default only the highest edition present (e.g. Enterprise over Pro, or Pro over Home) is kept to speed up servicing and shrink the ISO')]
+    [Parameter(HelpMessage = 'Keep every edition in the final ISO. By default only one edition is kept to speed up servicing and shrink the ISO: the highest client edition present (e.g. Enterprise over Pro, or Pro over Home), or on Server media the most upgradeable one (Standard over Datacenter, since Standard can be upgraded in place but Datacenter cannot be downgraded)')]
     [switch]$KeepAllEditions,
 
     [Parameter(HelpMessage = 'Only list the editions/indexes inside the ISO''s install.wim and exit (does not download updates or build anything). Useful for choosing -Edition/-KeepEditions values')]
@@ -216,7 +223,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.3'
+$ScriptVersion = '2026.08.16.4'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -822,13 +829,47 @@ function Get-FeatureUpdateName {
     param([Parameter(Mandatory)][int]$Build)
     switch ($Build) {
         26200  { '25H2'; break }
-        26100  { '24H2'; break }
+        26100  { '24H2'; break }   # also Windows Server 2025
+        25398  { '23H2'; break }   # Windows Server, version 23H2
         22631  { '23H2'; break }
         22621  { '22H2'; break }
         22000  { '21H2'; break }
+        20348  { '21H2'; break }   # Windows Server 2022
         19045  { '22H2'; break }   # Windows 10
         19044  { '21H2'; break }   # Windows 10
+        17763  { '1809'; break }   # Windows Server 2019 / Windows 10 1809
+        14393  { '1607'; break }   # Windows Server 2016
         default { $null }
+    }
+}
+
+# The product wording the Microsoft Update Catalog uses in update titles, e.g. "Windows 11 Version 24H2".
+# Microsoft stopped naming Server media after its year with Server 2022, so anything newer than Server
+# 2019 is listed as "Microsoft server operating system version <feature update>" instead.
+function Get-CatalogProductQuery {
+    param([string]$FeatureUpdate)
+
+    if (-not $Server) {
+        return "Windows $WindowsVersion$(if ($FeatureUpdate) { " Version $FeatureUpdate" })"
+    }
+    switch ($FeatureUpdate) {
+        '1607' { return 'Windows Server 2016' }
+        '1809' { return 'Windows Server 2019' }
+    }
+    return "Microsoft server operating system$(if ($FeatureUpdate) { " version $FeatureUpdate" })"
+}
+
+# Marketing release name for a Windows Server build, used in the output ISO file name. Server images
+# carry no branding of their own beyond the build number.
+function Get-ServerReleaseName {
+    param([int]$Build)
+    switch ($Build) {
+        26100  { 'Server2025'; break }
+        25398  { 'Server23H2'; break }
+        20348  { 'Server2022'; break }
+        17763  { 'Server2019'; break }
+        14393  { 'Server2016'; break }
+        default { 'Server' }
     }
 }
 
@@ -1114,7 +1155,7 @@ function Format-ShortHash {
 # The parameters that change what ends up inside the ISO. Folder, logging and scheduling parameters are
 # deliberately left out: moving the working folder does not make last month's ISO wrong.
 $script:BuildAffectingParameters = @(
-    'WindowsVersion', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
+    'WindowsVersion', 'Server', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
     'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'SkipUpdates', 'CompressEsd'
 )
 
@@ -1292,30 +1333,32 @@ function Get-ExpectedUpdateSet {
     }
     if (-not $CatalogArch) { return $null }
 
-    $VerPart = if ($FeatureName) { "Version $FeatureName " } else { '' }
-    $Include = '(?i)cumulative update for windows'
+    $Product = Get-CatalogProductQuery -FeatureUpdate $FeatureName
+    $Include = '(?i)cumulative update for (windows|microsoft server operating system)'
     $Exclude = '(?i)\.net|dynamic update'
     $Set = New-Object System.Collections.Generic.List[string]
 
     # Same queries (including the broader fallback) the download step uses, so the two always agree.
-    $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for Windows $WindowsVersion ${VerPart}for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude
+    $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $Product for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude
     if (-not $Lcu) {
-        $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for Windows $WindowsVersion for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude
+        $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude
     }
     if (-not $Lcu) { return $null }
     $Set.Add("LCU=$(Get-CatalogEntryTag -Entry $Lcu)")
 
     if (-not $SkipDotNet) {
-        $NetVer = if ($FeatureName) { "Windows $WindowsVersion Version $FeatureName" } else { "Windows $WindowsVersion" }
-        $DotNet = Get-CatalogLatestEntry -Query "Cumulative Update for .NET Framework $NetVer for $CatalogArch" -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update'
+        $DotNet = Get-CatalogLatestEntry -Query "Cumulative Update for .NET Framework $Product for $CatalogArch" -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update'
         $Set.Add("DotNet=$(Get-CatalogEntryTag -Entry $DotNet)")
     }
     if (-not $SkipSetupDU) {
-        $SetupDu = Get-CatalogLatestEntry -Query "Setup Dynamic Update Windows $WindowsVersion $VerPart$CatalogArch" -TitleInclude '(?i)setup dynamic update'
+        $SetupDu = Get-CatalogLatestEntry -Query "Setup Dynamic Update $Product $CatalogArch" -TitleInclude '(?i)setup dynamic update'
         $Set.Add("SetupDU=$(Get-CatalogEntryTag -Entry $SetupDu)")
     }
     if ($ServiceWinRE) {
-        $SafeOs = Get-CatalogLatestEntry -Query "Safe OS Dynamic Update Windows $WindowsVersion $VerPart$CatalogArch" -TitleInclude '(?i)safe os dynamic update'
+        # Server media labels the Safe OS package plain "Dynamic Update", so the Setup one is excluded by
+        # name instead of the Safe OS one being required by name.
+        $SafeInclude = if ($Server) { '(?i)dynamic update' } else { '(?i)safe os dynamic update' }
+        $SafeOs = Get-CatalogLatestEntry -Query "Safe OS Dynamic Update $Product $CatalogArch" -TitleInclude $SafeInclude -TitleExclude '(?i)setup dynamic update'
         $Set.Add("SafeOS=$(Get-CatalogEntryTag -Entry $SafeOs)")
     }
     return @($Set)
@@ -1437,7 +1480,8 @@ function Invoke-AutoClean {
         $Item = Get-Item -LiteralPath "$($Stamp.Output.Path)" -ErrorAction SilentlyContinue
         if ($Item) { $Candidates[$Item.FullName.ToLowerInvariant()] = $Item }
     }
-    $GeneratedName = '^(Win10|Win11|Windows)_[A-Za-z0-9]+_[A-Za-z0-9]+(_[\d.]+)?_\d{8}-\d{4}\.iso$'
+    # Must track every tag Get-DefaultIsoName can emit, including the Server release names.
+    $GeneratedName = '^(Win10|Win11|Windows|Server[A-Za-z0-9]*)_[A-Za-z0-9]+_[A-Za-z0-9]+(_[\d.]+)?_\d{8}-\d{4}\.iso$'
     foreach ($Item in @(Get-ChildItem -LiteralPath $FinishedIsoDir -Filter '*.iso' -File -ErrorAction SilentlyContinue)) {
         if ($Item.Name -match $GeneratedName) { $Candidates[$Item.FullName.ToLowerInvariant()] = $Item }
     }
@@ -1841,14 +1885,21 @@ function Resolve-EditionIndexes {
 # "Pro Education" and "Pro for Workstations") are deliberately excluded and scored lowest so they are
 # never chosen when a plain Enterprise/Pro/Home edition is present. Within a tier, base editions are
 # preferred over the "N" and "Single Language" variants.
+# Windows Server is ranked the other way up, Standard over Datacenter: an installed Standard server can be
+# upgraded to Datacenter in place with DISM /Set-Edition, but Datacenter can never be taken back down. The
+# Desktop Experience still wins over the bare (Server Core) name, because that choice cannot be changed
+# after installation in either direction.
 function Get-EditionRank {
     param([string]$Name)
     $n = "$Name".ToLower()
-    if ($n -match 'education|workstation') { $Rank = 5 }  # excluded tiers - lowest priority
+    if ($n -match 'standard') { $Rank = 70 }
+    elseif ($n -match 'datacenter') { $Rank = 50 }
+    elseif ($n -match 'education|workstation') { $Rank = 5 }  # excluded tiers - lowest priority
     elseif ($n -match 'enterprise') { $Rank = 60 }
     elseif ($n -match 'pro') { $Rank = 40 }
     elseif ($n -match 'home|core') { $Rank = 20 }
     else { $Rank = 10 }
+    if ($n -match 'desktop experience') { $Rank += 1 } # prefer the full server install over Server Core
     if ($n -match '(^|\s)n(\s|$)') { $Rank -= 2 }   # prefer base over "N" variants
     if ($n -match 'single language') { $Rank -= 1 } # prefer base over Single Language
     return $Rank
@@ -1858,6 +1909,11 @@ function Get-EditionRank {
 function Get-EditionShortName {
     param([string]$Name)
     $n = "$Name".ToLower()
+    # Server names carry no "Server Core" marker: the bare name IS Server Core, the other is the GUI.
+    if ($n -match 'datacenter|standard') {
+        $Tier = if ($n -match 'datacenter') { 'Datacenter' } else { 'Standard' }
+        return $Tier + $(if ($n -match 'desktop experience') { 'GUI' } else { 'Core' })
+    }
     if ($n -match 'enterprise') { return 'Ent' }
     if ($n -match 'education') { return 'Edu' }
     if ($n -match 'pro') { return 'Pro' }
@@ -1887,7 +1943,11 @@ function Get-DefaultIsoName {
         if ("$Candidate" -match '\b\d+\.\d+\.(\d+)\.(\d+)') { $BuildUbr = "$($Matches[1]).$($Matches[2])"; break }
     }
     $BuildNumber = if ("$BuildUbr" -match '^(\d+)') { [int]$Matches[1] } else { 0 }
-    $WindowsTag = if ($BuildNumber -ge 22000) { 'Win11' } elseif ($BuildNumber -gt 0) { 'Win10' } else { 'Windows' }
+    $WindowsTag =
+        if ($Server) { Get-ServerReleaseName -Build $BuildNumber }
+        elseif ($BuildNumber -ge 22000) { 'Win11' }
+        elseif ($BuildNumber -gt 0) { 'Win10' }
+        else { 'Windows' }
 
     $Parts = @($WindowsTag, $EditionTag)
     if ($Architecture) { $Parts += ($Architecture -replace '[^A-Za-z0-9]', '') }
@@ -2189,7 +2249,8 @@ foreach ($Dir in @($WorkRoot, $DlDir)) {
 }
 
 Write-HostTimestamp "Architecture   : $($WinInfo.Architecture)"
-Write-HostTimestamp "Target         : Windows $WindowsVersion ($Release, $Language)"
+if ($Server) { Write-HostTimestamp 'Target         : Windows Server (whatever release the ISO you supply contains)' }
+else { Write-HostTimestamp "Target         : Windows $WindowsVersion ($Release, $Language)" }
 Write-Host $LineBreak
 Write-Host 'Everything this run writes goes under the working folder:' -ForegroundColor Cyan
 Write-Host "  Working folder   : $WorkRoot"
@@ -2199,7 +2260,8 @@ Write-Host "  Downloads        : $DlDir"
 if (-not $IsoPath) { Write-Host '                     (drop your own .iso here and it is used instead of downloading one)' -ForegroundColor DarkGray }
 Write-Host "  Logs             : $LogDir"
 if (-not $NoStamp) { Write-Host "  Build stamps     : $StampRoot" }
-Write-Host "  Finished ISO     : $(if ($OutputIsoPath) { $OutputIsoPath } else { Join-Path $FinishedIsoDir 'Win11_Pro_x64_<build>.<UBR>_<date-time>.iso' })"
+$IsoNameExample = if ($Server) { 'Server2025_DatacenterGUI_x64_<build>.<UBR>_<date-time>.iso' } else { 'Win11_Pro_x64_<build>.<UBR>_<date-time>.iso' }
+Write-Host "  Finished ISO     : $(if ($OutputIsoPath) { $OutputIsoPath } else { Join-Path $FinishedIsoDir $IsoNameExample })"
 Write-Host ''
 Write-Host '  Nothing outside these folders is changed. -WorkPath moves all of it, and -DownloadPath, -LogPath' -ForegroundColor DarkGray
 Write-Host '  and -OutputIsoPath override the individual folders.' -ForegroundColor DarkGray
@@ -2266,14 +2328,19 @@ if ($UnattendPath) {
 # --- Interactive confirmation ---
 if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -not $CheckOnly) {
     Write-Host "This tool builds an updated Windows installation ISO. It will:"
-    if (-not $IsoPath) {
+    if ($IsoPath) {
+        Write-Host "  - Use the ISO you provided: $IsoPath"
+    }
+    elseif ($Server) {
+        Write-Host "  - Use the Windows Server ISO it finds in the download folder: $DlDir"
+        Write-Host "      NOTE: Server media cannot be downloaded automatically, so drop the ISO in that folder" -ForegroundColor Yellow
+        Write-Host "            or re-run with -IsoPath." -ForegroundColor Yellow
+    }
+    else {
         Write-Host "  - Download the matching official Windows $WindowsVersion ISO from Microsoft (~8 GB)"
         Write-Host "      TIP: Microsoft can rate-limit/block repeated ISO downloads. The script retries, and can" -ForegroundColor Yellow
         Write-Host "           then offer Microsoft's Media Creation Tool instead. To skip all that, download the" -ForegroundColor Yellow
         Write-Host "           ISO yourself and re-run with -IsoPath." -ForegroundColor Yellow
-    }
-    else {
-        Write-Host "  - Use the ISO you provided: $IsoPath"
     }
     Write-Host "  - Extract it to $ExtractDir"
     if ($KeepEditions -and $KeepEditions.Count -gt 0) {
@@ -2283,7 +2350,8 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
         Write-Host "  - Keep ALL editions in the final ISO (-KeepAllEditions)"
     }
     else {
-        Write-Host "  - Keep ONLY the highest edition present (e.g. Enterprise over Pro, or Pro over Home) to speed up the build. Use -KeepAllEditions to keep them all" -ForegroundColor Yellow
+        $EditionRule = if ($Server) { 'the most upgradeable edition (Standard over Datacenter, and the Desktop Experience over Server Core)' } else { 'the highest edition present (Enterprise over Pro, or Pro over Home)' }
+        Write-Host "  - Keep ONLY $EditionRule to speed up the build. Use -KeepAllEditions to keep them all" -ForegroundColor Yellow
     }
     if (-not $SkipUpdates) {
         if ($UpdatePath) {
@@ -2409,6 +2477,15 @@ else {
         Write-HostTimestamp "An ISO is already downloaded - reusing it: $ResolvedIso ($([math]::Round($ExistingIso.Length / 1GB, 2)) GB)" -ForegroundColor Green
     }
     else {
+        # Neither Fido nor the Media Creation Tool offers Windows Server media, so -Server has nowhere to
+        # download from and the run cannot go any further without an ISO from the user.
+        if ($Server) {
+            Write-HostTimestamp 'No Windows Server ISO was found, and Server media cannot be downloaded automatically (neither Fido nor the Media Creation Tool serves it).' -ForegroundColor Red
+            Write-HostTimestamp '  Get the ISO from the Microsoft Evaluation Center, your Volume Licensing Service Center, or a Visual Studio subscription, then re-run with -IsoPath "C:\path\to\Server.iso"' -ForegroundColor Yellow
+            Write-HostTimestamp "  or drop the .iso into the download folder and re-run - it is picked up automatically: $DlDir" -ForegroundColor Yellow
+            Stop-Transcript | Out-Null
+            exit 1
+        }
         # -CheckOnly answers a question, so it never spends 8 GB of bandwidth to do it.
         if ($CheckOnly) {
             Write-HostTimestamp 'No ISO is available locally, so there is nothing to compare against - a build is needed.' -ForegroundColor Yellow
@@ -2545,7 +2622,7 @@ if (-not $NoStamp) {
             # otherwise looks like it only compared local files and never asked Microsoft anything.
             if ($script:ExpectedUpdateSet -and -not $SkipUpdates -and -not $UpdatePath) {
                 $Listed = @($script:ExpectedUpdateSet | ForEach-Object { $_ -replace '^(\w+)=(.+)@(.+)$', '$1 $2 (published $3)' })
-                Write-HostTimestamp "  The Microsoft Update Catalog was checked for Windows $WindowsVersion $StampFeature $StampArch, newest available:" -ForegroundColor DarkGray
+                Write-HostTimestamp "  The Microsoft Update Catalog was checked for $(Get-CatalogProductQuery -FeatureUpdate $StampFeature) $StampArch, newest available:" -ForegroundColor DarkGray
                 foreach ($Item in $Listed) { Write-HostTimestamp "    $Item" -ForegroundColor DarkGray }
             }
         }
@@ -2731,6 +2808,16 @@ if ($ImageUbr -and $ImageVersionText -match '^\d+\.\d+\.\d+$') { $ImageVersionTe
 
 Write-HostTimestamp "Image build    : $ImageVersionText$(if ($FeatureName) { " ($FeatureName)" })"
 Write-HostTimestamp "Image arch     : $ImageArch"
+
+# -Server picks an entirely different family of catalog queries, so a mismatch would fetch an update that
+# DISM then refuses to apply. Say so now rather than an hour into the run.
+$ImageIsServer = "$($ImageInfo.ImageName) $($ImageInfo.EditionId)" -match '(?i)server'
+if ($ImageIsServer -and -not $Server) {
+    Write-HostTimestamp "This looks like Windows Server media ($($ImageInfo.ImageName)), but -Server was not passed, so client updates will be searched for and will not apply. Re-run with -Server." -ForegroundColor Yellow
+}
+elseif ($Server -and -not $ImageIsServer) {
+    Write-HostTimestamp "-Server was passed, but this looks like client media ($($ImageInfo.ImageName)), so Server updates will be searched for and will not apply. Re-run without -Server." -ForegroundColor Yellow
+}
 Write-Host $LineBreak
 
 # The stamp check ran against the feature update/architecture recorded last time (or nothing at all on a
@@ -2778,18 +2865,17 @@ else {
     }
 
     Invoke-Task -Description 'Downloading the latest cumulative update from the Microsoft Update Catalog...' -ScriptBlock {
-        $VerPart = if ($FeatureName) { "Version $FeatureName " } else { '' }
         # The monthly LCU is titled e.g. "2026-07 Cumulative Update for Windows 11 Version 24H2 for
         # x64-based Systems (KB...)" and classified as a Security Update. Restrict the match to real
         # cumulative updates and exclude the .NET / Dynamic Update entries the same query returns.
-        $Query = "Cumulative Update for Windows $WindowsVersion ${VerPart}for $CatalogArch-based Systems"
-        $Include = '(?i)cumulative update for windows'
+        $Query = "Cumulative Update for $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) for $CatalogArch-based Systems"
+        $Include = '(?i)cumulative update for (windows|microsoft server operating system)'
         $Exclude = '(?i)\.net|dynamic update'
         $script:LcuUpToDate = $null
         $script:Lcu = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate)
         if (-not $script:Lcu -and -not $script:LcuUpToDate) {
             # Retry with a looser query (some releases omit the "Version xxHx" token in the title).
-            $Query2 = "Cumulative Update for Windows $WindowsVersion for $CatalogArch-based Systems"
+            $Query2 = "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems"
             Write-HostTimestamp "  Retrying with a broader query: $Query2" -ForegroundColor Yellow
             $script:Lcu = Get-LatestCatalogPackage -Query $Query2 -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate)
         }
@@ -2809,8 +2895,7 @@ else {
 
     if (-not $SkipDotNet) {
         Invoke-Task -Description 'Downloading the latest .NET cumulative update from the Microsoft Update Catalog...' -ScriptBlock {
-            $VerPart = if ($FeatureName) { "Windows $WindowsVersion Version $FeatureName" } else { "Windows $WindowsVersion" }
-            $Query = "Cumulative Update for .NET Framework $VerPart for $CatalogArch"
+            $Query = "Cumulative Update for .NET Framework $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) for $CatalogArch"
             $script:DotNet = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update'
         }
         if ($script:DotNet) { $UpdateGroups.Add(@($script:DotNet)) }
@@ -2823,19 +2908,23 @@ else {
     # manifests in step with the serviced boot.wim. It is therefore kept out of $UpdateGroups.
     if (-not $SkipSetupDU) {
         Invoke-Task -Description 'Downloading the latest Setup Dynamic Update from the Microsoft Update Catalog...' -ScriptBlock {
-            $VerPart = if ($FeatureName) { "Version $FeatureName " } else { '' }
-            $script:SetupDu = Get-LatestCatalogPackage -Query "Setup Dynamic Update Windows $WindowsVersion $VerPart$CatalogArch" -DownloadDir $DlDir -TitleInclude '(?i)setup dynamic update'
+            $script:SetupDu = Get-LatestCatalogPackage -Query "Setup Dynamic Update $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) $CatalogArch" -DownloadDir $DlDir -TitleInclude '(?i)setup dynamic update'
         }
         if (-not $script:SetupDu) {
             Write-HostTimestamp '  No Setup Dynamic Update was found. The media Setup files will only be refreshed from boot.wim, which can make Windows Setup fail on the finished ISO.' -ForegroundColor Yellow
+            if ($Server) {
+                Write-HostTimestamp '  Microsoft only publishes one for Server 2025 and newer, so this is expected on older Server media.' -ForegroundColor DarkGray
+            }
         }
         Write-Host $LineBreak
     }
 
     if ($ServiceWinRE) {
         Invoke-Task -Description 'Looking for a Safe OS Dynamic Update for the recovery image (WinRE)...' -ScriptBlock {
-            $VerPart = if ($FeatureName) { "Version $FeatureName " } else { '' }
-            $script:SafeOs = Get-LatestCatalogPackage -Query "Safe OS Dynamic Update Windows $WindowsVersion $VerPart$CatalogArch" -DownloadDir $DlDir -TitleInclude '(?i)safe os dynamic update'
+            # Server media labels the Safe OS package plain "Dynamic Update", so the Setup one is excluded
+            # by name instead of the Safe OS one being required by name.
+            $SafeInclude = if ($Server) { '(?i)dynamic update' } else { '(?i)safe os dynamic update' }
+            $script:SafeOs = Get-LatestCatalogPackage -Query "Safe OS Dynamic Update $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) $CatalogArch" -DownloadDir $DlDir -TitleInclude $SafeInclude -TitleExclude '(?i)setup dynamic update'
         }
         if ($script:SafeOs) { $SafeOsGroup = @($script:SafeOs) }
         else { Write-HostTimestamp '  No Safe OS Dynamic Update was found, so WinRE update integration will be skipped (per Microsoft, the LCU does not apply to WinRE).' -ForegroundColor Yellow }
@@ -2856,8 +2945,8 @@ $InstallImages = @(Get-WindowsImage -ImagePath $InstallWimExtracted -ErrorAction
 # Which editions to KEEP in the final ISO.
 #   * -KeepEditions <list>  : keep exactly what the user named (highest precedence).
 #   * -KeepAllEditions      : keep every edition in the media.
-#   * default               : keep only the single highest edition (e.g. Pro over Home) to speed up
-#                             servicing and shrink the ISO.
+#   * default               : keep only the single top-ranked edition (Pro over Home on client media,
+#                             Standard over Datacenter on Server) to speed up servicing and shrink the ISO.
 $KeepIndexes = @($InstallImages.ImageIndex)
 if ($script:EsdPreTrimmed) {
     # The ESD conversion already exported only the editions to keep, and dropping editions renumbers the
@@ -2891,7 +2980,7 @@ elseif ($KeepAllEditions) {
     Write-Host $LineBreak
 }
 elseif ($InstallImages.Count -gt 1) {
-    # Default: keep only the single highest-ranked edition. Sort by rank (desc), then prefer the shorter
+    # Default: keep only the single top-ranked edition. Sort by rank (desc), then prefer the shorter
     # (base) name, then the lowest index, and take the top one.
     $Top = $InstallImages |
         Sort-Object @{ Expression = { Get-EditionRank $_.ImageName }; Descending = $true },
@@ -2900,7 +2989,9 @@ elseif ($InstallImages.Count -gt 1) {
         Select-Object -First 1
     $KeepIndexes = @([int]$Top.ImageIndex)
     $DroppedNames = $InstallImages | Where-Object { $_.ImageIndex -ne $Top.ImageIndex } | ForEach-Object { $_.ImageName }
-    Write-HostTimestamp "Keeping only the highest edition to speed up the build: $($Top.ImageName). Use -KeepAllEditions to keep them all, or -KeepEditions to choose." -ForegroundColor Cyan
+    $EditionRule = if ($Server) { 'the most upgradeable edition' } else { 'the highest edition' }
+    Write-HostTimestamp "Keeping only $EditionRule to speed up the build: $($Top.ImageName). Use -KeepAllEditions to keep them all, or -KeepEditions to choose." -ForegroundColor Cyan
+    if ($Server) { Write-HostTimestamp '  Standard can be upgraded to Datacenter in place with DISM /Set-Edition, but Datacenter can never be downgraded, so Standard is the safer edition to ship.' -ForegroundColor DarkGray }
     if ($DroppedNames) { Write-HostTimestamp "Removing from the ISO: $($DroppedNames -join ', ')" -ForegroundColor Yellow }
     Write-Host $LineBreak
 }

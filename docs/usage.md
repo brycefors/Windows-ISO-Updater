@@ -26,6 +26,45 @@ To use command-line parameters, run the batch file from a Command Prompt or Powe
 
 The full list is in [Command-Line Parameters](parameters.md).
 
+## Updating a Windows Server ISO
+
+Pass `-Server` to service Windows Server media (2016 through 2025). Everything else works the same way,
+but the ISO has to come from you: neither Fido nor the Media Creation Tool serves Server media, so
+download it from the [Microsoft Evaluation Center](https://www.microsoft.com/evalcenter), your Volume
+Licensing Service Center, or a Visual Studio subscription first.
+
+```shell
+:: Slipstream the latest Server cumulative update into your own Server 2025 ISO
+.\Run-Windows-ISO-Updater.bat -Server -IsoPath "C:\ISOs\Server2025.iso"
+
+:: Or drop the ISO into the download folder and let it be picked up automatically
+.\Run-Windows-ISO-Updater.bat -Server
+```
+
+A few differences worth knowing:
+
+- The release is read from the image, so there is no `-Release` to set. Server 2022 and newer are listed
+  in the Microsoft Update Catalog as *"Microsoft server operating system version 21H2/23H2/24H2"* rather
+  than by year, and the script builds the right query for you.
+- The default "keep only one edition" rule picks **Standard (Desktop Experience)**, not Datacenter. An
+  installed Standard server can be upgraded to Datacenter in place with `DISM /Set-Edition`, but
+  Datacenter can never be downgraded, so Standard is the edition that leaves both options open. Use
+  `-KeepEditions` to pick Datacenter or a Server Core image instead, or `-KeepAllEditions` to keep all
+  four.
+- Microsoft only publishes a **Setup Dynamic Update** for Server 2025 and newer, so on older Server media
+  the script reports that none was found and refreshes the media Setup files from `boot.wim` alone.
+- If the media and the switch disagree (Server ISO without `-Server`, or the other way round) the script
+  says so before it starts downloading updates that could never apply.
+- **Give Server its own `-StampPath` if you also build client ISOs.** There is one `last-build.json` per
+  stamp folder, so a Server run and a Windows 11 run sharing the default folder overwrite each other's
+  state and both rebuild from scratch every time. `-AutoClean` has the same problem, it deletes the update
+  packages the other flavour downloaded.
+
+  ```shell
+  .\Run-Windows-ISO-Updater.bat -Server -IsoPath "C:\ISOs\Server2025.iso" -StampPath "C:\WISO-Work\Stamps\Server2025"
+  .\Run-Windows-ISO-Updater.bat -WindowsVersion 11 -StampPath "C:\WISO-Work\Stamps\Win11"
+  ```
+
 ## Running It on a Schedule
 
 ```shell
@@ -42,7 +81,7 @@ See [Scheduled Runs](scheduled-runs.md).
 
 ## Removing Editions (Slimming the ISO)
 
-A Windows ISO's `install.wim` usually contains many editions (Home, Home N, Pro, Education, etc.). **By default the script keeps only the highest edition present** (e.g. Enterprise over Pro, or Pro over Home) and removes the rest, which speeds up servicing and produces a smaller ISO. Use `-KeepAllEditions` to keep every edition, or `-KeepEditions` to choose exactly which ones to keep.
+A Windows ISO's `install.wim` usually contains many editions (Home, Home N, Pro, Education, etc.). **By default the script keeps only one edition** and removes the rest, which speeds up servicing and produces a smaller ISO. On client media that is the highest edition present (e.g. Enterprise over Pro, or Pro over Home). On Server media the rule is reversed to the *most upgradeable* edition, Standard over Datacenter, because Standard can be upgraded in place but Datacenter cannot be downgraded. Use `-KeepAllEditions` to keep every edition, or `-KeepEditions` to choose exactly which ones to keep.
 
 ```shell
 :: See what editions are inside the ISO first (downloads/uses the ISO, then just lists and exits)

@@ -20,11 +20,18 @@ Everything else is optional. For a specific edition, your own ISO, or a run with
 .\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Win11.iso" -Edition "Windows 11 Pro" -Unattended
 ```
 
+**Windows Server** media works too, with `-Server`. Server ISOs cannot be downloaded automatically, so
+pass your own:
+
+```shell
+.\Run-Windows-ISO-Updater.bat -Server -IsoPath "C:\ISOs\Server2025.iso"
+```
+
 ## Documentation
 
 | Page | Contents |
 |---|---|
-| [Usage](docs/usage.md) | Running the script, command-line examples, and slimming the ISO by removing editions. |
+| [Usage](docs/usage.md) | Running the script, command-line examples, Windows Server media, and slimming the ISO by removing editions. |
 | [Command-Line Parameters](docs/parameters.md) | Every parameter and what it does. |
 | [Scheduled Runs](docs/scheduled-runs.md) | Running this from a scheduled task: build stamps, skipping runs that would change nothing, and `-AutoClean` housekeeping. |
 | [Unattended Installs](docs/unattended-installs.md) | `-UnattendPath`, plus two worked answer files: a no-OOBE lab machine and a sysprep gold image. |
