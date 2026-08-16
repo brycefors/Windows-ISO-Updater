@@ -14,7 +14,7 @@ The script validates that the file exists and is well-formed XML before starting
 
 > [!WARNING]
 > Two things to watch for with any answer file:
-> - **Edition selection.** By default this script keeps only one edition and renumbers `install.wim`, so an answer file that selects the edition with `/IMAGE/INDEX` will point at the wrong image. Use `/IMAGE/NAME` instead, or build with `-KeepAllEditions`. The script warns when it detects this combination.
+> - **Edition selection.** By default this script drops the editions it is not keeping and renumbers `install.wim`, so an answer file that selects the edition with `/IMAGE/INDEX` will point at the wrong image. The default keeps the highest edition at index 1 (with Home at index 2 on client media), so index 1 still means what it used to, but `/IMAGE/NAME` is the safer choice. Use it, or build with `-KeepAllEditions`. The script warns when it detects this combination.
 > - **Secrets.** Answer files store passwords in plain text or base64 and product keys in the clear. Anyone who can read the ISO can recover them, so treat the finished ISO as a secret and don't commit the answer file to source control.
 
 The two files in [`Examples/`](../Examples) are a matched pair: one deploys a ready-to-use machine, the other builds an image to deploy *from*. Both were produced with [schneegans.de/windows/unattend-generator](https://schneegans.de/windows/unattend-generator/) and then **hand edited**, and a comment at the top of each records exactly what was changed and why. The generator URL preserved alongside them reproduces the original options only, so regenerating from it discards the manual changes.
@@ -33,7 +33,7 @@ The two files in [`Examples/`](../Examples) are a matched pair: one deploys a re
 > [!WARNING]
 > **This example partitions and formats disk 0 without asking which disk to use.** A generated WinPE script first asserts that disk 0 exists and is between 100 and 4000 GiB, aborting if not. If disk 0 is **empty it proceeds with no prompt at all**, cleaning, partitioning, applying image index 1 and rebooting. If disk 0 **already holds partitions** it stops and asks: you must type `WIPE` to erase it, and any other answer aborts without touching the disk.
 >
-> Because it applies **index 1**, it pairs with the default edition handling, which leaves a single edition at index 1. If you build with `-KeepAllEditions`, index 1 is whichever edition came first in the original ISO, usually Home rather than the one you probably want.
+> Because it applies **index 1**, it pairs with the default edition handling, which puts the highest edition (usually Pro) at index 1, with Home at index 2 when the media has one. If you build with `-KeepAllEditions`, index 1 is whichever edition came first in the original ISO, usually Home rather than the one you probably want.
 
 ## Example: gold image build
 

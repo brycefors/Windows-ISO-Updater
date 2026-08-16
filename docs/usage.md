@@ -46,11 +46,11 @@ A few differences worth knowing:
 - The release is read from the image, so there is no `-Release` to set. Server 2022 and newer are listed
   in the Microsoft Update Catalog as *"Microsoft server operating system version 21H2/23H2/24H2"* rather
   than by year, and the script builds the right query for you.
-- The default "keep only one edition" rule picks **Standard (Desktop Experience)**, not Datacenter. An
-  installed Standard server can be upgraded to Datacenter in place with `DISM /Set-Edition`, but
-  Datacenter can never be downgraded, so Standard is the edition that leaves both options open. Use
-  `-KeepEditions` to pick Datacenter or a Server Core image instead, or `-KeepAllEditions` to keep all
-  four.
+- Server media keeps a **single** edition by default, not the two that client media keeps, and the pick is
+  **Standard (Desktop Experience)**, not Datacenter. An installed Standard server can be upgraded to
+  Datacenter in place with `DISM /Set-Edition`, but Datacenter can never be downgraded, so Standard is the
+  edition that leaves both options open. Use `-KeepEditions` to pick Datacenter or a Server Core image
+  instead, or `-KeepAllEditions` to keep all four.
 - Microsoft only publishes a **Setup Dynamic Update** for Server 2025 and newer, so on older Server media
   the script reports that none was found and refreshes the media Setup files from `boot.wim` alone.
 - **A mismatch between the media and the switch is a fatal error, both ways round.** The script reads the
@@ -83,20 +83,22 @@ See [Scheduled Runs](scheduled-runs.md).
 
 ## Removing Editions (Slimming the ISO)
 
-A Windows ISO's `install.wim` usually contains many editions (Home, Home N, Pro, Education, etc.). **By default the script keeps only one edition** and removes the rest, which speeds up servicing and produces a smaller ISO. On client media that is the highest edition present (e.g. Enterprise over Pro, or Pro over Home). On Server media the rule is reversed to the *most upgradeable* edition, Standard over Datacenter, because Standard can be upgraded in place but Datacenter cannot be downgraded. Use `-KeepAllEditions` to keep every edition, or `-KeepEditions` to choose exactly which ones to keep.
+A Windows ISO's `install.wim` usually contains many editions (Home, Home N, Pro, Education, etc.). **By default the script keeps the highest edition plus Home** and removes the rest, which speeds up servicing and produces a smaller ISO. On typical consumer media that means Pro and Home, so one ISO still installs either. If the media has no Home edition (business and VL media, for example), only the highest edition is kept. On Server media the rule is different: a single edition, the *most upgradeable* one, Standard over Datacenter, because Standard can be upgraded in place but Datacenter cannot be downgraded. Use `-KeepAllEditions` to keep every edition, or `-KeepEditions` to choose exactly which ones to keep.
+
+Both kept editions are serviced, so a two-edition build takes roughly twice as long as a one-edition build. Pass `-KeepEditions "Windows 11 Pro"` if you only need one and want the shorter run.
 
 ```shell
 :: See what editions are inside the ISO first (downloads/uses the ISO, then just lists and exits)
 .\Run-Windows-ISO-Updater.bat -ListEditions
 
-:: Keep EVERY edition instead of just the highest one
+:: Keep EVERY edition instead of just Pro and Home
 .\Run-Windows-ISO-Updater.bat -KeepAllEditions
 
-:: Build an updated ISO containing ONLY Windows 11 Pro and Home (by name)
-.\Run-Windows-ISO-Updater.bat -KeepEditions "Windows 11 Pro","Windows 11 Home"
+:: Build an updated ISO containing ONLY Windows 11 Pro (by name)
+.\Run-Windows-ISO-Updater.bat -KeepEditions "Windows 11 Pro"
 
 :: Same idea, selecting by index number instead of name
 .\Run-Windows-ISO-Updater.bat -KeepEditions 6,1
 ```
 
-`-KeepEditions` accepts edition names (partial matches allowed) or index numbers, and overrides the highest-edition default. Only the kept editions are serviced and re-exported, so the removed editions are gone from the final `install.wim`. It works with `-SkipUpdates` too, if you only want to trim editions without integrating updates.
+`-KeepEditions` accepts edition names (partial matches allowed) or index numbers, and overrides the default. Only the kept editions are serviced and re-exported, so the removed editions are gone from the final `install.wim`. It works with `-SkipUpdates` too, if you only want to trim editions without integrating updates.
