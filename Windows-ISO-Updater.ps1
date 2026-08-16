@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.18   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.19   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -235,7 +235,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.18'
+$ScriptVersion = '2026.08.16.19'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2092,7 +2092,14 @@ function Register-MountCleanupTask {
     $ToolsDir = Join-Path -Path $WorkRoot -ChildPath 'Tools'
     $CleanupScript = Join-Path -Path $ToolsDir -ChildPath 'Clear-StaleMount.ps1'
     $CleanupLog = Join-Path -Path $LogDir -ChildPath 'mount-cleanup.log'
-    $PathList = ($Path | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ', '
+
+    # Every mount folder goes in the list, not just the one that failed. By the time this runs the build is
+    # long dead, so the siblings are stale too, and clearing them all is what makes the next run start clean.
+    $Targets = New-Object System.Collections.Generic.List[string]
+    foreach ($Item in @($Path) + @('Mount', 'WinREMount', 'BuildCheck' | ForEach-Object { Join-Path -Path $WorkRoot -ChildPath $_ })) {
+        if ($Item -and -not ($Targets | Where-Object { $_ -ieq $Item })) { $Targets.Add($Item) }
+    }
+    $PathList = ($Targets | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ', '
 
     # Runs unattended at boot, so it leaves a log rather than failing silently. Everything here is the
     # teardown DISM should have done itself: strip the reparse point and attributes the WIM filter leaves
@@ -2129,14 +2136,24 @@ foreach (`$Entry in (Get-ChildItem -LiteralPath `$MountedKey)) {
 
 & dism.exe /English /Cleanup-Mountpoints
 
+`$EmptyDir = Join-Path -Path `$env:TEMP -ChildPath 'wiso-empty'
+New-Item -ItemType Directory -Path `$EmptyDir -Force | Out-Null
 foreach (`$Target in `$Targets) {
     if (-not (Test-Path -LiteralPath `$Target)) { continue }
     "Taking ownership of `$Target and deleting it"
-    & takeown.exe /F "`$Target" /A /R /D Y
-    & icacls.exe "`$Target" /grant '*S-1-5-32-544:(OI)(CI)F' /T /C /Q
-    Remove-Item -LiteralPath `$Target -Recurse -Force
-    if (Test-Path -LiteralPath `$Target) { "STILL PRESENT: `$Target" } else { "Removed `$Target" }
+    & takeown.exe /F "`$Target" /A /R /D Y | Out-Null
+    & icacls.exe "`$Target" /grant '*S-1-5-32-544:(OI)(CI)F' /T /C /Q | Out-Null
+    # Nothing else here reaches the WinSxS paths past 260 characters, and /B uses backup privileges.
+    & robocopy.exe `$EmptyDir `$Target /MIR /B /R:0 /W:0 /NFL /NDL /NJH /NJS /NP | Out-Null
+    `$DeleteError = `$null
+    Remove-Item -LiteralPath `$Target -Recurse -Force -ErrorVariable DeleteError
+    if (Test-Path -LiteralPath `$Target) {
+        `$Remaining = @(Get-ChildItem -LiteralPath `$Target -Recurse -Force).Count
+        "STILL PRESENT: `$Target (`$Remaining items left) `$(if (`$DeleteError) { `$DeleteError[0].Exception.Message })"
+    }
+    else { "Removed `$Target" }
 }
+Remove-Item -LiteralPath `$EmptyDir -Recurse -Force
 
 Stop-Transcript | Out-Null
 Unregister-ScheduledTask -TaskName '$CleanupTaskName' -Confirm:`$false
@@ -2232,33 +2249,52 @@ function Dismount-ImageDiscard {
 
 # Deletes a directory that Administrator rights alone cannot touch. What DISM leaves behind when a mount
 # is interrupted is owned by TrustedInstaller and carries the image's own ACLs, so Remove-Item fails with
-# "You need permission from TrustedInstaller" and every later run then fails too. Well-known SIDs are used
-# rather than account names so this still works on a non-English Windows.
+# "You need permission from TrustedInstaller", and the WinSxS tree inside nests past 260 characters, which
+# Windows PowerShell 5.1 cannot address at all. Well-known SIDs are used rather than account names so this
+# still works on a non-English Windows.
 function Remove-DirectoryForce {
     param([Parameter(Mandatory)][string]$Path)
 
     if (-not (Test-Path -LiteralPath $Path)) { return $true }
 
-    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
-    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+    $TryRemove = {
+        Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+        return (-not (Test-Path -LiteralPath $Path))
+    }
+
+    if (& $TryRemove) { return $true }
 
     Write-HostTimestamp "    Leftover files at $Path are locked down by TrustedInstaller, taking ownership of them..." -ForegroundColor Yellow
     & takeown.exe /F "$Path" /A /R /D Y 2>&1 | Out-Null
     & icacls.exe "$Path" /grant '*S-1-5-32-544:(OI)(CI)F' /T /C /Q 2>&1 | Out-Null
     & attrib.exe -R -S -H "$Path\*" /S /D 2>&1 | Out-Null
+    if (& $TryRemove) {
+        Write-HostTimestamp '    Removed them.' -ForegroundColor Green
+        return $true
+    }
 
-    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
-    if (-not (Test-Path -LiteralPath $Path)) {
+    # Mirroring an empty folder over the target is the only thing here that walks paths longer than 260
+    # characters, and /B uses backup privileges so whatever ACLs survived takeown stop mattering.
+    Write-HostTimestamp '    Paths inside are too long for Remove-Item, emptying the folder with robocopy...' -ForegroundColor Yellow
+    $EmptyDir = Join-Path -Path $env:TEMP -ChildPath ('wiso-empty-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $EmptyDir -Force -ErrorAction SilentlyContinue | Out-Null
+    & robocopy.exe $EmptyDir $Path /MIR /B /R:0 /W:0 /NFL /NDL /NJH /NJS /NP 2>&1 | Out-Null
+    Remove-Item -LiteralPath $EmptyDir -Recurse -Force -ErrorAction SilentlyContinue
+    if (& $TryRemove) {
         Write-HostTimestamp '    Removed them.' -ForegroundColor Green
         return $true
     }
 
     # A handle held by the servicing stack usually goes away on its own a moment later.
     Start-Sleep -Seconds 3
-    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+    $DeleteError = $null
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue -ErrorVariable DeleteError
     if (-not (Test-Path -LiteralPath $Path)) {
         Write-HostTimestamp '    Removed them.' -ForegroundColor Green
         return $true
+    }
+    if ($DeleteError) {
+        Write-HostTimestamp "    It still will not delete: $($DeleteError[0].Exception.Message)" -ForegroundColor Yellow
     }
     return $false
 }
