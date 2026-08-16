@@ -127,3 +127,20 @@ Windows recreates all of it on first boot. The same pass also removes `Windows.o
 What remains after that is genuine variance in what `/ResetBase` managed to reclaim, which depends on the component store's state at that moment. Running the cleanup more than once does not help, since a completed `/ResetBase` has already removed every superseded component and a second pass rescans the whole store to reclaim nothing. It also runs per edition, so repeating it is expensive.
 
 If two builds still differ by hundreds of megabytes, compare their stamps rather than guessing. A `Result` of `SuccessWithWarnings` means a package failed to apply to at least one edition and that ISO is genuinely under-patched.
+
+## How This Was Built
+
+Most of the code here was written with an AI model. That is worth saying plainly rather than leaving it to be guessed at, because it changes the questions a reader should ask.
+
+What it does not mean is that it was left to run on its own. Every line was reviewed and every path was tested by hand on real media, by someone with twenty years in Windows IT who was writing PowerShell long before any of this was available. No autopilot, no accepting a diff because it looked plausible, and nothing shipped that had not actually been run.
+
+The design is mine. Even on the strongest models available, the concepts and the methods came first, from experience, and the model wrote against them. That distinction turned out to be the whole difference. Handed a goal and left to work out the approach, the models I tried stalled, went in circles or produced something confidently wrong. Handed a decided approach, they were genuinely quick at turning it into working code.
+
+The parts of this script that matter most are the ones that came from knowing the terrain rather than from a model:
+
+- The already-patched check is **deliberately asymmetric** and fails open, because a wrong skip silently ships an unpatched ISO. A model optimising for a clean-looking implementation trusts the WIM header and moves on.
+- `Test-RebuildNeeded` runs **before** extraction, since a check that costs an hour of extraction is not a check worth having on a schedule.
+- Monthly scheduled triggers are registered through exported XML, because the obvious `Register-ScheduledTask -Trigger` route returns `0x80070057` on client Windows no matter what you set.
+- Windows PowerShell 5.1 is the target throughout, which rules out a long list of syntax and a few overloads that look correct and refuse to bind.
+
+None of those came out of a prompt. They came out of having been bitten before, and the reason they are written down here is so the next person does not have to be.
