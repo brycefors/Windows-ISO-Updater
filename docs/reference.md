@@ -38,6 +38,7 @@ C:\WISO-Work\              <- -WorkPath (moves everything below it)
   Downloads\               <- -DownloadPath (source ISO and updates)
   Output\                  <- the finished ISO (-OutputIsoPath overrides it)
   Logs\                    <- -LogPath
+  Stamps\                  <- -StampPath (record of each finished build; see Scheduled Runs)
 ```
 
 Dropping your own `.iso` into `Downloads\` is all it takes to skip the Microsoft download — no `-IsoPath` needed. The finished ISO is written to `Output\` instead, so a previous build is never picked up as the source for the next one. `-DownloadPath`, `-LogPath` and `-OutputIsoPath` override the individual folders if you want them elsewhere. Nothing outside these folders is changed — all servicing happens against files in the working folder, never against the running system.

@@ -26,6 +26,17 @@ To use command-line parameters, run the batch file from a Command Prompt or Powe
 
 The full list is in [Command-Line Parameters](parameters.md).
 
+## Running It on a Schedule
+
+```shell
+:: Rebuild monthly, on the 15th at 03:00, and clean up what earlier builds left behind
+.\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -Schedule Monthly -ScheduleDay 15 -ScheduleTime 03:00 -AutoClean
+```
+
+The task runs the script with `-Scheduled`, which compares the run against the stamp left by the last
+build and exits within a minute or two when nothing has changed — so scheduling it hourly costs nothing.
+See [Scheduled Runs](scheduled-runs.md).
+
 ## Removing Editions (Slimming the ISO)
 
 A Windows ISO's `install.wim` usually contains many editions (Home, Home N, Pro, Education, etc.). **By default the script keeps only the highest edition present** (e.g. Enterprise over Pro, or Pro over Home) and removes the rest — this speeds up servicing and produces a smaller ISO. Use `-KeepAllEditions` to keep every edition, or `-KeepEditions` to choose exactly which ones to keep.

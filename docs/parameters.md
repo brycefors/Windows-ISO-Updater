@@ -41,3 +41,24 @@ The script supports the following optional parameters:
 | `-OscdimgSha256` | Expected SHA-256 of the downloaded `oscdimg.exe`. Pass an empty string to skip the hash check when overriding `-OscdimgUrl`. |
 | `-LogPath` | Directory to write log files to. Defaults to a `Logs` folder inside the working folder. |
 | `-SkipInteractive` | Skips the interactive confirmation prompt (still shows output). |
+
+## Scheduled runs, build stamps and housekeeping
+
+See [Scheduled Runs](scheduled-runs.md) for how these fit together.
+
+| Parameter | Description |
+|---|---|
+| `-Scheduled` | Run as an unattended job: no prompts, no "press enter to exit", and the whole build is skipped when the stamp shows nothing has changed. This is what `-RegisterScheduledTask` puts on the task's command line. |
+| `-Force` | Build even when the stamp says nothing has changed. |
+| `-CheckOnly` | Only report whether a rebuild is needed, then exit without downloading or building. Exit code `0` = nothing to do, `10` = a rebuild is needed. |
+| `-NoStamp` | Ignore the stamps completely: do not read one to skip the run, and do not write one at the end. |
+| `-StampPath` | Directory to keep the build stamps in. Defaults to a `Stamps` folder inside the working folder. Point several machines at a share to give them one shared history. |
+| `-StampHistoryCount` | How many past stamps to keep in `Stamps\History`. Defaults to `30`. |
+| `-AutoClean` | After a successful build, delete the update packages this script downloaded for **earlier** builds and every generated ISO except the newest few. Only files recorded in a stamp are ever deleted — anything else in those folders is left alone. |
+| `-KeepIsoCount` | How many generated ISOs `-AutoClean` keeps (newest first). Defaults to `3`. |
+| `-RegisterScheduledTask` | Create (or update) a scheduled task that runs this script with the other parameters you passed, then exit without building. The task runs as `SYSTEM` with the highest privileges. |
+| `-UnregisterScheduledTask` | Delete the scheduled task named by `-TaskName`, then exit. |
+| `-Schedule` | How often the registered task runs: `Hourly`, `Daily`, `Weekly` or `Monthly`. Defaults to `Monthly`, which matches Microsoft's Patch Tuesday cadence. |
+| `-ScheduleTime` | Time of day the registered task starts, as 24-hour `HH:mm`. Defaults to `03:00`. |
+| `-ScheduleDay` | Which day the registered task runs: a weekday name for `-Schedule Weekly` (default `Sunday`), or a day number `1`-`31` for `-Schedule Monthly` (default `15`, a few days after Patch Tuesday). |
+| `-TaskName` | Name of the scheduled task to create or delete. Defaults to `Windows ISO Updater`. |

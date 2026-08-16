@@ -1,3 +1,6 @@
+# Windows ISO Updater
+# Version: 2026.08.15.4   (date-based; stamped automatically by tools\Update-Version.ps1 on commit)
+#
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10) installation ISO.
 # It downloads the latest official Microsoft ISO, downloads the latest cumulative update(s) from the
@@ -34,6 +37,11 @@
 #      UEFI boot sectors so the new ISO boots on legacy and modern PCs alike. An answer file supplied with
 #      -UnattendPath is placed at the root of the media as autounattend.xml, which Windows Setup reads
 #      automatically when the ISO is booted.
+#   7. Records a "stamp" of the finished build (the source ISO's hash, the updates that went in, the
+#      parameters used and the ISO that came out) and keeps a history of them. The next run compares
+#      itself with that stamp first and exits in a minute or two when nothing has changed, which is what
+#      makes it safe to run this from a scheduled task - see -Scheduled and -RegisterScheduledTask.
+#      -AutoClean then prunes the update packages and generated ISOs that earlier builds left behind.
 #
 # This is disk- and time-intensive: with the default parameters a full run normally takes an hour or two.
 # It needs a lot of free space (the download, the extracted media, the mounted image, and the exported
@@ -152,8 +160,69 @@ param(
     [Parameter(HelpMessage = 'Directory to write log files to. Defaults to a "Logs" folder inside the working folder, so everything the script writes stays in one place')]
     [string]$LogPath,
 
+    [Parameter(HelpMessage = 'Directory to keep the build stamps in (the JSON record of what each finished build contained). Defaults to a "Stamps" folder inside the working folder')]
+    [string]$StampPath,
+
+    [Parameter(HelpMessage = 'How many past stamps to keep in the stamp history folder. Defaults to 30')]
+    [ValidateRange(1, 1000)]
+    [int]$StampHistoryCount = 30,
+
+    [Parameter(HelpMessage = 'Run as a scheduled/unattended job: no prompts, no "press enter to exit", and the whole build is skipped when the last stamp shows that nothing has changed')]
+    [switch]$Scheduled,
+
+    [Parameter(HelpMessage = 'Rebuild even when the stamp says nothing has changed since the last build')]
+    [switch]$Force,
+
+    [Parameter(HelpMessage = 'Only report whether a rebuild is needed and exit without building anything. Exit code 0 = nothing to do, 10 = a rebuild is needed')]
+    [switch]$CheckOnly,
+
+    [Parameter(HelpMessage = 'Ignore the stamps completely: do not read one to skip the run, and do not write one at the end')]
+    [switch]$NoStamp,
+
+    [Parameter(HelpMessage = 'After a successful build, delete the update packages this script downloaded for previous builds and all but the newest generated ISOs')]
+    [switch]$AutoClean,
+
+    [Parameter(HelpMessage = 'How many generated ISOs -AutoClean keeps (newest first). Defaults to 3')]
+    [ValidateRange(1, 100)]
+    [int]$KeepIsoCount = 3,
+
+    [Parameter(HelpMessage = 'Create (or update) a scheduled task that runs this script with the other parameters you passed, then exit without building')]
+    [switch]$RegisterScheduledTask,
+
+    [Parameter(HelpMessage = 'Delete the scheduled task named by -TaskName, then exit')]
+    [switch]$UnregisterScheduledTask,
+
+    [Parameter(HelpMessage = 'How often the registered task runs: Hourly, Daily, Weekly or Monthly. Defaults to Monthly, which matches Microsoft''s Patch Tuesday cadence')]
+    [ValidateSet('Hourly', 'Daily', 'Weekly', 'Monthly')]
+    [string]$Schedule = 'Monthly',
+
+    [Parameter(HelpMessage = 'Time of day the registered task starts, as HH:mm (24-hour). Defaults to 03:00')]
+    [ValidatePattern('^\d{1,2}:\d{2}$')]
+    [string]$ScheduleTime = '03:00',
+
+    [Parameter(HelpMessage = 'Which day the registered task runs: a weekday name for -Schedule Weekly (default Sunday), or a day number 1-31 for -Schedule Monthly (default 15, a few days after Patch Tuesday)')]
+    [string]$ScheduleDay,
+
+    [Parameter(HelpMessage = 'Name of the scheduled task to create or delete. Defaults to "Windows ISO Updater"')]
+    [string]$TaskName = 'Windows ISO Updater',
+
     [switch]$SkipInteractive # Skips the interactive confirmation prompt
 )
+
+# Remembered here because inside a function $PSBoundParameters/$MyInvocation describe that function, not
+# the script - and the scheduled-task registration has to reproduce this exact command line.
+$script:ScriptBoundParameters = $PSBoundParameters
+$script:ScriptPath = $PSCommandPath
+
+# Kept in step with the header comment by tools\Update-Version.ps1; shown in the log and recorded in the
+# build stamp so a finished ISO can be traced back to the exact script that built it.
+$ScriptVersion = '2026.08.15.4'
+
+# A scheduled run has nobody to answer a prompt.
+if ($Scheduled) {
+    $Unattended = $true
+    $SkipInteractive = $true
+}
 
 # Verify this is running on PowerShell 5 or higher
 if ($PSVersionTable.PSVersion.Major -lt 5) {
@@ -216,6 +285,11 @@ $DlDir      = if ($DownloadPath) { $DownloadPath } else { Join-Path -Path $WorkR
 $LogDirWanted = if ($LogPath) { $LogPath } else { Join-Path -Path $WorkRoot -ChildPath 'Logs' }
 # The finished ISO gets its own folder so it is never mistaken for a source ISO sitting in Downloads.
 $FinishedIsoDir = Join-Path -Path $WorkRoot -ChildPath 'Output'
+# Stamps record what each finished build contained, so a scheduled run can tell whether building again
+# would produce anything new. -StampPath moves them (e.g. onto a share, so several machines share state).
+$StampRoot       = if ($StampPath) { $StampPath } else { Join-Path -Path $WorkRoot -ChildPath 'Stamps' }
+$StampHistoryDir = Join-Path -Path $StampRoot -ChildPath 'History'
+$StampFile       = Join-Path -Path $StampRoot -ChildPath 'last-build.json'
 
 # --- Start Logging ---
 # Create the log folder, falling back to the script folder if it cannot be used.
@@ -1001,6 +1075,445 @@ function Get-LatestCatalogPackage {
     return @($Ordered | ForEach-Object { $_.Path })
 }
 
+# --- Build stamps ---
+# A stamp is a small JSON record of one finished build: the SHA-256 of the source ISO, the update packages
+# that went into it, the build-affecting parameters, and the ISO that came out. A repeat run compares
+# itself with the newest stamp and does nothing when all three still match - which is what makes it safe
+# to point an hourly scheduled task at a job that takes an hour or two when it does run.
+
+function Get-Sha256 {
+    param([Parameter(Mandatory)][string]$Path)
+    try { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash }
+    catch { return $null }
+}
+
+function Get-TextSha256 {
+    param([string]$Text)
+    $Sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return (-join ($Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$Text")) | ForEach-Object { $_.ToString('x2') })) }
+    finally { $Sha.Dispose() }
+}
+
+function Format-ShortHash {
+    param([string]$Hash)
+    if ($Hash -and $Hash.Length -ge 12) { return $Hash.Substring(0, 12) }
+    if ($Hash) { return $Hash }
+    return '(none)'
+}
+
+# The parameters that change what ends up inside the ISO. Folder, logging and scheduling parameters are
+# deliberately left out: moving the working folder does not make last month's ISO wrong.
+$script:BuildAffectingParameters = @(
+    'WindowsVersion', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
+    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'SkipUpdates', 'CompressEsd'
+)
+
+# Flattens those parameters (current values, not just the ones that were passed) into comparable text.
+function Get-BuildParameterSet {
+    $Set = [ordered]@{}
+    foreach ($Name in $script:BuildAffectingParameters) {
+        $Value = Get-Variable -Name $Name -ValueOnly -ErrorAction SilentlyContinue
+        $Set[$Name] =
+            if ($null -eq $Value) { '' }
+            elseif ($Value -is [switch]) { [string][bool]$Value.IsPresent }
+            elseif ($Value -is [array]) { (@($Value) | ForEach-Object { "$_" }) -join ',' }
+            else { "$Value" }
+    }
+    # The answer file is copied onto the media, so its CONTENT is part of the build - editing it in place
+    # has to force a rebuild even though the path never changed.
+    $Set['Unattend'] = if ($script:UnattendHash) { $script:UnattendHash } else { '' }
+    return $Set
+}
+
+function Get-BuildParameterHash {
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Set)
+    return (Get-TextSha256 -Text ((@($Set.Keys) | ForEach-Object { "$_=$($Set[$_])" }) -join '|'))
+}
+
+function Read-BuildStamp {
+    if (-not (Test-Path -LiteralPath $StampFile -PathType Leaf)) { return $null }
+    try { return (Get-Content -LiteralPath $StampFile -Raw -ErrorAction Stop | ConvertFrom-Json) }
+    catch {
+        Write-HostTimestamp "  The stamp '$StampFile' could not be read ($($_.Exception.Message)); treating this as a first run." -ForegroundColor Yellow
+        return $null
+    }
+}
+
+# Every stamp still on disk, newest first. -AutoClean uses this to know which downloads and ISOs are ones
+# this script produced, so it never touches anything else in those folders.
+function Get-BuildStampHistory {
+    $Stamps = New-Object System.Collections.Generic.List[object]
+    foreach ($File in @(Get-ChildItem -LiteralPath $StampHistoryDir -Filter 'stamp_*.json' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)) {
+        try { $Stamps.Add((Get-Content -LiteralPath $File.FullName -Raw -ErrorAction Stop | ConvertFrom-Json)) } catch { }
+    }
+    return $Stamps.ToArray()
+}
+
+function Write-BuildStamp {
+    param([Parameter(Mandatory)]$Stamp)
+    try {
+        foreach ($Dir in @($StampRoot, $StampHistoryDir)) {
+            if (-not (Test-Path -LiteralPath $Dir)) { New-Item -ItemType Directory -Path $Dir -Force -ErrorAction Stop | Out-Null }
+        }
+        $Json = $Stamp | ConvertTo-Json -Depth 8
+        Set-Content -LiteralPath $StampFile -Value $Json -Encoding UTF8 -ErrorAction Stop
+        $HistoryFile = Join-Path -Path $StampHistoryDir -ChildPath ("stamp_{0}.json" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
+        Set-Content -LiteralPath $HistoryFile -Value $Json -Encoding UTF8 -ErrorAction Stop
+        Write-HostTimestamp "  Stamp written: $StampFile" -ForegroundColor Green
+        Write-HostTimestamp "  History copy : $HistoryFile" -ForegroundColor DarkGray
+        Get-ChildItem -LiteralPath $StampHistoryDir -Filter 'stamp_*.json' -File -ErrorAction SilentlyContinue |
+            Sort-Object -Property LastWriteTime -Descending |
+            Select-Object -Skip $StampHistoryCount |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-HostTimestamp "  Could not write the build stamp: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+# SHA-256 of the source ISO, reused from the stamp when this is provably the same file that was hashed
+# last time (same path, size and write time). Re-reading 8 GB on every hourly run buys nothing.
+function Get-SourceIsoHash {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        $Stamp
+    )
+    $Item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+    if (-not $Item) { return $null }
+    if ($Stamp -and $Stamp.Source -and $Stamp.Source.Sha256 -and
+        "$($Stamp.Source.Path)" -ieq $Item.FullName -and
+        "$($Stamp.Source.Length)" -eq "$($Item.Length)" -and
+        "$($Stamp.Source.LastWriteTimeUtc)" -eq $Item.LastWriteTimeUtc.ToString('o')) {
+        Write-HostTimestamp '  The source ISO is untouched since the last run, so its recorded hash is reused.' -ForegroundColor DarkGray
+        return "$($Stamp.Source.Sha256)"
+    }
+    Write-HostTimestamp "  Hashing the source ISO ($([math]::Round($Item.Length / 1GB, 2)) GB)..."
+    return (Get-Sha256 -Path $Path)
+}
+
+# Resolves the newest catalog entry for a query WITHOUT downloading it - the cheap half of
+# Get-LatestCatalogPackage, so a scheduled run can see what Microsoft is offering for the price of one
+# web request. Returns $null when the catalog cannot be reached or nothing matches.
+function Get-CatalogLatestEntry {
+    param(
+        [Parameter(Mandatory)][string]$Query,
+        [string]$TitleInclude,
+        [string]$TitleExclude
+    )
+    $Results = Search-UpdateCatalog -Query $Query
+    if (-not $Results -or $Results.Count -eq 0) { return $null }
+    $Filtered = $Results
+    if ($TitleInclude) { $Filtered = $Filtered | Where-Object { $_.Title -match $TitleInclude } }
+    if ($TitleExclude) { $Filtered = $Filtered | Where-Object { $_.Title -notmatch $TitleExclude } }
+    $Filtered = $Filtered | Where-Object { $_.Title -notmatch '(?i)preview' }
+    if (-not $Filtered) { return $null }
+    return ($Filtered |
+        Sort-Object -Property @{ Expression = { $_.LastUpdated }; Descending = $true }, @{ Expression = { $_.SizeMB }; Descending = $true } |
+        Select-Object -First 1)
+}
+
+# Identifies a catalog entry for comparison: the KB number plus the date Microsoft last touched it, since
+# the same KB does get re-released and a re-release is a different package.
+function Get-CatalogEntryTag {
+    param($Entry)
+    if (-not $Entry) { return 'none' }
+    $Kb = if ($Entry.Title -match '(?i)KB(\d{6,})') { $Matches[1] } else { $Entry.Guid }
+    $Date = if ($Entry.LastUpdated) { ([datetime]$Entry.LastUpdated).ToString('yyyy-MM-dd') } else { '' }
+    return "KB$Kb@$Date"
+}
+
+# The updates a build with the current parameters would integrate right now, as "Role=KB@date" strings.
+# Comparing this list with the one in the last stamp is what tells a scheduled run whether anything new
+# has been published. Returns $null when the catalog could not be reached at all, so the caller can tell
+# "nothing new" apart from "could not find out".
+function Get-ExpectedUpdateSet {
+    param(
+        [string]$FeatureName,
+        [string]$CatalogArch
+    )
+
+    if ($SkipUpdates) { return @('None') }
+    if ($UpdatePath) {
+        # Locally supplied packages: their names and sizes are the identity, no catalog involved.
+        $Files = @(Get-ChildItem -Path $UpdatePath -Include '*.msu', '*.cab' -File -Recurse -ErrorAction SilentlyContinue)
+        return @($Files | ForEach-Object { "Local=$($_.Name):$($_.Length)" } | Sort-Object)
+    }
+    if (-not $CatalogArch) { return $null }
+
+    $VerPart = if ($FeatureName) { "Version $FeatureName " } else { '' }
+    $Include = '(?i)cumulative update for windows'
+    $Exclude = '(?i)\.net|dynamic update'
+    $Set = New-Object System.Collections.Generic.List[string]
+
+    # Same queries (including the broader fallback) the download step uses, so the two always agree.
+    $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for Windows $WindowsVersion ${VerPart}for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude
+    if (-not $Lcu) {
+        $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for Windows $WindowsVersion for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude
+    }
+    if (-not $Lcu) { return $null }
+    $Set.Add("LCU=$(Get-CatalogEntryTag -Entry $Lcu)")
+
+    if (-not $SkipDotNet) {
+        $NetVer = if ($FeatureName) { "Windows $WindowsVersion Version $FeatureName" } else { "Windows $WindowsVersion" }
+        $DotNet = Get-CatalogLatestEntry -Query "Cumulative Update for .NET Framework $NetVer for $CatalogArch" -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update'
+        $Set.Add("DotNet=$(Get-CatalogEntryTag -Entry $DotNet)")
+    }
+    if (-not $SkipSetupDU) {
+        $SetupDu = Get-CatalogLatestEntry -Query "Setup Dynamic Update Windows $WindowsVersion $VerPart$CatalogArch" -TitleInclude '(?i)setup dynamic update'
+        $Set.Add("SetupDU=$(Get-CatalogEntryTag -Entry $SetupDu)")
+    }
+    if ($ServiceWinRE) {
+        $SafeOs = Get-CatalogLatestEntry -Query "Safe OS Dynamic Update Windows $WindowsVersion $VerPart$CatalogArch" -TitleInclude '(?i)safe os dynamic update'
+        $Set.Add("SafeOS=$(Get-CatalogEntryTag -Entry $SafeOs)")
+    }
+    return @($Set)
+}
+
+# Decides whether this run has anything to do. Returns the decision plus the reasons behind it, so the
+# log always says why an hour of work is - or is not - about to start.
+function Test-RebuildNeeded {
+    param(
+        $Stamp,
+        [string]$SourceHash,
+        [System.Collections.IDictionary]$ParameterSet,
+        [string[]]$ExpectedUpdates
+    )
+
+    $Reasons = New-Object System.Collections.Generic.List[string]
+
+    if (-not $Stamp) {
+        $Reasons.Add('no previous stamp was found, so this is treated as a first build')
+        return [pscustomobject]@{ Rebuild = $true; Reasons = @($Reasons) }
+    }
+
+    if ("$($Stamp.Source.Sha256)" -ne "$SourceHash") {
+        $Reasons.Add("the source ISO changed (stamp: $(Format-ShortHash "$($Stamp.Source.Sha256)"), now: $(Format-ShortHash $SourceHash))")
+    }
+
+    if ("$($Stamp.ParametersHash)" -ne (Get-BuildParameterHash -Set $ParameterSet)) {
+        $Changed = @()
+        foreach ($Key in @($ParameterSet.Keys)) {
+            $Old = if ($Stamp.Parameters -and ($Stamp.Parameters.PSObject.Properties.Name -contains $Key)) { "$($Stamp.Parameters.$Key)" } else { '(not recorded)' }
+            if ($Old -ne "$($ParameterSet[$Key])") { $Changed += "$Key '$Old' -> '$($ParameterSet[$Key])'" }
+        }
+        $Reasons.Add("the build parameters changed$(if ($Changed) { ": $($Changed -join '; ')" })")
+    }
+
+    $Recorded = @()
+    if ($Stamp.Updates -and $Stamp.Updates.Catalog) { $Recorded = @($Stamp.Updates.Catalog | ForEach-Object { "$_" } | Sort-Object) }
+    if ($null -eq $ExpectedUpdates) {
+        # A network blip must not trigger a two-hour rebuild; the next scheduled run will look again.
+        $Reasons.Add('the Microsoft Update Catalog could not be reached, so this run assumes nothing new has been published')
+    }
+    elseif ($Recorded.Count -eq 0) {
+        $Reasons.Add('the last stamp did not record which updates were used')
+    }
+    else {
+        $Now = @($ExpectedUpdates | ForEach-Object { "$_" } | Sort-Object)
+        if (($Recorded -join '|') -ne ($Now -join '|')) {
+            $Reasons.Add("the available updates changed (stamp: $($Recorded -join ', ') / now: $($Now -join ', '))")
+        }
+    }
+
+    if (-not $Stamp.Output -or -not $Stamp.Output.Path) {
+        $Reasons.Add('the last stamp does not name an output ISO')
+    }
+    elseif (-not (Test-Path -LiteralPath "$($Stamp.Output.Path)" -PathType Leaf)) {
+        $Reasons.Add("the ISO from the last build is gone ($($Stamp.Output.Path))")
+    }
+
+    # The catalog-unreachable note is informational only - on its own it is not a reason to rebuild.
+    $Blocking = @($Reasons | Where-Object { $_ -notmatch 'could not be reached' })
+    return [pscustomobject]@{ Rebuild = ($Blocking.Count -gt 0); Reasons = @($Reasons) }
+}
+
+# --- Housekeeping (-AutoClean) ---
+# Only files this script recorded in a stamp are ever deleted, so anything else living in the same folders
+# (a hand-placed ISO, someone else's .msu) is left completely alone.
+function Invoke-AutoClean {
+    param(
+        $CurrentStamp,
+        [object[]]$History,
+        [int]$KeepIsoCount,
+        [string[]]$Protected
+    )
+
+    $ProtectedPaths = @(@($Protected) | Where-Object { $_ } | ForEach-Object { "$_".TrimEnd('\').ToLowerInvariant() })
+
+    # 1. Update packages: everything a stamp says was downloaded into the download folder, except the ones
+    #    the newest build still uses.
+    $Keep = @()
+    if ($CurrentStamp -and $CurrentStamp.Updates -and $CurrentStamp.Updates.Files) {
+        $Keep = @($CurrentStamp.Updates.Files | ForEach-Object { "$($_.FileName)" })
+    }
+    $Known = New-Object System.Collections.Generic.List[string]
+    foreach ($Stamp in @($History)) {
+        if (-not $Stamp -or -not $Stamp.Updates -or -not $Stamp.Updates.Files) { continue }
+        foreach ($Entry in @($Stamp.Updates.Files)) {
+            # Packages the user pointed at with -UpdatePath are not ours to delete.
+            if ($Entry.FileName -and $Entry.FromDownloadFolder) { $Known.Add("$($Entry.FileName)") }
+        }
+    }
+
+    $RemovedUpdates = 0
+    $FreedMB = 0
+    foreach ($Name in @($Known | Sort-Object -Unique)) {
+        if ($Keep -contains $Name) { continue }
+        # A stamp is written by this script, but it is still a file on disk: never let a name out of one
+        # escape the download folder.
+        if ($Name -match '[\\/:]' -or $Name -notmatch '(?i)\.(msu|cab)$') { continue }
+        $Path = Join-Path -Path $DlDir -ChildPath $Name
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { continue }
+        if ($ProtectedPaths -contains $Path.ToLowerInvariant()) { continue }
+        try {
+            $SizeMB = (Get-Item -LiteralPath $Path).Length / 1MB
+            Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+            $RemovedUpdates++
+            $FreedMB += $SizeMB
+            Write-HostTimestamp ('  Deleted superseded update: {0} ({1:N0} MB)' -f $Name, $SizeMB) -ForegroundColor DarkGray
+        }
+        catch { Write-HostTimestamp "  Could not delete '$Name': $($_.Exception.Message)" -ForegroundColor Yellow }
+    }
+    if ($RemovedUpdates -eq 0) { Write-HostTimestamp '  No superseded update packages to remove.' -ForegroundColor DarkGray }
+
+    # 2. Generated ISOs: keep the newest -KeepIsoCount, delete the rest. Candidates are the ISOs named in
+    #    the stamps plus any still sitting in the output folder under this script's generated name pattern
+    #    (their stamp may have aged out of the history).
+    $Candidates = @{}
+    foreach ($Stamp in (@($CurrentStamp) + @($History))) {
+        if (-not $Stamp -or -not $Stamp.Output -or -not $Stamp.Output.Path) { continue }
+        $Item = Get-Item -LiteralPath "$($Stamp.Output.Path)" -ErrorAction SilentlyContinue
+        if ($Item) { $Candidates[$Item.FullName.ToLowerInvariant()] = $Item }
+    }
+    $GeneratedName = '^(Win10|Win11|Windows)_[A-Za-z0-9]+_[A-Za-z0-9]+(_[\d.]+)?_\d{8}-\d{4}\.iso$'
+    foreach ($Item in @(Get-ChildItem -LiteralPath $FinishedIsoDir -Filter '*.iso' -File -ErrorAction SilentlyContinue)) {
+        if ($Item.Name -match $GeneratedName) { $Candidates[$Item.FullName.ToLowerInvariant()] = $Item }
+    }
+
+    $Ordered = @($Candidates.Values | Sort-Object -Property LastWriteTime -Descending)
+    $Stale = @($Ordered | Select-Object -Skip $KeepIsoCount | Where-Object { $ProtectedPaths -notcontains $_.FullName.ToLowerInvariant() })
+    if ($Ordered.Count -gt 0) {
+        Write-HostTimestamp "  Found $($Ordered.Count) generated ISO(s); keeping the newest $KeepIsoCount." -ForegroundColor DarkGray
+    }
+    $RemovedIsos = 0
+    foreach ($Item in $Stale) {
+        try {
+            $SizeMB = $Item.Length / 1MB
+            Remove-Item -LiteralPath $Item.FullName -Force -ErrorAction Stop
+            $RemovedIsos++
+            $FreedMB += $SizeMB
+            Write-HostTimestamp ('  Deleted old ISO: {0} ({1:N0} MB)' -f $Item.Name, $SizeMB) -ForegroundColor DarkGray
+        }
+        catch { Write-HostTimestamp "  Could not delete '$($Item.FullName)': $($_.Exception.Message)" -ForegroundColor Yellow }
+    }
+    if ($RemovedIsos -eq 0) { Write-HostTimestamp '  No old ISOs to remove.' -ForegroundColor DarkGray }
+
+    Write-HostTimestamp ('  Cleanup removed {0} update package(s) and {1} ISO(s), freeing {2:N1} GB.' -f $RemovedUpdates, $RemovedIsos, ($FreedMB / 1024)) -ForegroundColor Green
+}
+
+# --- Scheduled task registration ---
+# Rebuilds this run's command line for the task, dropping the parameters that only make sense when a human
+# typed them and adding -Scheduled so the task never waits at a prompt.
+function Get-ScheduledTaskArgumentString {
+    $Excluded = @(
+        'RegisterScheduledTask', 'UnregisterScheduledTask', 'Schedule', 'ScheduleTime', 'ScheduleDay',
+        'TaskName', 'CheckOnly', 'Force', 'ListEditions', 'Unattended', 'SkipInteractive', 'Scheduled'
+    )
+    $Arguments = New-Object System.Collections.Generic.List[string]
+    $Arguments.Add('-NoProfile')
+    $Arguments.Add('-ExecutionPolicy')
+    $Arguments.Add('Bypass')
+    $Arguments.Add('-File')
+    $Arguments.Add("`"$($script:ScriptPath)`"")
+    $Arguments.Add('-Scheduled')
+
+    foreach ($Name in @($script:ScriptBoundParameters.Keys)) {
+        if ($Excluded -contains $Name) { continue }
+        $Value = $script:ScriptBoundParameters[$Name]
+        if ($Value -is [switch]) {
+            if ($Value.IsPresent) { $Arguments.Add("-$Name") }
+            continue
+        }
+        $Arguments.Add("-$Name")
+        foreach ($Item in @($Value)) { $Arguments.Add("`"$Item`"") }
+    }
+    return ($Arguments -join ' ')
+}
+
+function Register-UpdaterScheduledTask {
+    if (-not (Get-Command -Name Register-ScheduledTask -ErrorAction SilentlyContinue)) {
+        throw 'The ScheduledTasks PowerShell module is not available on this machine.'
+    }
+    if (-not $script:ScriptPath -or -not (Test-Path -LiteralPath $script:ScriptPath)) {
+        throw 'The path of this script could not be determined, so a scheduled task cannot point at it.'
+    }
+
+    if ($ScheduleTime -notmatch '^(\d{1,2}):(\d{2})$') {
+        throw "-ScheduleTime '$ScheduleTime' is not a valid 24-hour HH:mm time."
+    }
+    $Hour = [int]$Matches[1]
+    $Minute = [int]$Matches[2]
+    if ($Hour -gt 23 -or $Minute -gt 59) {
+        throw "-ScheduleTime '$ScheduleTime' is not a valid 24-hour HH:mm time."
+    }
+    # Anchor the trigger on today's date at that time.
+    $Start = Get-Date -Hour $Hour -Minute $Minute -Second 0 -Millisecond 0
+
+    switch ($Schedule) {
+        'Hourly' {
+            # No repetition duration = repeat indefinitely.
+            $Trigger = New-ScheduledTaskTrigger -Once -At $Start -RepetitionInterval (New-TimeSpan -Hours 1)
+            $When = "every hour, starting at $($Start.ToString('HH:mm'))"
+        }
+        'Daily' {
+            $Trigger = New-ScheduledTaskTrigger -Daily -At $Start
+            $When = "every day at $($Start.ToString('HH:mm'))"
+        }
+        'Weekly' {
+            $DayName = if ($ScheduleDay) { $ScheduleDay } else { 'Sunday' }
+            $Day = $null
+            try { $Day = [System.DayOfWeek][enum]::Parse([System.DayOfWeek], $DayName, $true) }
+            catch { throw "-ScheduleDay '$DayName' is not a weekday name (use e.g. Sunday, Monday...)." }
+            $Trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $Day -At $Start
+            $When = "every $Day at $($Start.ToString('HH:mm'))"
+        }
+        'Monthly' {
+            $DayNumber = if ($ScheduleDay) { $ScheduleDay } else { '15' }
+            if ($DayNumber -notmatch '^\d{1,2}$' -or [int]$DayNumber -lt 1 -or [int]$DayNumber -gt 31) {
+                throw "-ScheduleDay '$DayNumber' is not a day of the month (use 1-31) for a monthly schedule."
+            }
+            # There is no -Monthly switch on New-ScheduledTaskTrigger, so the trigger is built directly.
+            # DaysOfMonth is a bit mask: bit 0 is the 1st, bit 30 is the 31st.
+            $TriggerClass = Get-CimClass -ClassName MSFT_TaskMonthlyTrigger -Namespace Root/Microsoft/Windows/TaskScheduler -ErrorAction Stop
+            $Trigger = New-CimInstance -CimClass $TriggerClass -ClientOnly -Property @{
+                DaysOfMonth   = [int][math]::Pow(2, ([int]$DayNumber - 1))
+                MonthOfYear   = 4095   # all twelve months
+                StartBoundary = $Start.ToString('yyyy-MM-ddTHH:mm:ss')
+                Enabled       = $true
+            }
+            $When = "on day $DayNumber of every month at $($Start.ToString('HH:mm'))"
+        }
+    }
+
+    $Exe = if ($PSVersionTable.PSEdition -eq 'Core') { Join-Path -Path $PSHOME -ChildPath 'pwsh.exe' } else { Join-Path -Path $PSHOME -ChildPath 'powershell.exe' }
+    $ArgumentString = Get-ScheduledTaskArgumentString
+    $Action = New-ScheduledTaskAction -Execute $Exe -Argument $ArgumentString -WorkingDirectory (Split-Path -Parent $script:ScriptPath)
+    # SYSTEM so the task needs no stored password; it is also already elevated, which DISM requires.
+    $Principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
+        -ExecutionTimeLimit (New-TimeSpan -Hours 8)
+
+    Register-ScheduledTask -TaskName $TaskName -Trigger $Trigger -Action $Action -Principal $Principal `
+        -Settings $Settings -Description 'Rebuilds an up-to-date Windows installation ISO (Windows-ISO-Updater). Skips the build when nothing has changed.' -Force -ErrorAction Stop | Out-Null
+
+    Write-HostTimestamp "Scheduled task '$TaskName' registered: runs $When as SYSTEM." -ForegroundColor Green
+    Write-HostTimestamp "  Command: `"$Exe`" $ArgumentString" -ForegroundColor DarkGray
+    Write-HostTimestamp '  It runs as SYSTEM, so every path it uses must be a local path SYSTEM can reach (not a mapped drive or a cloud-synced user folder).' -ForegroundColor Yellow
+    Write-HostTimestamp "  Each run compares the build stamp in $StampRoot and exits in a minute or two when nothing has changed." -ForegroundColor DarkGray
+    Write-HostTimestamp "  Remove it again with: -UnregisterScheduledTask -TaskName `"$TaskName`"" -ForegroundColor DarkGray
+}
+
 # Locates oscdimg.exe (from the Windows ADK Deployment Tools), which is required to recompile the ISO.
 # Checks -OscdimgPath, a previously downloaded copy in the work folder, then PATH, then the standard ADK
 # install locations. Returns the full path or $null.
@@ -1484,8 +1997,43 @@ function Show-FinalImageInfo {
 }
 
 Write-Host $LineBreak
-Write-HostTimestamp "Windows ISO Updater (slipstream latest updates into a new ISO) on $($env:ComputerName)" -ForegroundColor Cyan
+Write-HostTimestamp "Windows ISO Updater v$ScriptVersion (slipstream latest updates into a new ISO) on $($env:ComputerName)" -ForegroundColor Cyan
 Write-Host $LineBreak
+
+# --- Scheduled task registration (-RegisterScheduledTask / -UnregisterScheduledTask) ---
+# Both of these only touch Task Scheduler and then exit; nothing is downloaded or built.
+if ($UnregisterScheduledTask) {
+    try {
+        if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+            Write-HostTimestamp "Scheduled task '$TaskName' removed." -ForegroundColor Green
+        }
+        else {
+            Write-HostTimestamp "No scheduled task named '$TaskName' exists." -ForegroundColor Yellow
+        }
+    }
+    catch {
+        Write-HostTimestamp "Could not remove the scheduled task '$TaskName': $($_.Exception.Message)" -ForegroundColor Red
+        Stop-Transcript | Out-Null
+        exit 1
+    }
+    Stop-Transcript | Out-Null
+    exit 0
+}
+
+if ($RegisterScheduledTask) {
+    try {
+        Register-UpdaterScheduledTask
+    }
+    catch {
+        Write-HostTimestamp "Could not register the scheduled task: $($_.Exception.Message)" -ForegroundColor Red
+        Stop-Transcript | Out-Null
+        exit 1
+    }
+    Write-Host $LineBreak
+    Stop-Transcript | Out-Null
+    exit 0
+}
 
 $WinInfo = Get-InstalledWindowsInfo
 
@@ -1519,6 +2067,7 @@ Write-Host "    DISM mount     : $MountDir"
 Write-Host "  Downloads        : $DlDir"
 if (-not $IsoPath) { Write-Host '                     (drop your own .iso here and it is used instead of downloading one)' -ForegroundColor DarkGray }
 Write-Host "  Logs             : $LogDir"
+if (-not $NoStamp) { Write-Host "  Build stamps     : $StampRoot" }
 Write-Host "  Finished ISO     : $(if ($OutputIsoPath) { $OutputIsoPath } else { Join-Path $FinishedIsoDir 'Win11_Pro_x64_<build>.<UBR>_<date-time>.iso' })"
 Write-Host ''
 Write-Host '  Nothing outside these folders is changed. -WorkPath moves all of it; -DownloadPath, -LogPath' -ForegroundColor DarkGray
@@ -1536,9 +2085,15 @@ else {
     Write-HostTimestamp "Free space on the working drive: $FreeGB GB"
     $RequiredGB = 50
     if ($FreeGB -lt $RequiredGB) {
-        Write-HostTimestamp "CRITICAL: Less than $RequiredGB GB free on the working drive. Building a patched ISO needs a lot of scratch space. Free up space, choose another drive with -WorkPath, and try again." -ForegroundColor Red
-        Stop-Transcript | Out-Null
-        exit 1
+        if ($CheckOnly) {
+            # -CheckOnly builds nothing, so it only needs to say that a build would not fit right now.
+            Write-HostTimestamp "Less than $RequiredGB GB is free on the working drive, so a build could not run here as things stand." -ForegroundColor Yellow
+        }
+        else {
+            Write-HostTimestamp "CRITICAL: Less than $RequiredGB GB free on the working drive. Building a patched ISO needs a lot of scratch space. Free up space, choose another drive with -WorkPath, and try again." -ForegroundColor Red
+            Stop-Transcript | Out-Null
+            exit 1
+        }
     }
 }
 Write-Host $LineBreak
@@ -1564,6 +2119,9 @@ if ($UnattendPath) {
         exit 1
     }
     $UnattendText = $UnattendDoc.OuterXml
+    # Hashed for the build stamp: editing the answer file in place has to force a rebuild even though its
+    # path never changed.
+    $script:UnattendHash = Get-TextSha256 -Text $UnattendText
     Write-HostTimestamp "Answer file    : $ResolvedUnattend" -ForegroundColor Green
     if ($UnattendDoc.DocumentElement.Name -ne 'unattend') {
         Write-HostTimestamp "  Warning: the root element is <$($UnattendDoc.DocumentElement.Name)>, not <unattend>. Windows Setup will ignore this file." -ForegroundColor Yellow
@@ -1575,7 +2133,7 @@ if ($UnattendPath) {
 }
 
 # --- Interactive confirmation ---
-if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions) {
+if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -not $CheckOnly) {
     Write-Host "This tool builds an updated Windows installation ISO. It will:"
     if (-not $IsoPath) {
         Write-Host "  - Download the matching official Windows $WindowsVersion ISO from Microsoft (~8 GB)"
@@ -1618,6 +2176,12 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions) {
         Write-Host "  - Place your answer file on the media as autounattend.xml, so Setup runs unattended: $ResolvedUnattend" -ForegroundColor Yellow
     }
     Write-Host "  - Recompile a new bootable ISO with oscdimg"
+    if (-not $NoStamp) {
+        Write-Host "  - Record a stamp of the finished build in $StampRoot, so a later run can tell that nothing has changed" -ForegroundColor DarkGray
+    }
+    if ($AutoClean) {
+        Write-Host "  - DELETE the update packages earlier builds downloaded, and every generated ISO except the newest $KeepIsoCount (-AutoClean)" -ForegroundColor Yellow
+    }
     Write-Host ""
     Write-Host "With the default settings this normally takes an hour or two from start to finish." -ForegroundColor Yellow
     Write-Host "This is disk- and time-intensive and needs a lot of free space. Nothing on this PC is changed." -ForegroundColor Yellow
@@ -1633,7 +2197,7 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions) {
 
 # --- Locate oscdimg early so we fail fast if the ISO cannot be recompiled (not needed for -ListEditions) ---
 $Oscdimg = $null
-if (-not $ListEditions) {
+if (-not $ListEditions -and -not $CheckOnly) {
     Invoke-Task -Description 'Locating oscdimg.exe (Windows ADK Deployment Tools)...' -ScriptBlock {
         $script:Oscdimg = Find-Oscdimg
         if ($script:Oscdimg) {
@@ -1673,8 +2237,9 @@ if ($IsoPath) {
 
         # If the ISO sits on a cloud-synced path, copy it to the local download folder first. Mounting and
         # reading a cloud placeholder during the long extraction is slow and unreliable; a local copy is not.
+        # -CheckOnly only ever reads the file to hash it, so it is not worth moving gigabytes for.
         if (($ResolvedIso -match $CloudPattern -or $ResolvedIso -match '(?i)OneDrive') -and
-            -not ($DlDir -match $CloudPattern -or $DlDir -match '(?i)OneDrive')) {
+            -not ($DlDir -match $CloudPattern -or $DlDir -match '(?i)OneDrive') -and -not $CheckOnly) {
             $LocalIso = Join-Path -Path $DlDir -ChildPath (Split-Path -Leaf $ResolvedIso)
             $SourceLen = (Get-Item -LiteralPath $ResolvedIso).Length
             if ((Test-Path -LiteralPath $LocalIso) -and ((Get-Item -LiteralPath $LocalIso).Length -eq $SourceLen)) {
@@ -1712,6 +2277,12 @@ else {
         Write-HostTimestamp "An ISO is already downloaded - reusing it: $ResolvedIso ($([math]::Round($ExistingIso.Length / 1GB, 2)) GB)" -ForegroundColor Green
     }
     else {
+        # -CheckOnly answers a question; it never spends 8 GB of bandwidth to do it.
+        if ($CheckOnly) {
+            Write-HostTimestamp 'No ISO is available locally, so there is nothing to compare against - a build is needed.' -ForegroundColor Yellow
+            Stop-Transcript | Out-Null
+            exit 10
+        }
         # -UseMct skips Fido entirely; otherwise Fido is tried first and MCT is offered if it is blocked.
         if ($UseMct) {
             $ResolvedIso = Get-IsoViaMct -Version $WindowsVersion -Language $Language -Architecture $WinInfo.Architecture -DownloadDir $DlDir
@@ -1812,6 +2383,76 @@ if ($ListEditions) {
     Write-Host $LineBreak
     Stop-Transcript | Out-Null
     exit 0
+}
+
+# --- Has anything actually changed? (build stamp check) ---
+# A full build is an hour or more of disk and CPU, so before any of it starts this run is compared with
+# the stamp the last successful build left behind: the source ISO's hash, the build-affecting parameters,
+# and the newest packages the Microsoft Update Catalog is offering. If all of those still match and last
+# run's ISO is still on disk, there is nothing to gain from doing it again.
+$script:PreviousStamp      = $null
+$script:StampSourceHash    = $null
+$script:ExpectedUpdateSet  = $null
+$script:ExpectedUpdateFor  = $null
+$script:StampUpdateFiles   = @()
+if (-not $NoStamp) {
+    Invoke-Task -Description 'Checking the build stamp to see whether anything has changed...' -ScriptBlock {
+        $script:PreviousStamp = Read-BuildStamp
+        $script:StampSourceHash = Get-SourceIsoHash -Path $ResolvedIso -Stamp $script:PreviousStamp
+
+        # The catalog queries need the feature update and architecture of the image, and reading those
+        # means extracting the ISO - the very thing we are trying to avoid. The last stamp already knows
+        # them, and they cannot change while the source ISO's hash stays the same.
+        if ($script:PreviousStamp -and $script:PreviousStamp.Image) {
+            $StampFeature = "$($script:PreviousStamp.Image.FeatureUpdate)"
+            $StampArch    = "$($script:PreviousStamp.Image.CatalogArch)"
+            $script:ExpectedUpdateSet = Get-ExpectedUpdateSet -FeatureName $StampFeature -CatalogArch $StampArch
+            $script:ExpectedUpdateFor = "$StampFeature|$StampArch"
+        }
+
+        $script:StampDecision = Test-RebuildNeeded -Stamp $script:PreviousStamp -SourceHash $script:StampSourceHash `
+            -ParameterSet (Get-BuildParameterSet) -ExpectedUpdates $script:ExpectedUpdateSet
+        foreach ($Reason in $script:StampDecision.Reasons) { Write-HostTimestamp "  - $Reason" }
+        if (-not $script:StampDecision.Rebuild) { Write-HostTimestamp '  Everything matches the last build.' -ForegroundColor Green }
+    }
+
+    if ($CheckOnly) {
+        if ($script:StampDecision.Rebuild) {
+            Write-HostTimestamp 'A rebuild is needed (exit code 10).' -ForegroundColor Yellow
+            Stop-Transcript | Out-Null
+            exit 10
+        }
+        Write-HostTimestamp 'Nothing has changed, so no rebuild is needed (exit code 0).' -ForegroundColor Green
+        Stop-Transcript | Out-Null
+        exit 0
+    }
+
+    if (-not $script:StampDecision.Rebuild) {
+        if ($Force) {
+            Write-HostTimestamp 'Nothing has changed since the last build, but -Force was specified - building anyway.' -ForegroundColor Yellow
+        }
+        else {
+            Write-HostTimestamp 'Nothing has changed since the last build, so this run has nothing to do.' -ForegroundColor Green
+            if ($script:PreviousStamp -and $script:PreviousStamp.Output) {
+                Write-HostTimestamp "The ISO from that build is still current: $($script:PreviousStamp.Output.Path)" -ForegroundColor Green
+            }
+            Write-HostTimestamp 'Use -Force to build anyway.' -ForegroundColor DarkGray
+            if ($AutoClean) {
+                Invoke-Task -Description 'Cleaning up old downloads and ISOs (-AutoClean)...' -ScriptBlock {
+                    Invoke-AutoClean -CurrentStamp $script:PreviousStamp -History (Get-BuildStampHistory) -KeepIsoCount $KeepIsoCount -Protected @($ResolvedIso)
+                }
+            }
+            Write-Host $LineBreak
+            Stop-Transcript | Out-Null
+            exit 0
+        }
+    }
+    Write-Host $LineBreak
+}
+elseif ($CheckOnly) {
+    Write-HostTimestamp '-CheckOnly needs the build stamps to compare against, but -NoStamp turned them off. Assuming a rebuild is needed (exit code 10).' -ForegroundColor Yellow
+    Stop-Transcript | Out-Null
+    exit 10
 }
 
 # --- Extract the ISO to the working folder ---
@@ -1952,6 +2593,17 @@ Write-HostTimestamp "Image build    : $ImageVersionText$(if ($FeatureName) { " (
 Write-HostTimestamp "Image arch     : $ImageArch"
 Write-Host $LineBreak
 
+# The stamp check ran against the feature update/architecture recorded last time (or nothing at all on a
+# first run). Now that the image itself has been read, the list of updates recorded in the new stamp is
+# refreshed so the next run compares against the right thing.
+if (-not $NoStamp -and $script:ExpectedUpdateFor -ne "$FeatureName|$CatalogArch") {
+    Invoke-Task -Description 'Checking which updates the Microsoft Update Catalog is offering for this image...' -ScriptBlock {
+        $script:ExpectedUpdateSet = Get-ExpectedUpdateSet -FeatureName $FeatureName -CatalogArch $CatalogArch
+        $script:ExpectedUpdateFor = "$FeatureName|$CatalogArch"
+        if ($script:ExpectedUpdateSet) { Write-HostTimestamp "  $($script:ExpectedUpdateSet -join ', ')" -ForegroundColor DarkGray }
+    }
+}
+
 # --- Gather the update packages to integrate ---
 # Each entry in $UpdateGroups is an ordered array of related packages with the TARGET last (e.g. the LCU
 # group is [checkpoint..., LCU]). Groups are applied independently with the documented sole-target method.
@@ -2050,6 +2702,13 @@ else {
         Write-Host $LineBreak
     }
 }
+
+# Everything that will be integrated, flattened for the build stamp (and so -AutoClean later knows which
+# downloads belong to which build).
+$script:StampUpdateFiles = @()
+foreach ($Group in $UpdateGroups) { $script:StampUpdateFiles += @($Group) }
+if ($script:SetupDu) { $script:StampUpdateFiles += @($script:SetupDu) }
+if ($SafeOsGroup) { $script:StampUpdateFiles += @($SafeOsGroup) }
 
 # --- Resolve which editions to keep and which to service ---
 $InstallImages = @(Get-WindowsImage -ImagePath $InstallWimExtracted -ErrorAction Stop)
@@ -2492,6 +3151,86 @@ Invoke-Task -Description 'Cleaning up the working extraction folder...' -ScriptB
     }
 }
 Write-Host $LineBreak
+
+# --- Write the build stamp ---
+# The record the next run compares itself against: what went in, what came out, and under which settings.
+if (-not $NoStamp) {
+    Invoke-Task -Description 'Writing the build stamp...' -ScriptBlock {
+        $SourceItem = Get-Item -LiteralPath $ResolvedIso -ErrorAction SilentlyContinue
+        $OutputItem = Get-Item -LiteralPath $OutputIsoPath -ErrorAction SilentlyContinue
+
+        $UpdateRecords = @()
+        foreach ($Path in @($script:StampUpdateFiles | Sort-Object -Unique)) {
+            $Item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+            if (-not $Item) { continue }
+            $UpdateRecords += [ordered]@{
+                FileName           = $Item.Name
+                Kb                 = if ($Item.Name -match '(?i)kb(\d{6,})') { "KB$($Matches[1])" } else { '' }
+                SizeMB             = [math]::Round($Item.Length / 1MB, 1)
+                Sha256             = Get-Sha256 -Path $Item.FullName
+                # Only packages this script downloaded itself are ever eligible for -AutoClean.
+                FromDownloadFolder = ("$($Item.DirectoryName)".TrimEnd('\') -ieq "$DlDir".TrimEnd('\'))
+            }
+        }
+
+        $ParameterSet = Get-BuildParameterSet
+        $OutputHash = $null
+        if ($OutputItem) {
+            Write-HostTimestamp "  Hashing the finished ISO ($([math]::Round($OutputItem.Length / 1GB, 2)) GB)..."
+            $OutputHash = Get-Sha256 -Path $OutputItem.FullName
+        }
+        # Taken from the image list read before the working folder was removed.
+        $KeptEditionNames = @($InstallImages | Where-Object { $KeepIndexes -contains [int]$_.ImageIndex } | ForEach-Object { "$($_.ImageName)" })
+        $Stamp = [ordered]@{
+            SchemaVersion   = 1
+            ScriptVersion   = $ScriptVersion
+            CreatedUtc      = (Get-Date).ToUniversalTime().ToString('o')
+            Computer        = $env:COMPUTERNAME
+            Result          = if ($script:ServicingFailures -gt 0) { 'SuccessWithWarnings' } else { 'Success' }
+            DurationMinutes = [math]::Round(((Get-Date) - $script:ScriptStartTime).TotalMinutes, 1)
+            Source          = [ordered]@{
+                Path             = if ($SourceItem) { $SourceItem.FullName } else { $ResolvedIso }
+                FileName         = if ($SourceItem) { $SourceItem.Name } else { Split-Path -Leaf $ResolvedIso }
+                Length           = if ($SourceItem) { $SourceItem.Length } else { 0 }
+                LastWriteTimeUtc = if ($SourceItem) { $SourceItem.LastWriteTimeUtc.ToString('o') } else { '' }
+                Sha256           = $script:StampSourceHash
+            }
+            Image           = [ordered]@{
+                Version       = $ImageVersionText
+                Build         = $ImageBuild
+                Ubr           = $ImageUbr
+                FeatureUpdate = $FeatureName
+                Architecture  = $ImageArch
+                CatalogArch   = $CatalogArch
+                FinalBuild    = $script:FinalBuildString
+            }
+            Updates         = [ordered]@{
+                # What the catalog was offering at build time - this is what a later run compares against.
+                Catalog = @($script:ExpectedUpdateSet | Where-Object { $_ })
+                Files   = $UpdateRecords
+            }
+            Output          = [ordered]@{
+                Path     = $OutputIsoPath
+                FileName = if ($OutputItem) { $OutputItem.Name } else { Split-Path -Leaf $OutputIsoPath }
+                SizeGB   = if ($OutputItem) { [math]::Round($OutputItem.Length / 1GB, 2) } else { 0 }
+                Sha256   = $OutputHash
+                Editions = $KeptEditionNames
+            }
+            Parameters      = $ParameterSet
+            ParametersHash  = Get-BuildParameterHash -Set $ParameterSet
+        }
+        Write-BuildStamp -Stamp $Stamp
+    }
+    Write-Host $LineBreak
+}
+
+# --- Housekeeping (-AutoClean) ---
+if ($AutoClean) {
+    Invoke-Task -Description 'Cleaning up old downloads and ISOs (-AutoClean)...' -ScriptBlock {
+        Invoke-AutoClean -CurrentStamp (Read-BuildStamp) -History (Get-BuildStampHistory) -KeepIsoCount $KeepIsoCount -Protected @($ResolvedIso, $OutputIsoPath)
+    }
+    Write-Host $LineBreak
+}
 
 # --- Timing summary ---
 $TotalElapsed = (Get-Date) - $script:ScriptStartTime

@@ -26,6 +26,7 @@ Everything else is optional. For a specific edition, your own ISO, or a run with
 |---|---|
 | [Usage](docs/usage.md) | Running the script, command-line examples, and slimming the ISO by removing editions. |
 | [Command-Line Parameters](docs/parameters.md) | Every parameter and what it does. |
+| [Scheduled Runs](docs/scheduled-runs.md) | Running this from a scheduled task: build stamps, skipping runs that would change nothing, and `-AutoClean` housekeeping. |
 | [Unattended Installs](docs/unattended-installs.md) | `-UnattendPath`, plus two worked answer files: a no-OOBE lab machine and a sysprep gold image. |
 | [Design Notes](docs/design-notes.md) | Why the already-patched check works the way it does, why both `boot.wim` indexes are serviced, and what Windows Update still offers afterwards. |
 | [Reference](docs/reference.md) | Step by step of a run, how files are downloaded, disk space, output locations, and logging. |
