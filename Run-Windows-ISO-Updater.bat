@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-:: Version: 2026.08.15.4   (date-based; stamped automatically by tools\Update-Version.ps1 on commit)
+:: Version: 2026.08.16.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 
 :: Check for administrative privileges
 NET SESSION >NUL 2>&1

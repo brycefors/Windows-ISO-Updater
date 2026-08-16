@@ -4,7 +4,7 @@
 
 The easiest and recommended way to run this script is by using the `Run-Windows-ISO-Updater.bat` file. It automatically handles administrator elevation and PowerShell execution policies, and will download the latest `Windows-ISO-Updater.ps1` from GitHub if it is missing.
 
-**As long as you use the batch file, no setup or PowerShell experience is needed.** It requests administrator rights through the normal UAC prompt, downloads the script over HTTPS from the official [Windows-ISO-Updater](https://github.com/brycefors/Windows-ISO-Updater) repository if it is not already next to it, and runs it with `-ExecutionPolicy Bypass` scoped to that single run — your system-wide execution policy is never changed. Running the `.ps1` by hand works too, but then elevation and execution policy are on you.
+**As long as you use the batch file, no setup or PowerShell experience is needed.** It requests administrator rights through the normal UAC prompt, downloads the script over HTTPS from the official [Windows-ISO-Updater](https://github.com/brycefors/Windows-ISO-Updater) repository if it is not already next to it, and runs it with `-ExecutionPolicy Bypass` scoped to that single run, so your system-wide execution policy is never changed. Running the `.ps1` by hand works too, but then elevation and execution policy are on you.
 
 ## Recommended Method: Using the Batch File
 
@@ -37,12 +37,12 @@ The full list is in [Command-Line Parameters](parameters.md).
 ```
 
 The task runs the script with `-Scheduled`, which compares the run against the stamp left by the last
-build and exits within a minute or two when nothing has changed — so scheduling it hourly costs nothing.
+build and exits within a minute or two when nothing has changed, so scheduling it hourly costs nothing.
 See [Scheduled Runs](scheduled-runs.md).
 
 ## Removing Editions (Slimming the ISO)
 
-A Windows ISO's `install.wim` usually contains many editions (Home, Home N, Pro, Education, etc.). **By default the script keeps only the highest edition present** (e.g. Enterprise over Pro, or Pro over Home) and removes the rest — this speeds up servicing and produces a smaller ISO. Use `-KeepAllEditions` to keep every edition, or `-KeepEditions` to choose exactly which ones to keep.
+A Windows ISO's `install.wim` usually contains many editions (Home, Home N, Pro, Education, etc.). **By default the script keeps only the highest edition present** (e.g. Enterprise over Pro, or Pro over Home) and removes the rest, which speeds up servicing and produces a smaller ISO. Use `-KeepAllEditions` to keep every edition, or `-KeepEditions` to choose exactly which ones to keep.
 
 ```shell
 :: See what editions are inside the ISO first (downloads/uses the ISO, then just lists and exits)

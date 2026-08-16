@@ -16,21 +16,21 @@ The script supports the following optional parameters:
 | `-KeepAllEditions` | Keep **every** edition in the final ISO. By default only the highest edition present (e.g. Enterprise over Pro, or Pro over Home) is kept. |
 | `-ListEditions` | List the editions/indexes inside the ISO's `install.wim` and exit, without downloading updates or building anything. Useful for choosing `-Edition`/`-KeepEditions` values. |
 | `-UpdatePath` | Folder containing your own `.msu`/`.cab` update packages to integrate instead of fetching from the Microsoft Update Catalog. |
-| `-SkipDotNet` | Skip the **.NET cumulative update**. The .NET update is downloaded and integrated **by default**; use this switch to leave it out. |
-| `-SkipSetupDU` | Skip the **Setup Dynamic Update**, which refreshes the loose Windows Setup files in the media's `sources` folder. It is applied **by default**; without it the Windows 11 24H2+ Setup engine can fail with *"Windows 11 installation has failed"*. |
-| `-ServiceWinRE` | Also service the recovery image (`winre.wim`). Off by default; the Safe OS Dynamic Update is used when available. |
+| `-SkipDotNet` | Skip the **.NET cumulative update**. The .NET update is downloaded and integrated **by default**, so use this switch to leave it out. |
+| `-SkipSetupDU` | Skip the **Setup Dynamic Update**, which refreshes the loose Windows Setup files in the media's `sources` folder. It is applied **by default**. Without it the Windows 11 24H2+ Setup engine can fail with *"Windows 11 installation has failed"*. |
+| `-ServiceWinRE` | Also service the recovery image (`winre.wim`). Off by default. The Safe OS Dynamic Update is used when available. |
 | `-SkipUpdates` | Skip update integration entirely and just extract and recompile the ISO. |
-| `-CompressEsd` | Export the finished image as `install.esd` (LZMS "recovery" compression) instead of `install.wim`. Typically **25-40% smaller**, which can bring the image under the 4 GB FAT32 limit for UEFI USB sticks — but the export is slow and the finished media cannot be serviced again without converting it back. |
+| `-CompressEsd` | Export the finished image as `install.esd` (LZMS "recovery" compression) instead of `install.wim`. Typically **25-40% smaller**, which can bring the image under the 4 GB FAT32 limit for UEFI USB sticks, but the export is slow and the finished media cannot be serviced again without converting it back. |
 | `-UnattendPath` | Path to an unattended answer file to place on the finished ISO as `\autounattend.xml`, so Windows Setup runs without prompting. |
 | `-DownloadPath` | Directory to download the ISO/updates into. Defaults to the script folder. |
 | `-WorkPath` | Working folder used to extract and service the media. Defaults to `<SystemDrive>\WISO-Work`. |
 | `-OutputIsoPath` | Full path for the recompiled ISO. Defaults to the `Output\` folder under the working folder, named after the contents and the patched build, e.g. `Win11_Pro_x64_26100.4061_20260815-1332.iso`. |
 | `-OscdimgPath` | Full path to `oscdimg.exe` if the Windows ADK is installed in a non-standard location. |
-| `-SkipOscdimgDownload` | Do not download a standalone `oscdimg.exe` from Microsoft's symbol server; require the Windows ADK instead. |
+| `-SkipOscdimgDownload` | Do not download a standalone `oscdimg.exe` from Microsoft's symbol server. Require the Windows ADK instead. |
 | `-InstallAdk` | If `oscdimg.exe` is not found and cannot be downloaded, download and silently install the ADK Deployment Tools from Microsoft. |
 | `-FidoUrl` | Override the URL used to fetch the Fido download helper. Must still point at the official `github.com/pbatard/Fido` repository. |
 | `-FidoSha256` | Pin the expected SHA-256 of `Fido.ps1` so only that reviewed version is ever run. |
-| `-FidoRetryCount` | Extra attempts to make when Fido cannot resolve a download link (Microsoft's anti-bot check is often transient). Defaults to `2`; `0` disables retrying. |
+| `-FidoRetryCount` | Extra attempts to make when Fido cannot resolve a download link (Microsoft's anti-bot check is often transient). Defaults to `2`, and `0` disables retrying. |
 | `-UseMct` | Skip Fido and get the ISO with Microsoft's Media Creation Tool instead. MCT has no headless mode, so you click through its last few pages and save the ISO into the download folder. |
 | `-MctUrl` | Override the URL used to download the Media Creation Tool. Must still be an official Microsoft URL. |
 | `-MctEdition` | Edition passed to MCT's `/MediaEdition` switch (e.g. `Professional`, `Enterprise`). Only used with `-MctPreselect`, and it makes MCT demand a product key. |
@@ -54,7 +54,7 @@ See [Scheduled Runs](scheduled-runs.md) for how these fit together.
 | `-NoStamp` | Ignore the stamps completely: do not read one to skip the run, and do not write one at the end. |
 | `-StampPath` | Directory to keep the build stamps in. Defaults to a `Stamps` folder inside the working folder. Point several machines at a share to give them one shared history. |
 | `-StampHistoryCount` | How many past stamps to keep in `Stamps\History`. Defaults to `30`. |
-| `-AutoClean` | After a successful build, delete the update packages this script downloaded for **earlier** builds and every generated ISO except the newest few. Only files recorded in a stamp are ever deleted — anything else in those folders is left alone. |
+| `-AutoClean` | After a successful build, delete the update packages this script downloaded for **earlier** builds and every generated ISO except the newest few. Only files recorded in a stamp are ever deleted, so anything else in those folders is left alone. |
 | `-KeepIsoCount` | How many generated ISOs `-AutoClean` keeps (newest first). Defaults to `3`. |
 | `-RegisterScheduledTask` | Create (or update) a scheduled task that runs this script with the other parameters you passed, then exit without building. The task runs as `SYSTEM` with the highest privileges. |
 | `-UnregisterScheduledTask` | Delete the scheduled task named by `-TaskName`, then exit. |

@@ -4,7 +4,7 @@
 
 ## How the Already-Patched Check Works
 
-Integrating a cumulative update is the expensive part of a run — mount, apply, component cleanup, re-export — so the script checks whether the image already has that update before downloading it. Re-applying a present update is harmless (DISM returns `0x800f081e`, "not applicable", and the script treats that as success), but it costs the better part of an hour.
+Integrating a cumulative update is the expensive part of a run (mount, apply, component cleanup, re-export), so the script checks whether the image already has that update before downloading it. Re-applying a present update is harmless (DISM returns `0x800f081e`, "not applicable", and the script treats that as success), but it costs the better part of an hour.
 
 The check has to bridge two things that don't reference each other: the image reports a **build and UBR** (for example `26100.4946`), while the Update Catalog reports a **KB number**. The bridge is the KB's own support page, whose title reads `... KB5062553 (OS Builds 26100.4652 and 26200.4652)`. That gives the UBR the update delivers, before anything is downloaded.
 
@@ -12,15 +12,15 @@ Because a wrong "already patched" decision would quietly ship an unpatched ISO, 
 
 - The WIM header's `SPBuild` is only a **hint**. It is stale on some Microsoft media, so it is used solely to decide whether the question is worth asking.
 - If the header suggests the image is current, the image is **mounted read-only** and its real build is read from the `SOFTWARE` hive. Only that confirmed value can trigger a skip.
-- Anything unknown — support page unreachable, title format changed, hive unreadable, out-of-band release missing from the page — **fails open** and the update is downloaded and applied as usual.
+- Anything unknown (support page unreachable, title format changed, hive unreadable, out-of-band release missing from the page) **fails open** and the update is downloaded and applied as usual.
 
 So the worst case is a few wasted minutes on a confirmation mount, and the update still gets applied. A skip only happens when the image's own registry proves it is already at or past the update's build.
 
 ## Why Both boot.wim Indexes Are Serviced
 
-`boot.wim` never becomes the installed OS — index 1 is Windows PE, index 2 is Windows Setup — so patching it looks like time that could be saved. It isn't, and both indexes get the same treatment as `install.wim`:
+`boot.wim` never becomes the installed OS (index 1 is Windows PE, index 2 is Windows Setup), so patching it looks like time that could be saved. It isn't, and both indexes get the same treatment as `install.wim`:
 
-- **Secure Boot revocations.** The media's `bootmgfw.efi` and `bootmgr.efi` are taken from index 2. Once a machine has the CVE-2023-24932 revocations in its DBX and SBAT, media carrying pre-revocation boot managers will not boot at all — and that failure happens before Setup starts, so there is nothing to recover from.
+- **Secure Boot revocations.** The media's `bootmgfw.efi` and `bootmgr.efi` are taken from index 2. Once a machine has the CVE-2023-24932 revocations in its DBX and SBAT, media carrying pre-revocation boot managers will not boot at all, and that failure happens before Setup starts, so there is nothing to recover from.
 - **Setup binary version match.** The cumulative update raises the version of `setup.exe` and `setuphost.exe` *inside* index 2. If those don't match the loose copies in the media's `sources` folder, Windows Setup fails with errors such as "A media driver your computer needs is missing." The script therefore copies the serviced binaries out of index 2 and overwrites the ones on the media, after the Setup Dynamic Update has been applied.
 - **Inbox drivers.** WinPE's storage, NVMe and network drivers come from the cumulative update. An unpatched WinPE on recent hardware can boot to a Setup screen that sees no disks.
 
@@ -32,7 +32,7 @@ The .NET cumulative update is offered to `boot.wim` along with everything else, 
 
 A machine installed from a freshly built ISO still shows a few pending items on its first check for updates. That is expected rather than a gap in the build: the script integrates component-store packages, and Windows Update also delivers things that are not component-store packages at all. Those cannot be slipstreamed by any means.
 
-- **Standalone tools shipped as an `.exe`.** Some Update Catalog entries are ordinary programs rather than servicing packages — the monthly Malicious Software Removal Tool is the one you will see most often. There is nothing inside them for DISM to bind into an offline image, and a fresh build ships every Patch Tuesday, so a baked-in copy would be superseded within weeks and offered again regardless.
+- **Standalone tools shipped as an `.exe`.** Some Update Catalog entries are ordinary programs rather than servicing packages. The monthly Malicious Software Removal Tool is the one you will see most often. There is nothing inside them for DISM to bind into an offline image, and a fresh build ships every Patch Tuesday, so a baked-in copy would be superseded within weeks and offered again regardless.
 - **Definition updates.** Microsoft Defender's security intelligence and the Windows Security platform updates are classified in the catalog as *Definition Updates*, the same category as virus signatures, and also ship as an `.exe`. They are re-released several times a day, so media is stale before the build finishes.
 
 `DISM /Add-Package` only consumes `.msu`/`.cab` packages that bind into the component store by build number, which is exactly what makes a cumulative update integrable and these not. Passing one to `-UpdatePath` fails its `.msu`/`.cab` check.
@@ -43,6 +43,6 @@ So they stay a post-install task. Left alone, Windows Update installs them on it
   ```powershell
   & "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -SignatureUpdate
   ```
-- Stop the removal tool being offered at all, if you consider Defender sufficient — set `DontOfferThroughWUAU` to `1` under `HKLM\SOFTWARE\Policies\Microsoft\MRT`.
+- Stop the removal tool being offered at all, if you consider Defender sufficient, by setting `DontOfferThroughWUAU` to `1` under `HKLM\SOFTWARE\Policies\Microsoft\MRT`.
 
 Neither is worth doing in a gold image before sealing: definitions age out while the image sits in storage, so run them at deployment instead.

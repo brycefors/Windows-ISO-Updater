@@ -37,7 +37,7 @@
 		   instead, and pe.cmd turns it into a prompt: you must type WIPE to erase disk 0, and anything else
 		   aborts without touching it. The size assertions still abort outright, as before.
 		   The generator's unconditional pause before diskpart was also removed, so an empty disk installs
-		   with no keypress at all; the only remaining prompt is the WIPE confirmation on a disk that
+		   with no keypress at all, and the only remaining prompt is the WIPE confirmation on a disk that
 		   already holds data.
 
 		5. C:\Windows\Setup\Scripts\Specialize.ps1
@@ -89,7 +89,7 @@
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:for /f ^"tokens=3^" ^%^%t in ('reg.exe query HKLM\System\Setup /v UnattendFile 2^^^&gt;nul'^) do ( if exist ^%^%t set ^"XML_FILE=^%^%t^" ^))</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
-					<!-- Stops with a clear error if no image or no answer file was found; assumes Windows 11 unless proven otherwise. -->
+					<!-- Stops with a clear error if no image or no answer file was found. Assumes Windows 11 unless proven otherwise. -->
 					<Order>6</Order>
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:if not defined IMAGE_FILE call :fail ^"Could not locate install.wim, install.esd or install.swm.^"&amp;echo:if not defined XML_FILE call :fail ^"Could not locate autounattend.xml.^"&amp;echo:set ^"OS_VERSION=11^")</Path>
 				</RunSynchronousCommand>
@@ -136,7 +136,7 @@
 				<RunSynchronousCommand wcm:action="add">
 					<!--
 						MODIFIED (change 4): runs assert.vbs and branches on its exit code. 2 jumps to :confirmwipe, which
-						requires the operator to type WIPE before an already partitioned disk 0 is erased; anything else
+						requires the operator to type WIPE before an already partitioned disk 0 is erased. Anything else
 						aborts. 1 still halts outright (size checks). An empty disk falls through to :assertok with no prompt.
 						Then begins X:\GPT.txt, the diskpart script for UEFI machines: select disk 0 and wipe it.
 					-->
@@ -164,7 +164,7 @@
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:echo:FORMAT QUICK FS=NTFS LABEL=^^^"System^^^"&amp;echo:echo:ASSIGN LETTER=S&amp;echo:echo:ACTIVE&amp;echo:echo:CREATE PARTITION PRIMARY&amp;echo:echo:SHRINK MINIMUM=1000&amp;echo:echo:FORMAT QUICK FS=NTFS LABEL=^^^"Windows^^^")</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
-					<!-- MBR layout: assign W:, add the Recovery partition (R:) with partition type 0x27. Ends MBR.txt; wpeutil refreshes firmware/boot info. -->
+					<!-- MBR layout: assign W:, add the Recovery partition (R:) with partition type 0x27. Ends MBR.txt, then wpeutil refreshes firmware/boot info. -->
 					<Order>20</Order>
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:echo:ASSIGN LETTER=W&amp;echo:echo:CREATE PARTITION PRIMARY&amp;echo:echo:FORMAT QUICK FS=NTFS LABEL=^^^"Recovery^^^"&amp;echo:echo:ASSIGN LETTER=R&amp;echo:echo:SET ID=27&amp;echo:^)&amp;echo:wpeutil.exe UpdateBootInfo)</Path>
 				</RunSynchronousCommand>
@@ -274,7 +274,7 @@
 			<UserAccounts>
 				<!-- SECURITY: the built in Administrator password is stored in clear text here and stays readable on the
 				     installed system until FirstLogon.ps1 deletes the answer file. Anyone who can read the ISO or the
-				     C:\Windows\Panther copy can recover it. Lab use only; change it after install. -->
+				     C:\Windows\Panther copy can recover it. Lab use only, so change it after install. -->
 				<AdministratorPassword>
 					<Value>Password123</Value>
 					<PlainText>true</PlainText>
@@ -424,7 +424,7 @@ $scripts = @(
 		reg.exe add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f;
 	};
 	{
-		# Allow locally written PowerShell scripts to run; downloaded ones still need a signature.
+		# Allow locally written PowerShell scripts to run, while downloaded ones still need a signature.
 		Set-ExecutionPolicy -Scope 'LocalMachine' -ExecutionPolicy 'RemoteSigned' -Force;
 	};
 	{
@@ -436,7 +436,7 @@ $scripts = @(
 		powercfg.exe /hibernate off;
 	};
 	{
-		# A VM that sleeps or blanks mid task is only friction; physical machines sleep normally.
+		# A VM that sleeps or blanks mid task is only friction, while physical machines sleep normally.
 		if( $isVirtualMachine ) {
 			powercfg.exe /setactive SCHEME_MIN;
 			powercfg.exe /change standby-timeout-ac 0;
@@ -466,12 +466,12 @@ $scripts = @(
 			# Removed, not just left alone: a gold image sets this during its build to protect the capture, so
 			# a physical machine deployed from one would inherit it and silently never encrypt.
 			Remove-ItemProperty -LiteralPath 'Registry::HKLM\SYSTEM\CurrentControlSet\Control\BitLocker' -Name 'PreventDeviceEncryption' -Force -ErrorAction 'SilentlyContinue';
-			'Physical machine ({0} {1}); automatic device encryption left enabled.' -f $cs.Manufacturer, $cs.Model;
+			'Physical machine ({0} {1}), automatic device encryption left enabled.' -f $cs.Manufacturer, $cs.Model;
 		}
 
 		# Set unconditionally, and before any volume is encrypted, so BitLocker uses AES 256 whenever it does run
 		# (automatic device encryption on a physical machine, or someone enabling it by hand later).
-		# 7 = XTS-AES 256 for the OS and fixed data drives; removable drives get 4 (AES-CBC 256), which older Windows can still read.
+		# 7 = XTS-AES 256 for the OS and fixed data drives, while removable drives get 4 (AES-CBC 256), which older Windows can still read.
 		reg.exe add "HKLM\SOFTWARE\Policies\Microsoft\FVE" /v EncryptionMethodWithXtsOs /t REG_DWORD /d 7 /f;
 		reg.exe add "HKLM\SOFTWARE\Policies\Microsoft\FVE" /v EncryptionMethodWithXtsFdv /t REG_DWORD /d 7 /f;
 		reg.exe add "HKLM\SOFTWARE\Policies\Microsoft\FVE" /v EncryptionMethodWithXtsRdv /t REG_DWORD /d 4 /f;

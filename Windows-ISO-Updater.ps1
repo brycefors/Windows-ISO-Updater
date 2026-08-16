@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.1   (date-based; stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10) installation ISO.
@@ -17,18 +17,18 @@
 #      script can open Microsoft's Media Creation Tool for you instead (-UseMct) - MCT talks to different
 #      servers, but it has no headless mode, so you click through its last few pages yourself.
 #      RECOMMENDED: download the ISO yourself and pass it with -IsoPath. Microsoft rate-limits and can
-#      temporarily block IPs that make repeated ISO requests, which breaks the automatic download; using
+#      temporarily block IPs that make repeated ISO requests, which breaks the automatic download. Using
 #      your own ISO avoids this (the script also reuses any ISO already in the download folder).
 #   2. Extracts the ISO to a writable working folder.
 #   3. Detects the Windows feature-update (e.g. 24H2) and architecture from the image, then downloads the
 #      latest combined Servicing Stack + Cumulative Update (LCU) - and the .NET cumulative update
-#      (on by default; disable with -SkipDotNet) - from the Microsoft Update Catalog. You may
+#      (on by default, disable with -SkipDotNet) - from the Microsoft Update Catalog. You may
 #      instead point at your own .msu/.cab files with -UpdatePath.
 #   4. Integrates the update(s) offline with DISM into install.wim (by default only the highest edition
-#      present - e.g. Pro over Home - is kept and serviced; use -KeepAllEditions or -KeepEditions to
+#      present - e.g. Pro over Home - is kept and serviced, so use -KeepAllEditions or -KeepEditions to
 #      change this), boot.wim (Windows Setup / WinPE), and optionally winre.wim (recovery).
 #   5. Refreshes the loose Setup files on the media: first applies the Setup Dynamic Update to the
-#      sources folder (on by default; disable with -SkipSetupDU), then overwrites sources\setup.exe,
+#      sources folder (on by default, disable with -SkipSetupDU), then overwrites sources\setup.exe,
 #      sources\setuphost.exe and the boot managers from the serviced boot.wim - Windows Setup fails if
 #      those binaries don't match the version inside boot.wim - then cleans up the component store
 #      (/StartComponentCleanup /ResetBase) and re-exports install.wim to shrink it.
@@ -87,13 +87,13 @@ param(
     [Parameter(HelpMessage = 'Folder containing your own .msu/.cab update packages to integrate instead of fetching from the Microsoft Update Catalog')]
     [string]$UpdatePath,
 
-    [Parameter(HelpMessage = 'Skip downloading and integrating the latest .NET cumulative update. The .NET update is included by default; use this switch to leave it out')]
+    [Parameter(HelpMessage = 'Skip downloading and integrating the latest .NET cumulative update. The .NET update is included by default, so use this switch to leave it out')]
     [switch]$SkipDotNet,
 
-    [Parameter(HelpMessage = 'Skip the Setup Dynamic Update that refreshes the loose Windows Setup files on the media. It is included by default; without it the Windows 11 24H2+ Setup engine can fail with "Windows 11 installation has failed"')]
+    [Parameter(HelpMessage = 'Skip the Setup Dynamic Update that refreshes the loose Windows Setup files on the media. It is included by default, and without it the Windows 11 24H2+ Setup engine can fail with "Windows 11 installation has failed"')]
     [switch]$SkipSetupDU,
 
-    [Parameter(HelpMessage = 'Also service the recovery image (winre.wim). Off by default; the correct component for WinRE is the Safe OS Dynamic Update, which is fetched when available')]
+    [Parameter(HelpMessage = 'Also service the recovery image (winre.wim). Off by default. The correct component for WinRE is the Safe OS Dynamic Update, which is fetched when available')]
     [switch]$ServiceWinRE,
 
     [Parameter(HelpMessage = 'Skip integrating updates entirely and simply extract and recompile the ISO (useful for testing the build pipeline)')]
@@ -126,7 +126,7 @@ param(
     [Parameter(HelpMessage = 'Override the URL used to fetch the Fido download helper')]
     [string]$FidoUrl = 'https://github.com/pbatard/Fido/raw/master/Fido.ps1',
 
-    [Parameter(HelpMessage = 'Expected SHA-256 of Fido.ps1. Set this to pin one reviewed version; by default the script only verifies its source and contents')]
+    [Parameter(HelpMessage = 'Expected SHA-256 of Fido.ps1. Set this to pin one reviewed version. By default the script only verifies its source and contents')]
     [string]$FidoSha256,
 
     [Parameter(HelpMessage = 'How many extra attempts to make if Fido cannot resolve a download link (Microsoft''s anti-bot check often clears on a later attempt). Defaults to 2')]
@@ -214,9 +214,9 @@ param(
 $script:ScriptBoundParameters = $PSBoundParameters
 $script:ScriptPath = $PSCommandPath
 
-# Kept in step with the header comment by tools\Update-Version.ps1; shown in the log and recorded in the
-# build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.1'
+# Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
+# the build stamp so a finished ISO can be traced back to the exact script that built it.
+$ScriptVersion = '2026.08.16.2'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -225,7 +225,7 @@ if ($Scheduled) {
 }
 
 # Verify this is running on Windows. $IsWindows only exists on PowerShell 6+, where it is the reliable
-# test; Windows PowerShell 5.1 is Windows-only, so its absence is itself the answer. This has to come
+# test. Windows PowerShell 5.1 is Windows-only, so its absence is itself the answer. This has to come
 # before anything that touches CIM, DISM or the registry, all of which are Windows-only.
 if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
     Write-Host "This script must be run on Windows. You are currently running $($PSVersionTable.OS)." -ForegroundColor Red
@@ -282,8 +282,8 @@ $Host.UI.RawUI.WindowTitle = "Windows ISO Updater - Running as Administrator - $
 # disk: cloud-synced folders (Google Drive, OneDrive, Dropbox, etc.) turn files into on-demand
 # placeholders and sync them in the background, which makes DISM unable to read the .msu/.wim reliably
 # ("An error occurred applying the Unattend.xml file from the .msu package"). They also need lots of free
-# space and, ideally, no spaces in the path (oscdimg's -bootdata dislikes spaces; short paths are used to
-# work around it regardless).
+# space and, ideally, no spaces in the path (oscdimg's -bootdata dislikes spaces, so short paths are used
+# to work around it regardless).
 $WorkRoot   = if ($WorkPath) { $WorkPath } else { Join-Path -Path $env:SystemDrive -ChildPath 'WISO-Work' }
 $ExtractDir = Join-Path -Path $WorkRoot -ChildPath 'ISO'
 $MountDir   = Join-Path -Path $WorkRoot -ChildPath 'Mount'
@@ -471,7 +471,7 @@ function Test-MicrosoftDownloadUrl {
 
 # Verifies the Fido helper is being fetched from the official pbatard/Fido repository on GitHub over
 # HTTPS. Fido is downloaded and then executed, so a URL pointing anywhere else is arbitrary code
-# execution; the parsed Host and path are checked (not a substring of the raw URL) so lookalikes such as
+# execution. The parsed Host and path are checked (not a substring of the raw URL) so lookalikes such as
 # "github.com.evil.example" or "/evil/pbatard/Fido/" are rejected.
 function Test-FidoUrl {
     param([string]$Url)
@@ -483,7 +483,7 @@ function Test-FidoUrl {
 }
 
 # Validates a downloaded Fido.ps1 BEFORE it is executed. Fido is not code-signed, so there is no
-# signature to check; instead this confirms the file really is Fido and contains nothing that Fido has
+# signature to check, so instead this confirms the file really is Fido and contains nothing that Fido has
 # any business doing. Checks, in order: an optional pinned SHA-256 (-FidoSha256), a sane file size, that
 # it parses as PowerShell, that it carries Fido's header and -GetUrl parameter, and that it invokes no
 # code-execution, persistence or security-tampering commands. Parsing only builds an AST - it never runs
@@ -527,7 +527,7 @@ function Test-FidoScript {
         return $false
     }
 
-    # Fido resolves and downloads ISOs; it never needs to run generated code, spawn shells, install
+    # Fido resolves and downloads ISOs, so it never needs to run generated code, spawn shells, install
     # services or scheduled tasks, or touch the registry, boot configuration or Defender.
     $Banned = @(
         'Invoke-Expression', 'iex', 'Set-ExecutionPolicy', 'Register-ScheduledTask', 'schtasks', 'schtasks.exe',
@@ -705,7 +705,7 @@ function Get-MctLanguageCode {
         try { return [System.Globalization.CultureInfo]::CreateSpecificCulture($Neutral.Name).Name } catch { }
     }
 
-    Write-HostTimestamp "  Could not map the language '$Name' to a Media Creation Tool locale code; using en-US. Override it with -MctLangCode." -ForegroundColor Yellow
+    Write-HostTimestamp "  Could not map the language '$Name' to a Media Creation Tool locale code, so en-US is used. Override it with -MctLangCode." -ForegroundColor Yellow
     return 'en-US'
 }
 
@@ -797,7 +797,7 @@ function Get-IsoViaMct {
         Remove-Item -LiteralPath $Mct -Force -ErrorAction SilentlyContinue
     }
 
-    # Prefer an ISO that was not there before MCT ran; otherwise take the largest one in the folder.
+    # Prefer an ISO that was not there before MCT ran, otherwise take the largest one in the folder.
     $Iso = Get-ChildItem -Path $DownloadDir -Filter '*.iso' -File -ErrorAction SilentlyContinue |
         Where-Object { $_.Length -gt 3GB -and $Existing -notcontains $_.FullName } |
         Sort-Object -Property LastWriteTime -Descending | Select-Object -First 1
@@ -977,7 +977,7 @@ function Get-LatestCatalogPackage {
         Write-HostTimestamp '  No catalog results were returned for that query.' -ForegroundColor Yellow
         return $null
     }
-    Write-HostTimestamp "  Found $($Results.Count) catalog result(s); selecting the best match..."
+    Write-HostTimestamp "  Found $($Results.Count) catalog result(s), selecting the best match..."
 
     # Narrow to the packages we actually want, then take the newest by date (largest as a tie-break).
     $Filtered = $Results
@@ -1078,7 +1078,7 @@ function Get-LatestCatalogPackage {
         ($Downloaded | Where-Object { $_.IsPrimary } | Sort-Object Kb)
     )
     if ($Downloaded.Count -gt 1) {
-        Write-HostTimestamp "  This update includes $($Downloaded.Count) package(s); they will be integrated in this order:"
+        Write-HostTimestamp "  This update includes $($Downloaded.Count) package(s), which will be integrated in this order:"
         $Ordered | ForEach-Object { Write-HostTimestamp "    - $(Split-Path -Leaf $_.Path)$(if ($_.IsPrimary) { ' (main cumulative update)' })" }
     }
 
@@ -1144,7 +1144,7 @@ function Read-BuildStamp {
     if (-not (Test-Path -LiteralPath $StampFile -PathType Leaf)) { return $null }
     try { return (Get-Content -LiteralPath $StampFile -Raw -ErrorAction Stop | ConvertFrom-Json) }
     catch {
-        Write-HostTimestamp "  The stamp '$StampFile' could not be read ($($_.Exception.Message)); treating this as a first run." -ForegroundColor Yellow
+        Write-HostTimestamp "  The stamp '$StampFile' could not be read ($($_.Exception.Message)), so this is treated as a first run." -ForegroundColor Yellow
         return $null
     }
 }
@@ -1306,13 +1306,13 @@ function Test-RebuildNeeded {
             $Old = if ($Stamp.Parameters -and ($Stamp.Parameters.PSObject.Properties.Name -contains $Key)) { "$($Stamp.Parameters.$Key)" } else { '(not recorded)' }
             if ($Old -ne "$($ParameterSet[$Key])") { $Changed += "$Key '$Old' -> '$($ParameterSet[$Key])'" }
         }
-        $Reasons.Add("the build parameters changed$(if ($Changed) { ": $($Changed -join '; ')" })")
+        $Reasons.Add("the build parameters changed$(if ($Changed) { ": $($Changed -join ', ')" })")
     }
 
     $Recorded = @()
     if ($Stamp.Updates -and $Stamp.Updates.Catalog) { $Recorded = @($Stamp.Updates.Catalog | ForEach-Object { "$_" } | Sort-Object) }
     if ($null -eq $ExpectedUpdates) {
-        # A network blip must not trigger a two-hour rebuild; the next scheduled run will look again.
+        # A network blip must not trigger a two-hour rebuild, so the next scheduled run will look again.
         $Reasons.Add('the Microsoft Update Catalog could not be reached, so this run assumes nothing new has been published')
     }
     elseif ($Recorded.Count -eq 0) {
@@ -1403,7 +1403,7 @@ function Invoke-AutoClean {
     $Ordered = @($Candidates.Values | Sort-Object -Property LastWriteTime -Descending)
     $Stale = @($Ordered | Select-Object -Skip $KeepIsoCount | Where-Object { $ProtectedPaths -notcontains $_.FullName.ToLowerInvariant() })
     if ($Ordered.Count -gt 0) {
-        Write-HostTimestamp "  Found $($Ordered.Count) generated ISO(s); keeping the newest $KeepIsoCount." -ForegroundColor DarkGray
+        Write-HostTimestamp "  Found $($Ordered.Count) generated ISO(s), keeping the newest $KeepIsoCount." -ForegroundColor DarkGray
     }
     $RemovedIsos = 0
     foreach ($Item in $Stale) {
@@ -1581,7 +1581,7 @@ function Register-UpdaterScheduledTask {
     $Exe = if ($PSVersionTable.PSEdition -eq 'Core') { Join-Path -Path $PSHOME -ChildPath 'pwsh.exe' } else { Join-Path -Path $PSHOME -ChildPath 'powershell.exe' }
     $ArgumentString = Get-ScheduledTaskArgumentString
     $Action = New-ScheduledTaskAction -Execute $Exe -Argument $ArgumentString -WorkingDirectory (Split-Path -Parent $script:ScriptPath)
-    # SYSTEM so the task needs no stored password; it is also already elevated, which DISM requires.
+    # SYSTEM so the task needs no stored password, and it is also already elevated, which DISM requires.
     $Principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
     $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
@@ -1795,7 +1795,7 @@ function Resolve-EditionIndexes {
 }
 
 # Scores a Windows edition name so the "highest" edition can be picked automatically. Only Enterprise,
-# Pro, and Home are considered (Enterprise > Pro > Home); Education and Workstation editions (including
+# Pro, and Home are considered (Enterprise > Pro > Home). Education and Workstation editions (including
 # "Pro Education" and "Pro for Workstations") are deliberately excluded and scored lowest so they are
 # never chosen when a plain Enterprise/Pro/Home edition is present. Within a tier, base editions are
 # preferred over the "N" and "Single Language" variants.
@@ -1890,7 +1890,7 @@ function Reset-MountDirectory {
         }
     }
 
-    # Releases mounts whose directory was deleted from under DISM; the only way back from an orphaned mount.
+    # Releases mounts whose directory was deleted from under DISM, the only way back from an orphaned mount.
     try { Clear-WindowsCorruptMountPoint -ErrorAction SilentlyContinue | Out-Null } catch { }
 
     $Stale = & $FindStale
@@ -2090,7 +2090,7 @@ Write-HostTimestamp "Windows ISO Updater v$ScriptVersion (slipstream latest upda
 Write-Host $LineBreak
 
 # --- Scheduled task registration (-RegisterScheduledTask / -UnregisterScheduledTask) ---
-# Both of these only touch Task Scheduler and then exit; nothing is downloaded or built.
+# Both of these only touch Task Scheduler and then exit, with nothing downloaded or built.
 if ($UnregisterScheduledTask) {
     try {
         if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
@@ -2159,7 +2159,7 @@ Write-Host "  Logs             : $LogDir"
 if (-not $NoStamp) { Write-Host "  Build stamps     : $StampRoot" }
 Write-Host "  Finished ISO     : $(if ($OutputIsoPath) { $OutputIsoPath } else { Join-Path $FinishedIsoDir 'Win11_Pro_x64_<build>.<UBR>_<date-time>.iso' })"
 Write-Host ''
-Write-Host '  Nothing outside these folders is changed. -WorkPath moves all of it; -DownloadPath, -LogPath' -ForegroundColor DarkGray
+Write-Host '  Nothing outside these folders is changed. -WorkPath moves all of it, and -DownloadPath, -LogPath' -ForegroundColor DarkGray
 Write-Host '  and -OutputIsoPath override the individual folders.' -ForegroundColor DarkGray
 Write-Host $LineBreak
 
@@ -2241,7 +2241,7 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
         Write-Host "  - Keep ALL editions in the final ISO (-KeepAllEditions)"
     }
     else {
-        Write-Host "  - Keep ONLY the highest edition present (e.g. Enterprise over Pro, or Pro over Home) to speed up the build; use -KeepAllEditions to keep them all" -ForegroundColor Yellow
+        Write-Host "  - Keep ONLY the highest edition present (e.g. Enterprise over Pro, or Pro over Home) to speed up the build. Use -KeepAllEditions to keep them all" -ForegroundColor Yellow
     }
     if (-not $SkipUpdates) {
         if ($UpdatePath) {
@@ -2293,8 +2293,8 @@ if (-not $ListEditions -and -not $CheckOnly) {
             Write-HostTimestamp "  Found oscdimg: $($script:Oscdimg)" -ForegroundColor Green
         }
         else {
-            # Grab the single ~150 KB executable straight from Microsoft's symbol server first; only fall
-            # back to the full ADK install (which is hundreds of MB) if that fails.
+            # Grab the single ~150 KB executable straight from Microsoft's symbol server first, and only
+            # fall back to the full ADK install (which is hundreds of MB) if that fails.
             if (-not $SkipOscdimgDownload) {
                 Write-HostTimestamp '  oscdimg was not found. Downloading a standalone copy from Microsoft...' -ForegroundColor Yellow
                 $script:Oscdimg = Get-OscdimgDownload
@@ -2325,8 +2325,9 @@ if ($IsoPath) {
         Write-HostTimestamp "Using the provided ISO: $ResolvedIso" -ForegroundColor Green
 
         # If the ISO sits on a cloud-synced path, copy it to the local download folder first. Mounting and
-        # reading a cloud placeholder during the long extraction is slow and unreliable; a local copy is not.
-        # -CheckOnly only ever reads the file to hash it, so it is not worth moving gigabytes for.
+        # reading a cloud placeholder during the long extraction is slow and unreliable, while a local
+        # copy is not. -CheckOnly only ever reads the file to hash it, so it is not worth moving gigabytes
+        # for.
         if (($ResolvedIso -match $CloudPattern -or $ResolvedIso -match '(?i)OneDrive') -and
             -not ($DlDir -match $CloudPattern -or $DlDir -match '(?i)OneDrive') -and -not $CheckOnly) {
             $LocalIso = Join-Path -Path $DlDir -ChildPath (Split-Path -Leaf $ResolvedIso)
@@ -2337,7 +2338,7 @@ if ($IsoPath) {
             }
             else {
                 try {
-                    Invoke-Task -Description "The ISO is on a cloud-synced path; copying it to a local disk first ($([math]::Round($SourceLen / 1GB, 2)) GB): $LocalIso ..." -ScriptBlock {
+                    Invoke-Task -Description "The ISO is on a cloud-synced path, so it is copied to a local disk first ($([math]::Round($SourceLen / 1GB, 2)) GB): $LocalIso ..." -ScriptBlock {
                         Copy-Item -LiteralPath $ResolvedIso -Destination $LocalIso -Force -ErrorAction Stop
                         Write-HostTimestamp '  Copy complete.' -ForegroundColor Green
                     }
@@ -2366,13 +2367,13 @@ else {
         Write-HostTimestamp "An ISO is already downloaded - reusing it: $ResolvedIso ($([math]::Round($ExistingIso.Length / 1GB, 2)) GB)" -ForegroundColor Green
     }
     else {
-        # -CheckOnly answers a question; it never spends 8 GB of bandwidth to do it.
+        # -CheckOnly answers a question, so it never spends 8 GB of bandwidth to do it.
         if ($CheckOnly) {
             Write-HostTimestamp 'No ISO is available locally, so there is nothing to compare against - a build is needed.' -ForegroundColor Yellow
             Stop-Transcript | Out-Null
             exit 10
         }
-        # -UseMct skips Fido entirely; otherwise Fido is tried first and MCT is offered if it is blocked.
+        # -UseMct skips Fido entirely, otherwise Fido is tried first and MCT is offered if it is blocked.
         if ($UseMct) {
             $ResolvedIso = Get-IsoViaMct -Version $WindowsVersion -Language $Language -Architecture $WinInfo.Architecture -DownloadDir $DlDir
             if (-not $ResolvedIso) {
@@ -2502,7 +2503,7 @@ if (-not $NoStamp) {
             # otherwise looks like it only compared local files and never asked Microsoft anything.
             if ($script:ExpectedUpdateSet -and -not $SkipUpdates -and -not $UpdatePath) {
                 $Listed = @($script:ExpectedUpdateSet | ForEach-Object { $_ -replace '^(\w+)=(.+)@(.+)$', '$1 $2 (published $3)' })
-                Write-HostTimestamp "  The Microsoft Update Catalog was checked for Windows $WindowsVersion $StampFeature $StampArch; newest available:" -ForegroundColor DarkGray
+                Write-HostTimestamp "  The Microsoft Update Catalog was checked for Windows $WindowsVersion $StampFeature $StampArch, newest available:" -ForegroundColor DarkGray
                 foreach ($Item in $Listed) { Write-HostTimestamp "    $Item" -ForegroundColor DarkGray }
             }
         }
@@ -2596,7 +2597,7 @@ try {
         # robocopy mirrors the whole media reliably (long paths, retries). /NP keeps the log readable.
         $RoboArgs = @("$($DriveLetter):\", $ExtractDir, '/E', '/COPY:DAT', '/R:2', '/W:2', '/NFL', '/NDL', '/NP', '/NJH', '/NJS')
         & robocopy.exe @RoboArgs | Out-Null
-        # robocopy exit codes 0-7 indicate success; 8+ indicates a real failure.
+        # robocopy exit codes 0-7 indicate success, while 8+ indicates a real failure.
         if ($LASTEXITCODE -ge 8) { throw "robocopy failed to copy the ISO contents (exit code $LASTEXITCODE)." }
         Write-HostTimestamp '  Extraction complete.' -ForegroundColor Green
     }
@@ -2615,8 +2616,8 @@ finally {
 }
 Write-Host $LineBreak
 
-# The copied wim files inherit the read-only attribute from the optical media; clear it so DISM can mount
-# and commit changes.
+# The copied wim files inherit the read-only attribute from the optical media, so clear it to let DISM
+# mount and commit changes.
 Get-ChildItem -Path (Join-Path $ExtractDir 'sources') -Filter '*.wim' -File -ErrorAction SilentlyContinue |
     ForEach-Object { try { Set-ItemProperty -LiteralPath $_.FullName -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue } catch { } }
 
@@ -2625,7 +2626,7 @@ $InstallEsdExtracted = Join-Path $ExtractDir 'sources\install.esd'
 $BootWim = Join-Path $ExtractDir 'sources\boot.wim'
 
 # If the media ships install.esd (compressed), convert it to an editable install.wim so DISM can service
-# it. Servicing is done against a WIM; the ESD is a delivery-only format. Only the editions that will
+# it. Servicing is done against a WIM, and the ESD is a delivery-only format. Only the editions that will
 # survive into the final ISO are exported - each one costs several minutes, so exporting the rest just to
 # delete them later is wasted time.
 $script:EsdPreTrimmed = $false
@@ -2795,7 +2796,7 @@ else {
             $script:SafeOs = Get-LatestCatalogPackage -Query "Safe OS Dynamic Update Windows $WindowsVersion $VerPart$CatalogArch" -DownloadDir $DlDir -TitleInclude '(?i)safe os dynamic update'
         }
         if ($script:SafeOs) { $SafeOsGroup = @($script:SafeOs) }
-        else { Write-HostTimestamp '  No Safe OS Dynamic Update was found; WinRE update integration will be skipped (per Microsoft, the LCU does not apply to WinRE).' -ForegroundColor Yellow }
+        else { Write-HostTimestamp '  No Safe OS Dynamic Update was found, so WinRE update integration will be skipped (per Microsoft, the LCU does not apply to WinRE).' -ForegroundColor Yellow }
         Write-Host $LineBreak
     }
 }
@@ -2921,7 +2922,7 @@ if ($UpdateGroups.Count -gt 0) {
                                 Add-UpdateGroup -MountDir $WinReMount -Group $SafeOsGroup -Label 'Safe OS Dynamic Update' | Out-Null
                             }
                             else {
-                                Write-HostTimestamp '      No Safe OS Dynamic Update available; skipping WinRE update integration.' -ForegroundColor DarkGray
+                                Write-HostTimestamp '      No Safe OS Dynamic Update available, so WinRE update integration is skipped.' -ForegroundColor DarkGray
                             }
                             Dismount-WindowsImage -Path $WinReMount -Save -ErrorAction Stop | Out-Null
                         }
@@ -2946,8 +2947,8 @@ if ($UpdateGroups.Count -gt 0) {
                 # ResetBase permanently removes superseded components, shrinking the image. This is slow.
                 & dism.exe /Image:"$MountDir" /Cleanup-Image /StartComponentCleanup /ResetBase | Out-Null
 
-                # Grabbed here because the image is already mounted; mounting the finished image later just to
-                # read this one value costs several minutes.
+                # Grabbed here because the image is already mounted, since mounting the finished image later
+                # just to read this one value costs several minutes.
                 if (-not $script:FinalBuildString) { $script:FinalBuildString = Get-MountedImageBuild -MountPath $MountDir }
 
                 Write-HostTimestamp '    Committing and unmounting...'
@@ -2973,7 +2974,7 @@ if ($UpdateGroups.Count -gt 0) {
             foreach ($Cab in $script:SetupDu) {
                 & "$env:SystemRoot\System32\expand.exe" $Cab '-F:*' $MediaSources | Out-Null
                 if ($LASTEXITCODE -ne 0) {
-                    Write-HostTimestamp "  expand.exe returned $LASTEXITCODE for $(Split-Path -Leaf $Cab); the media Setup files were not fully refreshed." -ForegroundColor Yellow
+                    Write-HostTimestamp "  expand.exe returned $LASTEXITCODE for $(Split-Path -Leaf $Cab), so the media Setup files were not fully refreshed." -ForegroundColor Yellow
                 }
                 else {
                     Write-HostTimestamp "  Applied $(Split-Path -Leaf $Cab) to sources\." -ForegroundColor Green
@@ -2982,7 +2983,7 @@ if ($UpdateGroups.Count -gt 0) {
         }
     }
 
-    # 3) Service boot.wim (Windows Setup / WinPE). Index 2 is the Setup environment; index 1 is WinPE.
+    # 3) Service boot.wim (Windows Setup / WinPE). Index 2 is the Setup environment, index 1 is WinPE.
     if (Test-Path -LiteralPath $BootWim) {
         Set-ItemProperty -LiteralPath $BootWim -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
         # Staging folder for the serviced Setup/boot-manager binaries pulled out of boot.wim index 2.
@@ -3042,7 +3043,7 @@ if ($UpdateGroups.Count -gt 0) {
                     if (Test-Path -LiteralPath $TempBoot) { Remove-Item -LiteralPath $TempBoot -Force -ErrorAction SilentlyContinue }
                     $BeforeMB = (Get-Item -LiteralPath $BootWim).Length / 1MB
                     foreach ($Img in ($BootImages | Sort-Object ImageIndex)) {
-                        # Index 2 (Windows Setup) carries the WIM's bootable flag; without -Setbootable the ISO will not boot.
+                        # Index 2 (Windows Setup) carries the WIM's bootable flag, and without -Setbootable the ISO will not boot.
                         $Boot = ([int]$Img.ImageIndex -eq 2)
                         Write-HostTimestamp "  Exporting index $($Img.ImageIndex) ($($Img.ImageName))$(if ($Boot) { ' [bootable]' }) ..."
                         Export-WindowsImage -SourceImagePath $BootWim -SourceIndex $Img.ImageIndex -DestinationImagePath $TempBoot -CompressionType Max -Setbootable:$Boot -ErrorAction Stop | Out-Null
@@ -3064,7 +3065,7 @@ if ($UpdateGroups.Count -gt 0) {
         Invoke-Task -Description 'Updating the media Setup and boot manager files to match the serviced boot.wim...' -ScriptBlock {
             $StagedSetup = Join-Path $SetupStage 'setup.exe'
             if (-not (Test-Path -LiteralPath $StagedSetup)) {
-                Write-HostTimestamp '  No serviced Setup files were captured; the media files are left as they are.' -ForegroundColor Yellow
+                Write-HostTimestamp '  No serviced Setup files were captured, so the media files are left as they are.' -ForegroundColor Yellow
                 return
             }
             $MediaSources = Join-Path $ExtractDir 'sources'
@@ -3078,8 +3079,8 @@ if ($UpdateGroups.Count -gt 0) {
                 }
             }
 
-            # The media's boot managers live under several names (bootmgfw.efi, bootx64.efi, ...); each is
-            # the same binary, so every copy is refreshed from the serviced one.
+            # The media's boot managers live under several names (bootmgfw.efi, bootx64.efi, ...), each of
+            # them the same binary, so every copy is refreshed from the serviced one.
             $StagedMgfw = Join-Path $SetupStage 'bootmgfw.efi'
             $StagedMgr  = Join-Path $SetupStage 'bootmgr.efi'
             foreach ($File in (Get-ChildItem -LiteralPath $ExtractDir -Force -Recurse -Filter 'b*.efi' -ErrorAction SilentlyContinue)) {
@@ -3204,14 +3205,14 @@ Invoke-Task -Description "Recompiling the bootable ISO to $OutputIsoPath ..." -S
         $BootArg = "1#pEF,e,b$(Get-ShortPath -Path $EfiSys)"
     }
     else {
-        # Neither boot sector was found; oscdimg will still build the ISO, but it may not be bootable.
-        Write-HostTimestamp '  No boot sectors were found in the extracted media; the resulting ISO may not be bootable.' -ForegroundColor Yellow
+        # Neither boot sector was found, so oscdimg will still build the ISO, but it may not be bootable.
+        Write-HostTimestamp '  No boot sectors were found in the extracted media, so the resulting ISO may not be bootable.' -ForegroundColor Yellow
     }
 
     # oscdimg switches: -m (ignore the 4 GB image size limit), -o (de-duplicate identical files to save
     # space), -u2 (write a pure UDF file system, required for the large install.wim), -udfver102 (UDF
-    # revision 1.02 for broad compatibility). -bootdata makes the ISO bootable; the last two arguments are
-    # the source folder to package and the output ISO path.
+    # revision 1.02 for broad compatibility). -bootdata makes the ISO bootable, and the last two arguments
+    # are the source folder to package and the output ISO path.
     $OscdimgArgs = @('-m', '-o', '-u2', '-udfver102')
     if ($BootArg) { $OscdimgArgs += "-bootdata:$BootArg" }
     $OscdimgArgs += @($ExtractDir, $OutputIsoPath)

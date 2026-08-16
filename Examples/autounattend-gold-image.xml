@@ -5,7 +5,7 @@
 
 		This builds the reference machine that you then customize by hand, seal with sysprep /generalize,
 		and capture. It is a sibling of autounattend-lab-admin.xml and shares its entire windowsPE
-		installer; the differences are all in what happens after Windows is on disk.
+		installer, and the differences are all in what happens after Windows is on disk.
 
 		The captured image is deployed with a DIFFERENT answer file (autounattend-lab-admin.xml, or your
 		own), which is what sets the computer name, credentials, domain membership and so on.
@@ -32,7 +32,7 @@
 		   sets it whatever the reference machine happens to be running on.
 
 		   It must not survive into the image. specialize runs once, here, so it cannot make this decision
-		   per target; the capture has to ship neutral and let the deployment answer file choose. Neutral
+		   per target, so the capture has to ship neutral and let the deployment answer file choose. Neutral
 		   also fails in the safe direction: an answer file that never considers the question leaves a
 		   physical machine encrypting normally, instead of a fleet that silently never encrypts.
 		   SEAL-THIS-IMAGE.txt lists the removal as a step, and autounattend-lab-admin.xml sets the value
@@ -73,7 +73,7 @@
 		- No CopyProfile. It would push the build Administrator's profile to the Default profile, which
 		  is the usual reason a gold image ships with a broken Start menu or missing Store apps.
 		- No product key, activation, domain join, static IP or Wi-Fi profile. All machine or site
-		  specific; they belong in the deployment answer file.
+		  specific, so they belong in the deployment answer file.
 		- No $WinPEDriver$ vendor drivers are expected. The windowsPE pass still supports the folder, but
 		  do not populate it for a gold image that will land on mixed hardware.
 		- No SkipRearm. Add <SkipRearm>1</SkipRearm> to the Microsoft-Windows-Security-SPP component in
@@ -92,7 +92,7 @@
 		- Confirm C:\Windows\Panther\unattend.xml is gone.
 		- Clear the build logs and scripts you do not want in the image:
 		  C:\Windows\Setup\Scripts\*.log, Specialize.ps1, FirstLogon.ps1, VMwareTools.ps1.
-		- Do NOT leave a SetupComplete.cmd in C:\Windows\Setup\Scripts; it auto-runs on every machine
+    - Do NOT leave a SetupComplete.cmd in C:\Windows\Setup\Scripts, because it auto-runs on every machine
 		  deployed from the image.
 		- Drop the build-only BitLocker block, so physical machines built from this image can encrypt:
 		      reg.exe delete "HKLM\SYSTEM\CurrentControlSet\Control\BitLocker" /v PreventDeviceEncryption /f
@@ -153,7 +153,7 @@
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:for /f ^"tokens=3^" ^%^%t in ('reg.exe query HKLM\System\Setup /v UnattendFile 2^^^&gt;nul'^) do ( if exist ^%^%t set ^"XML_FILE=^%^%t^" ^))</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
-					<!-- Stops with a clear error if no image or no answer file was found; assumes Windows 11 unless proven otherwise. -->
+					<!-- Stops with a clear error if no image or no answer file was found. Assumes Windows 11 unless proven otherwise. -->
 					<Order>6</Order>
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:if not defined IMAGE_FILE call :fail ^"Could not locate install.wim, install.esd or install.swm.^"&amp;echo:if not defined XML_FILE call :fail ^"Could not locate autounattend.xml.^"&amp;echo:set ^"OS_VERSION=11^")</Path>
 				</RunSynchronousCommand>
@@ -200,7 +200,7 @@
 				<RunSynchronousCommand wcm:action="add">
 					<!--
 						Runs assert.vbs and branches on its exit code. 2 jumps to :confirmwipe, which requires the
-						operator to type WIPE before an already partitioned disk 0 is erased; anything else aborts.
+						operator to type WIPE before an already partitioned disk 0 is erased. Anything else aborts.
 						1 still halts outright (size checks). An empty disk falls through to :assertok with no prompt.
 						Then begins X:\GPT.txt, the diskpart script for UEFI machines: select disk 0 and wipe it.
 					-->
@@ -228,7 +228,7 @@
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:echo:FORMAT QUICK FS=NTFS LABEL=^^^"System^^^"&amp;echo:echo:ASSIGN LETTER=S&amp;echo:echo:ACTIVE&amp;echo:echo:CREATE PARTITION PRIMARY&amp;echo:echo:SHRINK MINIMUM=1000&amp;echo:echo:FORMAT QUICK FS=NTFS LABEL=^^^"Windows^^^")</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
-					<!-- MBR layout: assign W:, add the Recovery partition (R:) with partition type 0x27. Ends MBR.txt; wpeutil refreshes firmware/boot info. -->
+					<!-- MBR layout: assign W:, add the Recovery partition (R:) with partition type 0x27. Ends MBR.txt, then wpeutil refreshes firmware/boot info. -->
 					<Order>20</Order>
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:echo:ASSIGN LETTER=W&amp;echo:echo:CREATE PARTITION PRIMARY&amp;echo:echo:FORMAT QUICK FS=NTFS LABEL=^^^"Recovery^^^"&amp;echo:echo:ASSIGN LETTER=R&amp;echo:echo:SET ID=27&amp;echo:^)&amp;echo:wpeutil.exe UpdateBootInfo)</Path>
 				</RunSynchronousCommand>
@@ -413,7 +413,7 @@ foreach( $file in $Document.unattend.Extensions.File ) {
 			GOLD IMAGE CAVEAT: the download fallback always fetches the current release, so two builds a
 			month apart produce images with different Tools versions. Attach the Tools ISO from your
 			hypervisor if you want the build to be reproducible. Also note that this reaches the internet
-			before you seal; do the rest of your customization offline so Windows Update does not update
+			before you seal, and do the rest of your customization offline so Windows Update does not update
 			an inbox app under the current user and break sysprep with 0x80073CF2.
 		-->
 		<File path="C:\Windows\Setup\Scripts\VMwareTools.ps1">
@@ -515,7 +515,7 @@ $scripts = @(
 		reg.exe add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f;
 	};
 	{
-		# Allow locally written PowerShell scripts to run; downloaded ones still need a signature.
+		# Allow locally written PowerShell scripts to run, while downloaded ones still need a signature.
 		Set-ExecutionPolicy -Scope 'LocalMachine' -ExecutionPolicy 'RemoteSigned' -Force;
 	};
 	{
@@ -530,7 +530,7 @@ $scripts = @(
 	{
 		# Build-time convenience, not policy: a reference VM that falls asleep mid build is just friction.
 		# Whatever is set here is baked into the capture, so the deployment answer file decides the final
-		# state per target; autounattend-lab-admin.xml restores the defaults on physical hardware.
+		# state per target, and autounattend-lab-admin.xml restores the defaults on physical hardware.
 		# The active scheme is left alone either way, so nothing forces High Performance onto a laptop.
 		if( $isVirtualMachine ) {
 			powercfg.exe /change standby-timeout-ac 0;
@@ -538,7 +538,7 @@ $scripts = @(
 			powercfg.exe /change disk-timeout-ac 0;
 		}
 		else {
-			'Physical reference machine ({0} {1}); leaving the power settings alone.' -f $cs.Manufacturer, $cs.Model;
+			'Physical reference machine ({0} {1}), leaving the power settings alone.' -f $cs.Manufacturer, $cs.Model;
 		}
 	};
 	{
@@ -560,7 +560,7 @@ $scripts = @(
 
 		# Policy only, so it is safe to bake: whenever BitLocker does run on a deployed machine it uses
 		# AES 256 rather than the 128-bit default.
-		# 7 = XTS-AES 256 for the OS and fixed data drives; removable drives get 4 (AES-CBC 256), which older Windows can still read.
+		# 7 = XTS-AES 256 for the OS and fixed data drives, while removable drives get 4 (AES-CBC 256), which older Windows can still read.
 		reg.exe add "HKLM\SOFTWARE\Policies\Microsoft\FVE" /v EncryptionMethodWithXtsOs /t REG_DWORD /d 7 /f;
 		reg.exe add "HKLM\SOFTWARE\Policies\Microsoft\FVE" /v EncryptionMethodWithXtsFdv /t REG_DWORD /d 7 /f;
 		reg.exe add "HKLM\SOFTWARE\Policies\Microsoft\FVE" /v EncryptionMethodWithXtsRdv /t REG_DWORD /d 4 /f;
@@ -613,12 +613,12 @@ $scripts = @(
 			cmd.exe /c 'rmdir /s /q C:\Windows.old';
 		}
 		else {
-			'No C:\Windows.old on this machine; nothing to remove.';
+			'No C:\Windows.old on this machine, nothing to remove.';
 		}
 	};
 	{
 		# Delete the answer files. Two reasons, and the second is the important one here:
-		#  1. they contain the clear text Administrator password;
+		#  1. they contain the clear text Administrator password.
 		#  2. sysprep /generalize implicitly consumes C:\Windows\Panther\unattend.xml. Left in place, the
 		#     specialize pass above would re-run on every machine deployed from the captured image,
 		#     re-extracting these scripts and carrying that password with it.
