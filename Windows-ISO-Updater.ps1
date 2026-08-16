@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.13   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.14   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -235,7 +235,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.13'
+$ScriptVersion = '2026.08.16.14'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2079,6 +2079,37 @@ function Get-IsoVolumeLabel {
     return $Label.Trim('_')
 }
 
+# Throws away a mount without letting DISM's errors escape. Dismount-WindowsImage raises a terminating
+# COMException that -ErrorAction cannot suppress, so every discard has to be wrapped or it fills the
+# transcript with stack traces from cleanup paths that already know the mount may be gone. -Escalate adds
+# the recovery for a mount abandoned by a dead process, which answers the managed call with "The request
+# is not supported" and can only be released by re-attaching it with dism.exe first.
+function Dismount-ImageDiscard {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$Escalate
+    )
+
+    try {
+        Dismount-WindowsImage -Path $Path -Discard -ErrorAction Stop | Out-Null
+        return $true
+    }
+    catch {
+        if (-not $Escalate) { return $false }
+        Write-HostTimestamp "      Discard failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    Write-HostTimestamp '      Re-attaching the mount with dism.exe so it can be released...' -ForegroundColor Yellow
+    & dism.exe /English /Remount-Image "/MountDir:$Path" 2>&1 | Out-Null
+    & dism.exe /English /Unmount-Image "/MountDir:$Path" /Discard 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-HostTimestamp '      Released it.' -ForegroundColor Green
+        return $true
+    }
+    Write-HostTimestamp "      dism.exe could not release it either (exit code $LASTEXITCODE)." -ForegroundColor Yellow
+    return $false
+}
+
 # Ensures a mount directory is clean and ready to receive a fresh WIM mount. A previous run that crashed
 # or was killed can leave an image still mounted (or a corrupt mount point) there, which makes the next
 # Mount-WindowsImage fail. DISM tracks a mount by WIM file + index as well as by directory, so a mount
@@ -2109,14 +2140,16 @@ function Reset-MountDirectory {
     foreach ($M in (& $FindStale)) {
         $Leaf = if ($M.ImagePath) { Split-Path $M.ImagePath -Leaf } else { 'image' }
         Write-HostTimestamp "    A previous run left $Leaf index $($M.ImageIndex) mounted at $($M.Path) - discarding it..." -ForegroundColor Yellow
-        if ($M.Path) {
-            try { Dismount-WindowsImage -Path $M.Path -Discard -ErrorAction Stop | Out-Null }
-            catch { Write-HostTimestamp "      Discard failed: $($_.Exception.Message)" -ForegroundColor Yellow }
-        }
+        if ($M.Path) { Dismount-ImageDiscard -Path $M.Path -Escalate | Out-Null }
     }
 
     # Releases mounts whose directory was deleted from under DISM, the only way back from an orphaned mount.
     try { Clear-WindowsCorruptMountPoint -ErrorAction SilentlyContinue | Out-Null } catch { }
+
+    # Clearing a corrupt mount point can make a mount that refused to discard discardable, so try once more.
+    foreach ($M in (& $FindStale)) {
+        if ($M.Path) { Dismount-ImageDiscard -Path $M.Path | Out-Null }
+    }
 
     $Stale = & $FindStale
     if ($Stale) {
@@ -2443,7 +2476,7 @@ function Get-WimBuildViaMount {
     }
     catch { }
     finally {
-        Dismount-WindowsImage -Path $Mnt -Discard -ErrorAction SilentlyContinue | Out-Null
+        Dismount-ImageDiscard -Path $Mnt | Out-Null
         # Removing a directory DISM still tracks as mounted is what orphans a mount point, so leave it
         # alone if the discard above did not take.
         if (-not (Get-WindowsImage -Mounted -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.TrimEnd('\') -ieq $Mnt.TrimEnd('\') })) {
@@ -2479,10 +2512,10 @@ function Show-FinalImageInfo {
             Reset-MountDirectory -Path $Mnt -ImagePath $WimPath
             Mount-WindowsImage -ImagePath $WimPath -Index $Images[0].ImageIndex -Path $Mnt -ReadOnly -ErrorAction Stop | Out-Null
             $BuildStr = Get-MountedImageBuild -MountPath $Mnt
-            Dismount-WindowsImage -Path $Mnt -Discard -ErrorAction SilentlyContinue | Out-Null
+            Dismount-ImageDiscard -Path $Mnt | Out-Null
         }
         catch {
-            Dismount-WindowsImage -Path $Mnt -Discard -ErrorAction SilentlyContinue | Out-Null
+            Dismount-ImageDiscard -Path $Mnt | Out-Null
         }
         finally {
             # Removing a directory DISM still tracks as mounted is what orphans a mount point, so leave it alone
@@ -3553,7 +3586,7 @@ if ($UpdateGroups.Count -gt 0) {
                         }
                         catch {
                             Write-HostTimestamp "      WinRE servicing failed: $($_.Exception.Message)" -ForegroundColor Yellow
-                            Dismount-WindowsImage -Path $WinReMount -Discard -ErrorAction SilentlyContinue | Out-Null
+                            Dismount-ImageDiscard -Path $WinReMount | Out-Null
                         }
                     }
                 }
@@ -3584,7 +3617,7 @@ if ($UpdateGroups.Count -gt 0) {
             }
             catch {
                 Write-HostTimestamp "    Servicing index $Index failed: $($_.Exception.Message)" -ForegroundColor Red
-                Dismount-WindowsImage -Path $MountDir -Discard -ErrorAction SilentlyContinue | Out-Null
+                Dismount-ImageDiscard -Path $MountDir | Out-Null
             }
         }
     }
@@ -3658,7 +3691,7 @@ if ($UpdateGroups.Count -gt 0) {
                 }
                 catch {
                     Write-HostTimestamp "    Servicing boot.wim index $($BootImg.ImageIndex) failed: $($_.Exception.Message)" -ForegroundColor Yellow
-                    Dismount-WindowsImage -Path $MountDir -Discard -ErrorAction SilentlyContinue | Out-Null
+                    Dismount-ImageDiscard -Path $MountDir | Out-Null
                 }
             }
         }
