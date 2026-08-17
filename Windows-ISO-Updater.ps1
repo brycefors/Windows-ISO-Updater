@@ -1,7 +1,7 @@
 # Windows ISO Updater
-# Version: 2026.08.16.27   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.28   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
-# --- SCRIPT OVERVIEW ---
+#region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
 # Windows Server 2016-2025) installation ISO.
 # It downloads the latest official Microsoft ISO, downloads the latest cumulative update(s) from the
@@ -62,7 +62,9 @@
 # 2.  Enable Script Execution (if needed): Set-ExecutionPolicy Bypass -Force
 # 3.  Run the Script: Right-click the saved "Windows-ISO-Updater.ps1" file and select "Run with PowerShell".
 # -------------------------------------------------
-# Parameters for the script
+#endregion
+
+#region Parameters
 param(
     [Parameter(HelpMessage = 'Runs the script without any confirmation prompts')]
     [switch]$Unattended,
@@ -241,7 +243,9 @@ param(
 
     [switch]$SkipInteractive # Skips the interactive confirmation prompt
 )
+#endregion
 
+#region Startup checks and elevation
 # Remembered here because inside a function $PSBoundParameters/$MyInvocation describe that function, not
 # the script - and the scheduled-task registration has to reproduce this exact command line.
 $script:ScriptBoundParameters = $PSBoundParameters
@@ -249,7 +253,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.27'
+$ScriptVersion = '2026.08.16.28'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -309,7 +313,9 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 # Add a Window Title
 $Host.UI.RawUI.WindowTitle = "Windows ISO Updater - Running as Administrator - $env:COMPUTERNAME"
 
-# --- Resolve working folders ---
+#endregion
+
+#region Resolve working folders
 # Everything this script writes lives under the working folder, so a single -WorkPath moves the whole
 # build (downloads, extracted media, DISM mount, logs) to another drive. These MUST be on a local, fixed
 # disk: cloud-synced folders (Google Drive, OneDrive, Dropbox, etc.) turn files into on-demand
@@ -336,7 +342,9 @@ $StampRoot       = if ($StampPath) { $StampPath } else { Join-Path -Path $WorkRo
 $StampHistoryDir = Join-Path -Path $StampRoot -ChildPath 'History'
 $StampFile       = Join-Path -Path $StampRoot -ChildPath 'last-build.json'
 
-# --- Start Logging ---
+#endregion
+
+#region Start Logging
 # Create the log folder, falling back to the script folder if it cannot be used.
 $LogDir = $PSScriptRoot
 try {
@@ -382,7 +390,11 @@ $script:ExtraFilesHash      = $null
 $script:ExtraFilesCopied    = 0
 $script:ExtraFileRecords    = @()
 $script:ExtraFileOverwrites = New-Object System.Collections.Generic.List[string]
+#endregion
 
+#region Functions
+
+#region Output and timing helpers
 function Get-TimeStamp {
     return (Get-Date -Format '[MM/dd/yyyy|HH:mm:ss]')
 }
@@ -424,7 +436,9 @@ function Invoke-Task {
     }
     Write-Host $LineBreak
 }
+#endregion
 
+#region Disk space and path checks
 # Returns the free space (GB, rounded to two decimals) on the drive that holds the given path, or $null.
 function Get-DriveFreeGB {
     param([string]$Path)
@@ -487,7 +501,9 @@ function Get-InstalledWindowsInfo {
     }
     [PSCustomObject]@{ Architecture = $Arch }
 }
+#endregion
 
+#region Downloads
 # Downloads a file with BITS when available (resumable, shows progress) and falls back to
 # Invoke-WebRequest. Returns $true on success. Never throws.
 function Get-FileDownload {
@@ -619,7 +635,9 @@ function Test-FidoScript {
 
     return $true
 }
+#endregion
 
+#region Getting the ISO
 # Uses the community "Fido" helper (which queries Microsoft's own software-download servers) to resolve
 # the official, matching Windows ISO download URL. The helper is fetched only from the official GitHub
 # repository, validated before it runs (see Test-FidoScript), then run out-of-process with -GetUrl so it
@@ -893,7 +911,9 @@ function Find-LargestIso {
             Sort-Object -Property Length -Descending |
             Select-Object -First 1)
 }
+#endregion
 
+#region Identifying the media
 # Maps a Windows build number to its marketing feature-update name (used to build catalog search queries).
 function Get-FeatureUpdateName {
     param([Parameter(Mandatory)][int]$Build)
@@ -943,7 +963,9 @@ function Get-ServerReleaseName {
     }
 }
 
-# --- Microsoft Update Catalog helpers ---
+#endregion
+
+#region Microsoft Update Catalog helpers
 # The Microsoft Update Catalog (catalog.update.microsoft.com) has no public API, so these functions use
 # the same technique the community relies on: fetch the search results page and parse it, then POST to the
 # download dialog to obtain the direct package URL. Every resolved URL is validated to be a Microsoft host
@@ -1196,7 +1218,9 @@ function Get-LatestCatalogPackage {
     return @($Ordered | ForEach-Object { $_.Path })
 }
 
-# --- Build stamps ---
+#endregion
+
+#region Build stamps
 # A stamp is a small JSON record of one finished build: the SHA-256 of the source ISO, the update packages
 # that went into it, the build-affecting parameters, and the ISO that came out. A repeat run compares
 # itself with the newest stamp and does nothing when all three still match - which is what makes it safe
@@ -1545,7 +1569,9 @@ function Test-RebuildNeeded {
     return [pscustomobject]@{ Rebuild = ($Blocking.Count -gt 0); Reasons = @($Reasons) }
 }
 
-# --- Housekeeping (-AutoClean) ---
+#endregion
+
+#region Housekeeping (-AutoClean)
 # Only files this script recorded in a stamp are ever deleted, so anything else living in the same folders
 # (a hand-placed ISO, someone else's .msu) is left completely alone.
 function Invoke-AutoClean {
@@ -1630,7 +1656,9 @@ function Invoke-AutoClean {
     Write-HostTimestamp ('  Cleanup removed {0} update package(s) and {1} ISO(s), freeing {2:N1} GB.' -f $RemovedUpdates, $RemovedIsos, ($FreedMB / 1024)) -ForegroundColor Green
 }
 
-# --- Scheduled task registration ---
+#endregion
+
+#region Scheduled task registration
 # Rebuilds this run's command line for the task, dropping the parameters that only make sense when a human
 # typed them and adding -Scheduled so the task never waits at a prompt.
 function Get-ScheduledTaskArgumentString {
@@ -1811,7 +1839,9 @@ function Register-UpdaterScheduledTask {
     Write-HostTimestamp "  Each run compares the build stamp in $StampRoot and exits in a minute or two when nothing has changed." -ForegroundColor DarkGray
     Write-HostTimestamp "  Remove it again with: -UnregisterScheduledTask -TaskName `"$TaskName`"" -ForegroundColor DarkGray
 }
+#endregion
 
+#region oscdimg and the ADK
 # Locates oscdimg.exe (from the Windows ADK Deployment Tools), which is required to recompile the ISO.
 # Checks -OscdimgPath, a previously downloaded copy in the work folder, then PATH, then the standard ADK
 # install locations. Returns the full path or $null.
@@ -1960,7 +1990,9 @@ function Install-AdkDeploymentTools {
 
     return (Find-Oscdimg)
 }
+#endregion
 
+#region Editions and output naming
 # Returns the 8.3 short path for a file, avoiding spaces in paths passed to oscdimg's -bootdata argument.
 function Get-ShortPath {
     param([Parameter(Mandatory)][string]$Path)
@@ -2141,7 +2173,9 @@ function Get-IsoVolumeLabel {
     if ($Label.Length -gt $MaxLength) { $Label = $Label.Substring(0, $MaxLength) }
     return $Label.Trim('_')
 }
+#endregion
 
+#region Mount recovery
 # Last resort for a mount that nothing in this session can release. At boot the WIM filter driver has not
 # re-attached anything yet, so a task running as SYSTEM (which outranks the TrustedInstaller ACLs DISM
 # leaves on the files) can clear the folder before anything claims it. The task deletes itself afterwards
@@ -2453,7 +2487,9 @@ function Reset-MountDirectory {
     }
     New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop | Out-Null
 }
+#endregion
 
+#region Image servicing
 # Pulls the servicing stack update out of a combined SSU+LCU .msu and applies it on its own. Windows rejects
 # a cumulative update with 0x800F0823 when the image's stack is older than the update needs, and DISM does
 # not always take the stack out of the combined package by itself when servicing offline.
@@ -2765,7 +2801,9 @@ function Remove-ImageResidue {
         if (-not $script:TattooResidueFound.Contains($Item)) { $script:TattooResidueFound.Add($Item) }
     }
 }
+#endregion
 
+#region Image inspection and final report
 # Reads the exact build (with UBR) out of an ALREADY-MOUNTED image's offline SOFTWARE hive.
 # Returns a version string, or $null if the hive could not be read.
 function Get-MountedImageBuild {
@@ -2862,7 +2900,9 @@ function Show-FinalImageInfo {
     else { Write-HostTimestamp "Final OS build: $($Images[0].Version) (revision unavailable)" -ForegroundColor Cyan }
 }
 
-# --- Build tattoo ---
+#endregion
+
+#region Build tattoo
 # The stamp lives on the build machine, which is no help to whoever is holding the ISO a year from now.
 # The tattoo is the same story written onto the media itself, so the finished ISO explains itself.
 
@@ -2968,12 +3008,17 @@ function Write-BuildTattoo {
         return $false
     }
 }
+#endregion
+#endregion
 
+#region Run header
 Write-Host $LineBreak
 Write-HostTimestamp "Windows ISO Updater v$ScriptVersion (slipstream latest updates into a new ISO) on $($env:ComputerName)" -ForegroundColor Cyan
 Write-Host $LineBreak
 
-# --- Scheduled task registration (-RegisterScheduledTask / -UnregisterScheduledTask) ---
+#endregion
+
+#region Scheduled task registration (-RegisterScheduledTask / -UnregisterScheduledTask)
 # Both of these only touch Task Scheduler and then exit, with nothing downloaded or built.
 if ($UnregisterScheduledTask) {
     try {
@@ -3060,7 +3105,9 @@ Write-Host '  Nothing outside these folders is changed. -WorkPath moves all of i
 Write-Host '  and -OutputIsoPath override the individual folders.' -ForegroundColor DarkGray
 Write-Host $LineBreak
 
-# --- One run at a time per work folder ---
+#endregion
+
+#region One run at a time per work folder
 # Everything past this point assumes it owns the mount directories, so a second run sharing a work folder
 # would discard the first one's live mount as if it were stale. Keyed on the work folder, so runs pointed
 # at different -WorkPath folders are still free to go side by side. The mutex is never released explicitly:
@@ -3079,7 +3126,9 @@ if (-not $HaveRunMutex) {
     exit 1
 }
 
-# --- Clean up leftovers from an interrupted run ---
+#endregion
+
+#region Clean up leftovers from an interrupted run
 # Add-UpdateGroup stages each package in its own pkgstage_* folder and deletes it in a finally block, but a
 # run that was killed outright never reaches that, leaving several GB behind. Cleared before the free space
 # check so the reading reflects what is really available.
@@ -3134,7 +3183,9 @@ foreach ($StaleName in @('Mount', 'WinREMount', 'BuildCheck')) {
 }
 if ($MountsCleared) { Write-Host $LineBreak }
 
-# --- Disk space check ---
+#endregion
+
+#region Disk space check
 # DISM mounts and services images inside the working folder, which a network share cannot support.
 if (Test-RemotePath -Path $WorkRoot) {
     Write-HostTimestamp "The working folder is not on a local disk: $WorkRoot" -ForegroundColor Red
@@ -3166,7 +3217,9 @@ else {
 }
 Write-Host $LineBreak
 
-# --- Validate the unattended answer file ---
+#endregion
+
+#region Validate the unattended answer file
 $ResolvedUnattend = $null
 $UnattendText = $null
 if ($UnattendPath) {
@@ -3200,7 +3253,9 @@ if ($UnattendPath) {
     Write-Host $LineBreak
 }
 
-# --- Validate the driver folder ---
+#endregion
+
+#region Validate the driver folder
 $ResolvedDriverPath = $null
 if ($DriverPath) {
     if (-not (Test-Path -LiteralPath $DriverPath -PathType Container)) {
@@ -3233,7 +3288,9 @@ if ($DriverPath) {
     Write-Host $LineBreak
 }
 
-# --- Validate the extra files folder ---
+#endregion
+
+#region Validate the extra files folder
 $ResolvedExtraFiles = $null
 if ($ExtraFilesPath) {
     if (-not (Test-Path -LiteralPath $ExtraFilesPath -PathType Container)) {
@@ -3256,7 +3313,9 @@ if ($ExtraFilesPath) {
     Write-Host $LineBreak
 }
 
-# --- Interactive confirmation ---
+#endregion
+
+#region Interactive confirmation
 if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -not $CheckOnly) {
     Write-Host "This tool builds an updated Windows installation ISO. It will:"
     if ($IsoPath) {
@@ -3341,7 +3400,9 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
     Write-Host $LineBreak
 }
 
-# --- Locate oscdimg early so we fail fast if the ISO cannot be recompiled (not needed for -ListEditions) ---
+#endregion
+
+#region Locate oscdimg early so we fail fast if the ISO cannot be recompiled (not needed for -ListEditions)
 $Oscdimg = $null
 if (-not $ListEditions -and -not $CheckOnly) {
     Invoke-Task -Description 'Locating oscdimg.exe (Windows ADK Deployment Tools)...' -ScriptBlock {
@@ -3374,7 +3435,9 @@ if (-not $ListEditions -and -not $CheckOnly) {
     Write-Host $LineBreak
 }
 
-# --- Obtain the ISO ---
+#endregion
+
+#region Obtain the ISO
 $ResolvedIso = $null
 if ($IsoPath) {
     if (Test-Path -LiteralPath $IsoPath -PathType Container) {
@@ -3525,7 +3588,9 @@ else {
 }
 Write-Host $LineBreak
 
-# --- List editions and exit (-ListEditions) ---
+#endregion
+
+#region List editions and exit (-ListEditions)
 # Mount the ISO (no full extraction needed) just to read the editions inside install.wim/esd, print them,
 # then dismount and exit. Handy for picking -Edition / -KeepEditions values before a full build.
 if ($ListEditions) {
@@ -3560,7 +3625,9 @@ if ($ListEditions) {
     exit 0
 }
 
-# --- Has anything actually changed? (build stamp check) ---
+#endregion
+
+#region Has anything actually changed? (build stamp check)
 # A full build is an hour or more of disk and CPU, so before any of it starts this run is compared with
 # the stamp the last successful build left behind: the source ISO's hash, the build-affecting parameters,
 # and the newest packages the Microsoft Update Catalog is offering. If all of those still match and last
@@ -3638,7 +3705,9 @@ elseif ($CheckOnly) {
     exit 10
 }
 
-# --- Extract the ISO to the working folder ---
+#endregion
+
+#region Extract the ISO to the working folder
 $MountedImage = $null
 try {
     Invoke-Task -Description "Mounting the ISO to copy its contents: $ResolvedIso ..." -ScriptBlock {
@@ -3752,7 +3821,9 @@ if (-not (Test-Path -LiteralPath $InstallWimExtracted)) {
     exit 1
 }
 
-# --- Determine the feature update / architecture from the image (for catalog searches) ---
+#endregion
+
+#region Determine the feature update / architecture from the image (for catalog searches)
 $ImageInfo = $null
 try { $ImageInfo = Get-WindowsImage -ImagePath $InstallWimExtracted -Index 1 -ErrorAction Stop } catch { }
 $ImageBuild = 0
@@ -3801,7 +3872,9 @@ if (-not $NoStamp -and $script:ExpectedUpdateFor -ne "$FeatureName|$CatalogArch"
     }
 }
 
-# --- Gather the update packages to integrate ---
+#endregion
+
+#region Gather the update packages to integrate
 # Each entry in $UpdateGroups is an ordered array of related packages with the TARGET last (e.g. the LCU
 # group is [checkpoint..., LCU]). Groups are applied independently with the documented sole-target method.
 $UpdateGroups = New-Object System.Collections.Generic.List[object]
@@ -3911,7 +3984,9 @@ if ($SafeOsGroup) { $script:StampUpdateFiles += @($SafeOsGroup) }
 # Hashed here, once, because both the media tattoo and the build stamp describe the same packages.
 $script:UpdateFileRecords = @(Get-UpdateFileRecords -Paths $script:StampUpdateFiles -DownloadDir $DlDir)
 
-# --- Resolve which editions to keep and which to service ---
+#endregion
+
+#region Resolve which editions to keep and which to service
 $InstallImages = @(Get-WindowsImage -ImagePath $InstallWimExtracted -ErrorAction Stop)
 
 # Which editions to KEEP in the final ISO.
@@ -3991,7 +4066,9 @@ if ($UnservicedKept.Count -gt 0 -and -not $SkipUpdates) {
     Write-Host $LineBreak
 }
 
-# --- Service the images ---
+#endregion
+
+#region Service the images
 # Drivers alone are reason enough to mount everything, so this runs with no updates to apply too.
 if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
     # Tracks editions whose update set failed to apply, so we can warn loudly at the end.
@@ -4227,7 +4304,9 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
     Remove-DirectoryForce -Path $MountDir | Out-Null
 }
 
-# --- Re-export install.wim (shrink after servicing and/or drop editions with -KeepEditions) ---
+#endregion
+
+#region Re-export install.wim (shrink after servicing and/or drop editions with -KeepEditions)
 # Exporting only the kept indexes both reclaims the space freed by the component cleanup AND physically
 # removes any editions the user chose not to keep. Runs when updates were applied or when trimming.
 # Tracks what Setup will actually read, since -CompressEsd replaces install.wim with install.esd.
@@ -4270,7 +4349,9 @@ if (($UpdateGroups.Count -gt 0) -or $TrimNeeded -or $CompressEsd) {
     Write-Host $LineBreak
 }
 
-# --- Add the unattended answer file to the media ---
+#endregion
+
+#region Add the unattended answer file to the media
 # Windows Setup implicitly reads \autounattend.xml from the root of read-only boot media during the
 # windowsPE pass, so no Setup switches are needed when the ISO is booted.
 if ($ResolvedUnattend) {
@@ -4286,7 +4367,9 @@ if ($ResolvedUnattend) {
     Write-Host $LineBreak
 }
 
-# --- Copy the extra files onto the media (-ExtraFilesPath) ---
+#endregion
+
+#region Copy the extra files onto the media (-ExtraFilesPath)
 # Last of the content steps, so anything here deliberately wins over the media's own copy and over the
 # answer file -UnattendPath just placed.
 if ($ResolvedExtraFiles) {
@@ -4350,7 +4433,9 @@ if ($ResolvedExtraFiles) {
     Write-Host $LineBreak
 }
 
-# --- Decide the output ISO name and volume label ---
+#endregion
+
+#region Decide the output ISO name and volume label
 # The name describes what the ISO actually contains: Win11_Pro_x64_26100.4061_20260815-1332.iso. It is
 # built even when -OutputIsoPath overrides the path, because the volume label is derived from it.
 $DefaultIsoName = Get-DefaultIsoName -Images $InstallImages -Indexes $KeepIndexes -BuildString $script:FinalBuildString -FallbackVersion $ImageInfo.Version -Architecture $ImageArch
@@ -4365,7 +4450,9 @@ try {
 }
 catch { }
 
-# --- Tattoo the build details onto the media (-SkipTattoo) ---
+#endregion
+
+#region Tattoo the build details onto the media (-SkipTattoo)
 # Written into the extracted folder now, while oscdimg has not packaged it yet, so the finished ISO can
 # answer "where did this come from and what is in it" without the build machine being around.
 if (-not $SkipTattoo) {
@@ -4466,7 +4553,9 @@ if (-not $SkipTattoo) {
     }
 }
 
-# --- Recompile the ISO with oscdimg ---
+#endregion
+
+#region Recompile the ISO with oscdimg
 # The two boot sectors extracted from the source media: etfsboot.com boots the ISO on legacy BIOS PCs,
 # efisys.bin boots it on modern UEFI PCs. Both are fed to oscdimg so the new ISO boots on either.
 $EtfsBoot = Join-Path $ExtractDir 'boot\etfsboot.com'
@@ -4520,12 +4609,16 @@ Invoke-Task -Description "Recompiling the bootable ISO to $OutputIsoPath ..." -S
 }
 Write-Host $LineBreak
 
-# --- Report the final image contents (editions + build) before the working files are removed ---
+#endregion
+
+#region Report the final image contents (editions + build) before the working files are removed
 Invoke-Task -Description 'Reading the final image details...' -ScriptBlock {
     Show-FinalImageInfo -WimPath $FinalInstallImage
 }
 
-# --- Cleanup the working extraction folder ---
+#endregion
+
+#region Cleanup the working extraction folder
 Invoke-Task -Description 'Cleaning up the working extraction folder...' -ScriptBlock {
     try {
         Remove-Item -LiteralPath $ExtractDir -Recurse -Force -ErrorAction Stop
@@ -4537,7 +4630,9 @@ Invoke-Task -Description 'Cleaning up the working extraction folder...' -ScriptB
 }
 Write-Host $LineBreak
 
-# --- Write the build stamp ---
+#endregion
+
+#region Write the build stamp
 # The record the next run compares itself against: what went in, what came out, and under which settings.
 if (-not $NoStamp) {
     Invoke-Task -Description 'Writing the build stamp...' -ScriptBlock {
@@ -4597,7 +4692,9 @@ if (-not $NoStamp) {
     Write-Host $LineBreak
 }
 
-# --- Housekeeping (-AutoClean) ---
+#endregion
+
+#region Housekeeping (-AutoClean)
 if ($AutoClean) {
     Invoke-Task -Description 'Cleaning up old downloads and ISOs (-AutoClean)...' -ScriptBlock {
         Invoke-AutoClean -CurrentStamp (Read-BuildStamp) -History (Get-BuildStampHistory) -KeepIsoCount $KeepIsoCount -Protected @($ResolvedIso, $OutputIsoPath)
@@ -4605,7 +4702,9 @@ if ($AutoClean) {
     Write-Host $LineBreak
 }
 
-# --- Timing summary ---
+#endregion
+
+#region Timing summary
 $TotalElapsed = (Get-Date) - $script:ScriptStartTime
 if ($script:StepTimings.Count -gt 0) {
     Write-HostTimestamp 'Time spent on each step:' -ForegroundColor Cyan
@@ -4640,6 +4739,9 @@ if (-not $Unattended -and -not $SkipInteractive) {
     Read-Host -Prompt 'Press enter to exit'
 }
 
+#endregion
+
+#region End Logging
 # Stop logging
 Stop-Transcript
-# --- End Logging ---
+#endregion

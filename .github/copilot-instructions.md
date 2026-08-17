@@ -50,9 +50,12 @@ did not touch.
 
 ## Script conventions
 
-**Layout.** Sections are divided by `# --- Section Name ---` banners. Order is header comment, `param()`,
-elevation and platform guards, folder resolution, transcript start, helper functions, then the main
-flow.
+**Layout.** Sections are wrapped in `#region Section Name` / `#endregion` so they fold in VS Code. Order
+is header comment, `param()`, elevation and platform guards, folder resolution, transcript start, helper
+functions, then the main flow. Every function definition lives inside the single outer `#region Functions`,
+which is subdivided by topic (downloads, catalog, stamps, mount recovery, servicing and so on), so the
+whole ~2,600 lines of helpers collapse to one line and leave the main flow readable. Close a region with a
+bare `#endregion`, and put a blank line between one region and the next.
 
 **Parameters.** Every parameter gets a `HelpMessage` written as a full sentence, plus `ValidateSet`,
 `ValidateRange`, or `ValidatePattern` where the domain is known. Defaults are inline.
