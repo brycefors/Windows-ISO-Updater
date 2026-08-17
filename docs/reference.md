@@ -52,7 +52,7 @@ flowchart TD
     end
 
     subgraph Finalise ["Finish the media"]
-        Files["Copy autounattend.xml, then -ExtraFilesPath, onto the media"] --> Tattoo["Write the WISO-Build folder: the build report plus a copy of the script"]
+        Files["If -UnattendPath was given, copy it on as autounattend.xml, then copy anything from -ExtraFilesPath"] --> Tattoo["Write the WISO-Build folder: the build report plus a copy of the script"]
         Tattoo --> Oscd2["oscdimg: BIOS and UEFI boot sectors, UDF, volume label"]
         Oscd2 --> Clean["Delete the working files, write the new stamp, -AutoClean old downloads"]
         Clean --> Finish(["Finished ISO plus a timing summary"])
