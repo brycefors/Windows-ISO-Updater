@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.29   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.30   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -253,7 +253,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.29'
+$ScriptVersion = '2026.08.16.30'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1479,6 +1479,9 @@ function Get-ExpectedUpdateSet {
         return @($Files | ForEach-Object { "Local=$($_.Name):$($_.Length)" } | Sort-Object)
     }
     if (-not $CatalogArch) { return $null }
+    # The server product name carries no branding of its own, so without a feature update it matches every
+    # Server release in the catalog and no query can identify this media.
+    if ($Server -and -not $FeatureName) { return $null }
 
     $Product = Get-CatalogProductQuery -FeatureUpdate $FeatureName
     $Include = '(?i)cumulative update for (windows|microsoft server operating system)'
@@ -1487,7 +1490,7 @@ function Get-ExpectedUpdateSet {
 
     # Same queries (including the broader fallback) the download step uses, so the two always agree.
     $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $Product for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude
-    if (-not $Lcu) {
+    if (-not $Lcu -and -not $Server) {
         $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude
     }
     if (-not $Lcu) { return $null }
@@ -3865,6 +3868,21 @@ elseif ($Server -and $ImageInfo -and -not $ImageIsServer) {
     Stop-Transcript | Out-Null
     exit 1
 }
+
+# DISM on a Windows 10 or later host cannot service a Vista, 7 or 8 era image, and Microsoft never
+# published cumulative updates for those releases either, so all that is possible on media that old is a
+# straight repack.
+if ($ImageBuild -gt 0 -and $ImageBuild -lt 10240) {
+    $WillService = (-not $SkipUpdates) -or $DriverPath
+    Write-HostTimestamp "This image is build $ImageBuild, older than Windows 10 and Windows Server 2016 (build 10240)." -ForegroundColor $(if ($WillService) { 'Red' } else { 'Yellow' })
+    if ($WillService) {
+        Write-HostTimestamp '  DISM on this host cannot service an image that old, and the Microsoft Update Catalog has no cumulative update for it, so this run stops here.' -ForegroundColor Red
+        Write-HostTimestamp '  Re-run with -SkipUpdates and without -DriverPath to repack the media unchanged, which still applies -UnattendPath, -ExtraFilesPath and the new volume label.' -ForegroundColor Yellow
+        Stop-Transcript | Out-Null
+        exit 1
+    }
+    Write-HostTimestamp '  Nothing will be serviced, so no image is mounted and the media is only repacked.' -ForegroundColor Yellow
+}
 Write-Host $LineBreak
 
 # The stamp check ran against the feature update/architecture recorded last time (or nothing at all on a
@@ -3909,6 +3927,16 @@ elseif ($UpdatePath) {
     Write-Host $LineBreak
 }
 else {
+    # Dropping the version token narrows a client query to the right product family, but the server one
+    # becomes "Microsoft server operating system", which matches every release and would hand back the
+    # newest Server LCU no matter how old this media is.
+    if ($Server -and -not $FeatureName) {
+        Write-HostTimestamp "Build $ImageBuild is not a Windows Server release this script recognises, so there is no catalog query that can identify it." -ForegroundColor Red
+        Write-HostTimestamp '  Searching on the product name alone would return an update for a different Server release, which DISM would refuse to apply, so this run stops here.' -ForegroundColor Red
+        Write-HostTimestamp '  Supply the packages yourself with -UpdatePath, or use -SkipUpdates to repack the media unchanged.' -ForegroundColor Yellow
+        Stop-Transcript | Out-Null
+        exit 1
+    }
     if (-not $FeatureName) {
         Write-HostTimestamp 'Could not determine the feature-update name from the image, so the catalog search may be less precise.' -ForegroundColor Yellow
     }
@@ -3922,8 +3950,9 @@ else {
         $Exclude = '(?i)\.net|dynamic update'
         $script:LcuUpToDate = $null
         $script:Lcu = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate)
-        if (-not $script:Lcu -and -not $script:LcuUpToDate) {
-            # Retry with a looser query (some releases omit the "Version xxHx" token in the title).
+        if (-not $script:Lcu -and -not $script:LcuUpToDate -and -not $Server) {
+            # Retry with a looser query (some releases omit the "Version xxHx" token in the title). Server
+            # media is excluded because its product name without the version matches every Server release.
             $Query2 = "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems"
             Write-HostTimestamp "  Retrying with a broader query: $Query2" -ForegroundColor Yellow
             $script:Lcu = Get-LatestCatalogPackage -Query $Query2 -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate)
