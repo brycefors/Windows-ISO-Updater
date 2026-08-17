@@ -106,20 +106,33 @@ function Write-Detail {
     if (-not $Quiet) { Write-Host "        $Message" -ForegroundColor DarkGray }
 }
 
-# Follows a Microsoft fwlink to whatever it points at today, without pulling the payload down.
+# Follows a Microsoft fwlink to whatever it points at today, without pulling the payload down. A retired
+# link still answers, so $Failure is set only when the request never completed at all, which is a network
+# problem rather than anything to do with the link.
 function Resolve-RedirectUrl {
-    param([Parameter(Mandatory)][string]$Url)
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [ref]$Failure
+    )
 
-    try {
-        $Response = Invoke-WebRequest -Uri $Url -Method Head -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop
-        return $Response.BaseResponse.ResponseUri.AbsoluteUri
+    if ($Failure) { $Failure.Value = $null }
+    $LastError = $null
+    # Some CDN nodes reject HEAD outright, so GET is tried before the link is called dead.
+    foreach ($Method in 'Head', 'Get') {
+        try {
+            $Response = Invoke-WebRequest -Uri $Url -Method $Method -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop
+            return $Response.BaseResponse.ResponseUri.AbsoluteUri
+        }
+        catch {
+            $LastError = $_.Exception.Message
+            # A server that rejects the request still follows the redirect first, so the failed response knows where it landed.
+            $Landed = $null
+            try { $Landed = $_.Exception.Response.ResponseUri.AbsoluteUri } catch { }
+            if ($Landed -and $Landed -ne $Url) { return $Landed }
+        }
     }
-    catch {
-        # A server that rejects HEAD still follows the redirect first, so the failed response knows where it landed.
-        $Landed = $null
-        try { $Landed = $_.Exception.Response.ResponseUri.AbsoluteUri } catch { }
-        return $Landed
-    }
+    if ($Failure) { $Failure.Value = $LastError }
+    return $null
 }
 
 # --- Borrow the real functions from the script under test ---
@@ -315,9 +328,15 @@ try {
             continue
         }
 
-        $Final = Resolve-RedirectUrl -Url $Url
+        $Failure = $null
+        $Final = Resolve-RedirectUrl -Url $Url -Failure ([ref]$Failure)
         if (-not $Final) {
-            Add-Result -Area 'MCT' -Status 'Fail' -Message "The fwlink did not resolve: $Url" -Action 'Microsoft retired this fwlink. Find the current Media Creation Tool link on the software-download page and update Get-IsoViaMct. -UseMct is broken until then.'
+            if ($Failure) {
+                Add-Result -Area 'MCT' -Status 'Warn' -Message "Could not reach the fwlink: $Failure" -Action 'The request never completed, so this says nothing about the link itself. A retired fwlink still answers. Check for a proxy, a firewall or a rate limit, and run the check again.'
+            }
+            else {
+                Add-Result -Area 'MCT' -Status 'Fail' -Message "The fwlink answered but pointed nowhere: $Url" -Action 'Microsoft retired this fwlink. Find the current Media Creation Tool link on the software-download page and update Get-IsoViaMct. -UseMct is broken until then.'
+            }
             continue
         }
         Write-Detail "-> $Final"
@@ -359,9 +378,13 @@ try {
     }
     else {
         Write-Detail $AdkSetupUrl
-        $Final = Resolve-RedirectUrl -Url $AdkSetupUrl
-        if (-not $Final) {
-            Add-Result -Area 'ADK' -Status 'Fail' -Message 'The ADK fwlink did not resolve.' -Action 'Microsoft rotates the ADK fwlink with each release. Take the current "Download the Windows ADK" link from Microsoft Learn and update the -AdkSetupUrl default. Only -InstallAdk is affected, the symbol-server oscdimg path still works.'
+        $Failure = $null
+        $Final = Resolve-RedirectUrl -Url $AdkSetupUrl -Failure ([ref]$Failure)
+        if ($Failure) {
+            Add-Result -Area 'ADK' -Status 'Warn' -Message "Could not reach the ADK fwlink: $Failure" -Action 'The request never completed, so this says nothing about the link itself. A retired fwlink still answers. Check for a proxy, a firewall or a rate limit, and run the check again.'
+        }
+        elseif (-not $Final) {
+            Add-Result -Area 'ADK' -Status 'Fail' -Message 'The ADK fwlink answered but pointed nowhere.' -Action 'Microsoft rotates the ADK fwlink with each release. Take the current "Download the Windows ADK" link from Microsoft Learn and update the -AdkSetupUrl default. Only -InstallAdk is affected, the symbol-server oscdimg path still works.'
         }
         else {
             Write-Detail "-> $Final"
