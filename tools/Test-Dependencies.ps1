@@ -209,7 +209,9 @@ function Write-HostTimestamp {
     Write-Detail $Message
 }
 # Test-FidoScript honours this pin when it is set, and the script leaves it empty by default.
+# Keep the script's default in scope so the injected helper sees the same contract, even though this harness does not run Fido itself.
 $FidoSha256 = ''
+$null = $FidoSha256
 
 # The extract is nothing but function definitions, so materialising it defines them and runs no script logic.
 $Extract = ($Borrowed | ForEach-Object { Get-ScriptFunctionText -Name $_ }) -join "`r`n`r`n"
