@@ -2,6 +2,73 @@
 
 # Reference
 
+## The Run at a Glance
+
+Everything cheap happens first, so a run that has nothing to do costs a couple of minutes rather than an hour. Amber is a decision, red stops the run, green finishes it.
+
+```mermaid
+flowchart TD
+    classDef gate fill:#fff4ce,stroke:#c19c00,color:#201f1e
+    classDef stop fill:#fde7e9,stroke:#c50f1f,color:#201f1e
+    classDef done fill:#dff6dd,stroke:#107c10,color:#201f1e
+    classDef work fill:#e5f1fb,stroke:#0f6cbd,color:#201f1e
+
+    Start(["Windows-ISO-Updater.ps1"]) --> Admin{"Elevated, on Windows 10 or later?"}
+    Admin -- "no" --> Halt1["Relaunch elevated, or stop"]
+    Admin -- "yes" --> Sched{"-RegisterScheduledTask?"}
+    Sched -- "yes" --> Task["Register or remove the task, exit 0"]
+    Sched -- "no" --> Mutex{"Another run holding this work folder?"}
+    Mutex -- "yes" --> Halt2["Stop, one run per work folder"]
+
+    subgraph Preflight ["Pre-flight, nothing downloaded yet"]
+        Sweep["Sweep an interrupted run, discard stale DISM mounts"] --> Disk{"50 GB free on the work drive?"}
+        Disk -- "no" --> Halt3["Stop, pick a bigger drive with -WorkPath"]
+        Disk -- "yes" --> Validate["Validate -UnattendPath, -DriverPath and -ExtraFilesPath, parsed and never executed"]
+        Validate --> Confirm{"Confirmed, or -Force?"}
+        Confirm -- "no" --> Halt4["Cancelled"]
+        Confirm -- "yes" --> Oscdimg["Locate oscdimg.exe, symbol server or ADK, fail fast if missing"]
+        Oscdimg --> Iso["Obtain the ISO: -IsoPath, the download folder, or opt in with -UseFido or -UseMct"]
+    end
+
+    subgraph Decide ["Is there anything to do?"]
+        Stamp["Compare the last-build stamp: source ISO hash, build-affecting parameters, newest KBs in the catalog"] --> Changed{"Anything changed?"}
+        Changed -- "no" --> UpToDate["Already current, exit 0"]
+        Changed -- "yes" --> CheckOnly{"-CheckOnly?"}
+        CheckOnly -- "yes" --> Needed["Report that a rebuild is due, exit 10"]
+    end
+
+    subgraph Long ["The long part"]
+        Extract["Extract the ISO with robocopy, convert install.esd to install.wim"] --> Identify["Read build, UBR, architecture and editions out of install.wim"]
+        Identify --> Age{"Build 10240 or newer, and a recognised release?"}
+        Age -- "no" --> Halt5["Stop, DISM cannot service it and no cumulative update exists. -SkipUpdates still repacks it"]
+        Age -- "yes" --> Catalog["Fetch the LCU, the .NET update, the Setup DU and the Safe OS DU from the Microsoft Update Catalog"]
+        Catalog --> Already{"Image already at that build?"}
+        Already -- "yes" --> Skip["Skip the download and the integration"]
+        Already -- "no" --> Editions["Pick the editions to keep and the ones to service"]
+        Skip --> Editions
+        Editions --> Service["Mount and service each image: install.wim, boot.wim, optionally winre.wim, then any drivers"]
+        Service --> Setup["Expand the Setup DU over sources, copy setup.exe and the boot manager out of boot.wim"]
+        Setup --> Shrink["StartComponentCleanup /ResetBase, strip the residue, re-export to reclaim the space"]
+    end
+
+    subgraph Finalise ["Finish the media"]
+        Files["Copy autounattend.xml, then -ExtraFilesPath, onto the media"] --> Tattoo["Write the WISO-Build folder: the build report plus a copy of the script"]
+        Tattoo --> Oscd2["oscdimg: BIOS and UEFI boot sectors, UDF, volume label"]
+        Oscd2 --> Clean["Delete the working files, write the new stamp, -AutoClean old downloads"]
+        Clean --> Finish(["Finished ISO plus a timing summary"])
+    end
+
+    Mutex -- "no" --> Sweep
+    Iso --> Stamp
+    CheckOnly -- "no" --> Extract
+    Shrink --> Files
+
+    class Admin,Sched,Mutex,Disk,Confirm,Changed,CheckOnly,Age,Already gate
+    class Halt1,Halt2,Halt3,Halt4,Halt5 stop
+    class Task,UpToDate,Needed,Finish done
+    class Sweep,Validate,Oscdimg,Iso,Stamp,Extract,Identify,Catalog,Skip,Editions,Service,Setup,Shrink,Files,Tattoo,Oscd2,Clean work
+```
+
 ## What the Script Does
 
 1.  **Locate `oscdimg.exe`.** Downloads a standalone copy from Microsoft's symbol server if it is not already installed (or installs the ADK with `-InstallAdk`), and otherwise fails fast so the build cannot get most of the way through and then be unable to recompile the ISO.
