@@ -106,6 +106,20 @@ function Write-Detail {
     if (-not $Quiet) { Write-Host "        $Message" -ForegroundColor DarkGray }
 }
 
+# Where a response actually came from, after redirects. Windows PowerShell hands back an HttpWebResponse
+# with a ResponseUri, while PowerShell 7 hands back an HttpResponseMessage that has no such property and
+# tracks the final hop on RequestMessage instead.
+function Get-FinalUri {
+    param($Response)
+
+    if (-not $Response) { return $null }
+    $Uri = $null
+    try { $Uri = $Response.ResponseUri } catch { }
+    if (-not $Uri) { try { $Uri = $Response.RequestMessage.RequestUri } catch { } }
+    if ($Uri) { return $Uri.AbsoluteUri }
+    return $null
+}
+
 # Follows a Microsoft fwlink to whatever it points at today, without pulling the payload down. A retired
 # link still answers, so $Failure is set only when the request never completed at all, which is a network
 # problem rather than anything to do with the link.
@@ -121,13 +135,14 @@ function Resolve-RedirectUrl {
     foreach ($Method in 'Head', 'Get') {
         try {
             $Response = Invoke-WebRequest -Uri $Url -Method $Method -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop
-            return $Response.BaseResponse.ResponseUri.AbsoluteUri
+            $Final = Get-FinalUri -Response $Response.BaseResponse
+            if ($Final) { return $Final }
+            $LastError = 'The response carried no final URI.'
         }
         catch {
             $LastError = $_.Exception.Message
             # A server that rejects the request still follows the redirect first, so the failed response knows where it landed.
-            $Landed = $null
-            try { $Landed = $_.Exception.Response.ResponseUri.AbsoluteUri } catch { }
+            $Landed = Get-FinalUri -Response $_.Exception.Response
             if ($Landed -and $Landed -ne $Url) { return $Landed }
         }
     }
