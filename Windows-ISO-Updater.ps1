@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.28   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.29   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -253,7 +253,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.28'
+$ScriptVersion = '2026.08.16.29'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -3784,9 +3784,14 @@ $BootWim = Join-Path $ExtractDir 'sources\boot.wim'
 # survive into the final ISO are exported - each one costs several minutes, so exporting the rest just to
 # delete them later is wasted time.
 $script:EsdPreTrimmed = $false
+# The install.wim that gets built here holds only the kept editions, so the ones the source media shipped
+# are recorded before the export or nothing downstream can report them.
+$script:SourceMediaEditions = @()
+$script:SourceMediaDropped = @()
 if (-not (Test-Path -LiteralPath $InstallWimExtracted) -and (Test-Path -LiteralPath $InstallEsdExtracted)) {
     Invoke-Task -Description 'The media uses install.esd - converting it to an editable install.wim...' -ScriptBlock {
         $Images = @(Get-WindowsImage -ImagePath $InstallEsdExtracted -ErrorAction Stop)
+        $script:SourceMediaEditions = @($Images | ForEach-Object { "[$($_.ImageIndex)] $($_.ImageName)" })
         $Wanted = @($Images.ImageIndex)
         if ($KeepEditions -and $KeepEditions.Count -gt 0) {
             $EsdUnmatched = $null
@@ -3802,6 +3807,7 @@ if (-not (Test-Path -LiteralPath $InstallWimExtracted) -and (Test-Path -LiteralP
         if ($Skipped.Count -gt 0) {
             Write-HostTimestamp "  Not exporting $($Skipped.Count) edition(s) that would only be removed again: $(($Skipped.ImageName) -join ', ')" -ForegroundColor Yellow
             $script:EsdPreTrimmed = $true
+            $script:SourceMediaDropped = @($Skipped | ForEach-Object { "$($_.ImageName)" })
         }
         foreach ($Want in $Wanted) {
             $Img = $Images | Where-Object { [int]$_.ImageIndex -eq [int]$Want } | Select-Object -First 1
@@ -4459,10 +4465,11 @@ if (-not $SkipTattoo) {
     Invoke-Task -Description 'Writing the build record onto the media...' -ScriptBlock {
         $SourceItem = Get-Item -LiteralPath $ResolvedIso -ErrorAction SilentlyContinue
         # Source indexes, because these are the editions as the ISO shipped them. Re-exporting renumbers
-        # whatever survives, which is why the kept list is by name.
-        $SourceEditions = @($InstallImages | ForEach-Object { "[$($_.ImageIndex)] $($_.ImageName)" })
+        # whatever survives, which is why the kept list is by name. An install.esd was already trimmed
+        # during its conversion, so its pre-trim lists are the only record of what the media carried.
+        $SourceEditions = if ($script:SourceMediaEditions.Count -gt 0) { @($script:SourceMediaEditions) } else { @($InstallImages | ForEach-Object { "[$($_.ImageIndex)] $($_.ImageName)" }) }
         $KeptNames      = @($InstallImages | Where-Object { $KeepIndexes -contains [int]$_.ImageIndex } | ForEach-Object { "$($_.ImageName)" })
-        $RemovedNames   = @($InstallImages | Where-Object { $KeepIndexes -notcontains [int]$_.ImageIndex } | ForEach-Object { "$($_.ImageName)" })
+        $RemovedNames   = @($script:SourceMediaDropped) + @($InstallImages | Where-Object { $KeepIndexes -notcontains [int]$_.ImageIndex } | ForEach-Object { "$($_.ImageName)" })
         $UnpatchedNames = @($InstallImages | Where-Object { ($KeepIndexes -contains [int]$_.ImageIndex) -and ($ServiceIndexes -notcontains [int]$_.ImageIndex) } | ForEach-Object { "$($_.ImageName)" })
         $Failed         = @($script:TattooServicing | Where-Object { $_.Result -eq 'Failed' })
 
