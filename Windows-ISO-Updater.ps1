@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.26   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.16.27   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 # --- SCRIPT OVERVIEW ---
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -249,7 +249,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.26'
+$ScriptVersion = '2026.08.16.27'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -3917,8 +3917,9 @@ $InstallImages = @(Get-WindowsImage -ImagePath $InstallWimExtracted -ErrorAction
 # Which editions to KEEP in the final ISO.
 #   * -KeepEditions <list>  : keep exactly what the user named (highest precedence).
 #   * -KeepAllEditions      : keep every edition in the media.
-#   * default               : keep only the single top-ranked edition (Pro over Home on client media,
-#                             Standard over Datacenter on Server) to speed up servicing and shrink the ISO.
+#   * default               : keep Enterprise, Pro and Home on client media (whichever of them it carries),
+#                             or the most upgradeable single edition on Server, to speed up servicing and
+#                             shrink the ISO.
 $KeepIndexes = @($InstallImages.ImageIndex)
 if ($script:EsdPreTrimmed) {
     # The ESD conversion already exported only the editions to keep, and dropping editions renumbers the

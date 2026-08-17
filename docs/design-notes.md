@@ -18,6 +18,18 @@ There are two more wins that come along for free.
 
 **The ISO carries only the editions you actually deploy.** Retail media ships eleven or so editions you will never install, and all of them are paid for in size and in the length of the edition-picker during Setup. By default the build keeps Enterprise, Pro and Home on client media (whichever of the three the media carries), or a single edition on Server, and `-KeepEditions` lets you name exactly what stays. Between that and the component-store cleanup, the output is usually smaller than the source despite carrying months of extra updates.
 
+## Why Build From Media That Is Already Current
+
+Sometimes the answer comes back that the image already has this month's cumulative update, and the script says so and skips it. That is not a wasted run. The cumulative update is the slowest thing a build does, but it is a long way from being most of what a build does.
+
+**Setup and recovery are patched separately from the OS.** Microsoft publishes the Setup Dynamic Update and the Safe OS Dynamic Update to the Update Catalog rather than into the media, on their own schedule, so no ISO is ever current on them no matter how recently it was cut. The Setup DU refreshes the loose Windows Setup files in the media's `sources` folder, and on Windows 11 24H2 and later, media without it can stop at a bare *"Windows 11 installation has failed"* before it gets anywhere near installing. The Safe OS DU is the only supported way to patch `winre.wim`, which the cumulative update applied to `install.wim` does not touch at all, so a machine deployed from perfectly patched media routinely ends up with a recovery environment months behind the system it exists to repair. `-ServiceWinRE` closes that gap.
+
+**.NET runs on its own calendar.** The .NET Framework cumulative update is a separate package with its own release cadence, so media that is current on the OS update is usually still behind on .NET.
+
+**Most of the run is not updates at all.** The `install.esd` conversion and the edition trimming above happen at any patch level, and so does everything the build exists to put on the media: drivers with `-DriverPath`, the answer file with `-UnattendPath`, your own files with `-ExtraFilesPath`, and the [build record](reference.md#the-build-record-on-the-iso) that tells whoever finds the ISO a year from now exactly what went into it and what it was made from. Those are the reasons to build a deployment ISO in the first place. The updates are just the part that used to cost an afternoon.
+
+**Asking is cheap, and the answer expires.** Deciding that an image is already patched costs a catalog lookup and a read-only mount rather than a servicing pass, and [`-CheckOnly`](scheduled-runs.md#when-a-run-decides-to-rebuild) answers the question without building anything at all. So the useful way to read a run that skips the update is not "there was no point", it is "the media is still good this month". Point a scheduled task at it and the same run that costs minutes today is the one that catches the next Patch Tuesday on its own, which is the whole reason the rebuild-avoidance model exists.
+
 ## Why the ISO Has to Come From You
 
 The script does not download a Windows ISO on its own. You pass one with `-IsoPath` or drop one into the download folder, and if neither is there the run stops and tells you so. The automatic download exists, but it is opt-in behind `-UseFido`, and that is deliberate.
