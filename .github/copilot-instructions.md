@@ -11,6 +11,27 @@ pins (oscdimg hash, Fido, the MCT and ADK fwlinks, the Update Catalog HTML) are 
 
 There is no build, no test suite, and no package manifest. The script is the product.
 
+## Finding your way around, read this before searching
+
+`Windows-ISO-Updater.ps1` is around 5,100 lines, roughly 80k tokens. Never read it end to end, and do not
+read overlapping chunks hoping to land on the right part.
+
+Start with the one search that returns the whole map:
+
+- `grep_search`, regex `^\s*#region |^function `, include pattern `Windows-ISO-Updater.ps1`
+
+That is about 130 lines and costs roughly 1k tokens, and it lists every region and every function in file
+order. Pick the target off that map, then read a bounded range around it. One map plus one targeted read
+beats five exploratory searches and is 60 times cheaper than reading the whole file.
+
+Also worth doing:
+
+- Check repository memory first. It already records the traps, the reasons behind past decisions, and the
+  shape of the awkward helpers. Add to it whenever something takes more than one attempt to get right.
+- Prefer `grep_search` with an include pattern over semantic search. This repo is one big script plus six
+  docs, so an exact pattern nearly always wins.
+- Do not re-read a region you have already read in this conversation.
+
 ## Writing style, applies to everything
 
 **Never use em dashes or semicolons in prose.** This covers documentation, code comments, commit
@@ -26,6 +47,11 @@ samples inside comments exactly as they are.
 Comments explain *why*. Write one short line stating what the code cannot show on its own. Do not
 restate the next line, do not narrate the change for a reviewer, and do not add doc comments to code you
 did not touch.
+
+The same economy applies to chat replies. Answer the question or state the outcome and stop. Do not recap
+edits that are already visible in the diff, do not restate the plan back, and do not list every test that
+passed. Explaining a decision earns its words only when the choice was not obvious, for example a tradeoff
+taken, a trap avoided, or a root cause worth remembering.
 
 ## Hard constraints
 
@@ -116,7 +142,23 @@ Keep that ordering. Anything that forces extraction before the decision defeats 
 Extract the functions under test from the AST into a temp script, stub the external calls, run it with
 `powershell.exe -NoProfile`, then delete the temp file. When testing scheduled-task code,
 `Import-Module ScheduledTasks` *before* defining stubs, otherwise module auto-loading shadows them and
-the real cmdlets run.
+the real cmdlets run. The same applies to `Import-Module Dism` before stubbing `Mount-WindowsImage` or
+`Get-WindowsImage`.
+
+Write the harness with the create-file tool, never as a here-string inside a terminal command. A
+here-string sent through the terminal is truncated at its first line and the command then runs twice.
+
+Validate an edit with one command instead of three round trips:
+
+```powershell
+$p = 'Windows-ISO-Updater.ps1'; $e = $null
+[System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $p), [ref]$null, [ref]$e) | Out-Null
+if ($e) { $e | ForEach-Object { "$($_.Extent.StartLineNumber): $($_.Message)" } } else { 'No parse errors' }
+$t = Get-Content $p
+'regions: {0} / endregions: {1}' -f ($t | Select-String '^\s*#region').Count, ($t | Select-String '^\s*#endregion').Count
+```
+
+Unbalanced regions mean an edit landed inside the wrong block, which parses fine and folds wrong.
 
 ## Answer files in `Examples/`
 
@@ -136,12 +178,20 @@ change. Regenerating from the embedded URL discards them.
 
 ## Documentation
 
-`README.md` is the front door and stays skimmable. Detail lives in `docs/`, split by
-`usage.md`, `parameters.md`, `reference.md`, `scheduled-runs.md`, `design-notes.md`, and
-`unattended-installs.md`. Each doc ends with a `[← Back to README](../README.md)` link, paths and
-parameters are in backticks, and parameter listings are tables. When a parameter changes, update
-`parameters.md` and the `HelpMessage` in the same pass. Do not create new markdown files to describe
-changes you just made.
+`README.md` is the front door and stays skimmable. Detail lives in `docs/`. Open the one file that owns
+the subject rather than reading the folder to work out where something goes.
+
+| File | Owns |
+| --- | --- |
+| `usage.md` | How to run it, worked examples, scenario walkthroughs |
+| `parameters.md` | The parameter tables. Change one and update its `HelpMessage` in the same pass |
+| `reference.md` | Flow diagram, folder layout, logging, disk space, the build record written onto the ISO |
+| `scheduled-runs.md` | Task registration, build stamps, rebuild decisions, `-AutoClean` |
+| `design-notes.md` | Why something works the way it does, tradeoffs taken, alternatives rejected |
+| `unattended-installs.md` | The `Examples/` answer files and how to use them |
+
+Each doc ends with a `[← Back to README](../README.md)` link, paths and parameters are in backticks, and
+parameter listings are tables. Do not create new markdown files to describe changes you just made.
 
 Commit messages are a single imperative sentence, for example "Add logging for Microsoft Update Catalog
 query results".
