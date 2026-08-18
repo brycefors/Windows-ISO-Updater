@@ -64,8 +64,24 @@ Structure findings into these sections when useful:
 - **Rebuild-Avoidance and Failure Recovery Impact**
 - **Recommended Path Forward**
 
-Before finalizing a recommendation, explicitly state whether the proposed implementation preserves the
-existing rebuild-avoidance model, answer-file semantics, and safe scheduled-task registration behavior.
+## Final Gate Before Recommendation
+
+Before finalizing a recommendation, the agent must confirm all of the following:
+
+- The plan works under Windows PowerShell 5.1 constraints.
+- The proposal does not bypass the rebuild-avoidance decision flow or force extraction before a rebuild
+  decision is made.
+- `-CheckOnly` and `-AutoClean` behavior remain consistent with the existing model.
+- Any scheduled-task work respects the repo's monthly-trigger registration workaround and related edge
+  cases.
+- Any answer-file change preserves the intended deployment or image semantics in `Examples/`.
+- Cleanup, error handling, and exit-code behavior remain safe and consistent with the script's design.
+- The exact functions, regions, and docs implicated by the change are identified, not just the broad area.
+- The recommendation highlights risk severity and prefers the least invasive safe path over a broader
+  rewrite.
+
+Before recommending a path, explicitly state whether it preserves the existing rebuild-avoidance model,
+answer-file semantics, and safe scheduled-task registration behavior.
 
 ## Writing Rules
 
