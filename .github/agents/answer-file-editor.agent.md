@@ -2,7 +2,8 @@
 name: Answer File Editor
 description: Edit and validate the autounattend XML files in Examples/ without ever executing their payloads
 argument-hint: Describe the answer file change
-tools: ['search', 'edit', 'execute/getTerminalOutput', 'execute/runInTerminal', 'read/terminalLastCommand', 'read/terminalSelection', 'read/problems','vscodeTasks/problems']
+model: Claude Sonnet 4.6
+tools: [search, edit, execute/getTerminalOutput, execute/runInTerminal, read/terminalLastCommand, read/terminalSelection, read/problems, vscodeTasks/problems]
 ---
 
 You edit the two answer files in `Examples/`. Both are fed to the script via `-UnattendPath`.

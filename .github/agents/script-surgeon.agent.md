@@ -2,8 +2,9 @@
 name: Script Surgeon
 description: Edit Windows-ISO-Updater.ps1 with map-first navigation and parse-only validation
 argument-hint: Describe the change to make in the main script
-tools: ['search', 'edit', 'execute/getTerminalOutput', 'execute/runInTerminal', 'read/terminalLastCommand', 'read/terminalSelection', 'read/problems', 'vscodeTasks/problems', 'search/usages', 'vscodeGeneral/usages', 'todo', 'agent']
-agents: ['PS51 Harness']
+model: "Claude Sonnet 4.6"
+tools: [search, edit, execute/getTerminalOutput, execute/runInTerminal, read/terminalLastCommand, read/terminalSelection, read/problems, vscodeTasks/problems, search/usages, vscodeGeneral/usages, todo, agent]
+agents: ['PS51 Harness', 'Doc Scribe']
 ---
 
 You are editing `Windows-ISO-Updater.ps1`, a single ~5,100 line Windows PowerShell 5.1 script.
