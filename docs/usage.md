@@ -47,11 +47,11 @@ A few differences worth knowing:
 - The release is read from the image, so there is no `-Release` to set. Server 2022 and newer are listed
   in the Microsoft Update Catalog as *"Microsoft server operating system version 21H2/23H2/24H2"* rather
   than by year, and the script builds the right query for you.
-- Server media keeps a **single** edition by default, not the two that client media keeps, and the pick is
-  **Standard (Desktop Experience)**, not Datacenter. An installed Standard server can be upgraded to
-  Datacenter in place with `DISM /Set-Edition`, but Datacenter can never be downgraded, so Standard is the
+- Server media keeps a **single** edition by default, not the up to three tiers that client media keeps, and
+  the pick is **Standard (Desktop Experience)**, not Datacenter. An installed Standard server can be upgraded
+  to Datacenter in place with `DISM /Set-Edition`, but Datacenter can never be downgraded, so Standard is the
   edition that leaves both options open. Use `-KeepEditions` to pick Datacenter or a Server Core image
-  instead, or `-KeepAllEditions` to keep all four.
+  instead, or `-KeepAllEditions` to keep every edition the media carries.
 - Microsoft only publishes a **Setup Dynamic Update** for Server 2025 and newer, so on older Server media
   the script reports that none was found and refreshes the media Setup files from `boot.wim` alone.
 - **A mismatch between the media and the switch is a fatal error, both ways round.** The script reads the
@@ -157,7 +157,7 @@ See [Scheduled Runs](scheduled-runs.md).
 
 A Windows ISO's `install.wim` usually contains many editions (Home, Home N, Pro, Education, etc.). **By default the script keeps Enterprise, Pro and Home** and removes the rest, which speeds up servicing and produces a smaller ISO. Only the ones the media actually carries are kept, so typical consumer media gives you Pro and Home while business and VL media give you Enterprise and Pro. If the media has none of the three (Education-only media, for example) the highest edition present is kept. On Server media the rule is different: a single edition, the *most upgradeable* one, Standard over Datacenter, because Standard can be upgraded in place but Datacenter cannot be downgraded. Use `-KeepAllEditions` to keep every edition, or `-KeepEditions` to choose exactly which ones to keep.
 
-Every kept edition is serviced, so a two-edition build takes roughly twice as long as a one-edition build. Pass `-KeepEditions "Windows 11 Pro"` if you only need one and want the shorter run.
+Every kept edition is serviced by default, so a two-edition build takes roughly twice as long as a one-edition build. Pass `-KeepEditions "Windows 11 Pro"` if you only need one and want the shorter run. If you also narrow `-Edition` to a single one, only that edition is serviced, so any other edition you kept ships unpatched and the script warns about it.
 
 ```shell
 :: See what editions are inside the ISO first (downloads/uses the ISO, then just lists and exits)
