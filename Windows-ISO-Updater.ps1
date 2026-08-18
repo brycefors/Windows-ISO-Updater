@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.17.6   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.18.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -253,7 +253,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.17.6'
+$ScriptVersion = '2026.08.18.1'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2413,8 +2413,7 @@ function Get-EditionShortName {
     $n = "$Name".ToLower()
     # Server names carry no "Server Core" marker: the bare name IS Server Core, the other is the GUI.
     if ($n -match 'datacenter|standard') {
-        $Tier = if ($n -match 'datacenter') { 'Datacenter' } else { 'Standard' }
-        return $Tier + $(if ($n -match 'desktop experience') { 'GUI' } else { 'Core' })
+        if ($n -match 'datacenter') { return 'DC' } else { return 'Std' }
     }
     if ($n -match 'enterprise') { return 'Ent' }
     if ($n -match 'education') { return 'Edu' }
@@ -2426,7 +2425,7 @@ function Get-EditionShortName {
 
 # Builds the default output ISO name, e.g. Win11_Pro_x64_26100.4061_20260815-1332.iso. The build/UBR comes
 # from the serviced image when available (that is the only place the post-update revision is known),
-# otherwise from the source image's version. Several kept editions collapse to "Multi".
+# otherwise from the source image's version. Multiple kept editions are joined into a compound tag such as EntPro or StdDC.
 function Get-DefaultIsoName {
     param(
         [object[]]$Images,
@@ -2438,7 +2437,7 @@ function Get-DefaultIsoName {
 
     $Kept = @($Images | Where-Object { $Indexes -contains [int]$_.ImageIndex })
     $Tags = @($Kept | ForEach-Object { Get-EditionShortName $_.ImageName } | Select-Object -Unique)
-    $EditionTag = if ($Tags.Count -eq 1) { $Tags[0] } elseif ($Tags.Count -gt 1) { 'Multi' } else { 'Windows' }
+    $EditionTag = if ($Tags.Count -eq 1) { $Tags[0] } elseif ($Tags.Count -gt 1) { $Tags -join '' } else { 'Windows' }
 
     $BuildUbr = $null
     foreach ($Candidate in @($BuildString, $FallbackVersion)) {
