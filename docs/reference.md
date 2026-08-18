@@ -146,4 +146,14 @@ Dropping your own `.iso` into `Downloads\` is all it takes to skip the Microsoft
 
 ## Logging
 
-Each run writes a timestamped transcript to `<WorkPath>\Logs` (or `-LogPath`) named `Windows-ISO-Updater_<date>_<time>.log`. The 30 most recent logs are kept and older ones are pruned automatically.
+Each run writes two files to `<WorkPath>\Logs` (or `-LogPath`), both stamped with the date and time it started. The 30 most recent of each are kept and older ones are pruned automatically.
+
+| File | What it is |
+| --- | --- |
+| `Windows-ISO-Updater_<date>_<time>.log` | The log to read, written in [CMTrace](https://learn.microsoft.com/en-us/mem/configmgr/core/support/cmtrace) format |
+| `Windows-ISO-Updater_<date>_<time>_console.txt` | The raw PowerShell transcript of the same run |
+
+Open the `.log` in CMTrace or OneTrace and you get the usual columns. Severity comes from the colour the script already prints in, so anything red is logged as an error and anything yellow as a warning, which makes CMTrace's error and warning highlighting match what you would have seen on screen. The component column is the name of the step that was running, for example `Mounting the install image`, so filtering by component narrows a long build down to one phase. Each entry also records the line of the script that wrote it.
+
+The `_console.txt` beside it is the plain transcript. It is worth opening when a run has died in a way the script did not expect, because it also holds the confirmation prompts, the plan the script printed before starting, and any raw error text that never made it to a log call.
+

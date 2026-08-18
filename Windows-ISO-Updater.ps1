@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.17.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.17.4   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -253,7 +253,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.17.3'
+$ScriptVersion = '2026.08.17.4'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -375,14 +375,25 @@ try {
 catch {
     Write-Warning "Could not use the log folder '$LogDirWanted': $($_.Exception.Message). Falling back to the script folder."
 }
-$LogFile = Join-Path -Path $LogDir -ChildPath "Windows-ISO-Updater_$(Get-Date -Format 'yyyy-MM-dd_HH-mm-ss').log"
-Start-Transcript -Path $LogFile | Out-Null
+$LogStamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
+# The .log is the one to open, written in the format CMTrace parses. The transcript beside it keeps the raw
+# console record, which still holds the prompts, the plan and any error text that never reaches a log call.
+$LogFile        = Join-Path -Path $LogDir -ChildPath "Windows-ISO-Updater_$LogStamp.log"
+$TranscriptFile = Join-Path -Path $LogDir -ChildPath "Windows-ISO-Updater_${LogStamp}_console.txt"
+Start-Transcript -Path $TranscriptFile | Out-Null
 
-# Rotate logs: keep only the 30 most recent, delete the rest
-Get-ChildItem -Path $LogDir -Filter 'Windows-ISO-Updater_*.log' -File |
-    Sort-Object -Property LastWriteTime -Descending |
-    Select-Object -Skip 30 |
-    Remove-Item -Force -ErrorAction SilentlyContinue
+# Read by Write-CMTraceLog, which is defined further down but has to know where to write before any caller runs.
+$script:CMTraceLog    = $LogFile
+$script:LogComponent  = 'Startup'
+$script:LogScriptName = if ($script:ScriptPath) { Split-Path -Leaf $script:ScriptPath } else { 'Windows-ISO-Updater.ps1' }
+
+# Rotate logs: keep only the 30 most recent of each, delete the rest
+foreach ($LogPattern in 'Windows-ISO-Updater_*.log', 'Windows-ISO-Updater_*_console.txt') {
+    Get-ChildItem -Path $LogDir -Filter $LogPattern -File |
+        Sort-Object -Property LastWriteTime -Descending |
+        Select-Object -Skip 30 |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+}
 
 $ProgressPreference = 'SilentlyContinue'
 $LineBreakCharacter = '-'
@@ -425,6 +436,35 @@ function Format-Duration {
     return ('{0:N1}s' -f $Duration.TotalSeconds)
 }
 
+function Write-CMTraceLog {
+    param(
+        [string]$Message,
+        [ValidateRange(1, 3)][int]$Type = 1,
+        [string]$Component = $script:LogComponent,
+        [int]$Line = 0
+    )
+
+    if (-not $script:CMTraceLog) { return }
+    try {
+        $Now = Get-Date
+        # CMTrace reads the offset as minutes behind UTC, so a machine at UTC-5 writes +300.
+        $Bias = [int](-[System.TimeZoneInfo]::Local.GetUtcOffset($Now).TotalMinutes)
+        $Entry = '<![LOG[{0}]LOG]!><time="{1}{2}{3:000}" date="{4}" component="{5}" context="" type="{6}" thread="{7}" file="{8}:{9}">' -f
+            "$Message".Replace(']LOG]!>', ']LOG] !>'),
+            $Now.ToString('HH:mm:ss.fff'),
+            $(if ($Bias -ge 0) { '+' } else { '-' }),
+            [math]::Abs($Bias),
+            $Now.ToString('MM-dd-yyyy'),
+            "$Component".Replace('"', "'"),
+            $Type,
+            $PID,
+            $script:LogScriptName,
+            $Line
+        [System.IO.File]::AppendAllText($script:CMTraceLog, $Entry + "`r`n", [System.Text.Encoding]::UTF8)
+    }
+    catch { }   # a log that cannot be written must never be the reason a build stops
+}
+
 function Write-HostTimestamp {
     param (
         [string]$Message,
@@ -434,6 +474,13 @@ function Write-HostTimestamp {
     # Get the current timestamp and combine it with the user's message.
     # The output is then sent to the console using Write-Host with the specified color.
     Write-Host "$(Get-TimeStamp) $Message" -ForegroundColor $ForegroundColor
+    # Red and Yellow already mean fatal and warning throughout this script, so CMTrace's severity comes free.
+    $LogType = switch ("$ForegroundColor") {
+        'Red' { 3 }
+        'Yellow' { 2 }
+        default { 1 }
+    }
+    Write-CMTraceLog -Message $Message -Type $LogType -Line $MyInvocation.ScriptLineNumber
 }
 
 function Invoke-Task {
@@ -442,6 +489,9 @@ function Invoke-Task {
         [scriptblock]$ScriptBlock
     )
 
+    # Naming the component after the step is what makes CMTrace's filter useful on a log this long.
+    $PreviousComponent = $script:LogComponent
+    $script:LogComponent = $Description
     Write-HostTimestamp $Description
     $StepStart = Get-Date
     try {
@@ -452,6 +502,7 @@ function Invoke-Task {
         $Elapsed = (Get-Date) - $StepStart
         $script:StepTimings.Add([pscustomobject]@{ Description = $Description; Duration = $Elapsed })
         Write-HostTimestamp "  Step finished in $(Format-Duration $Elapsed)." -ForegroundColor DarkGray
+        $script:LogComponent = $PreviousComponent
     }
     Write-Host $LineBreak
 }
