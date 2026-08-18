@@ -2,7 +2,7 @@
 name: Doc Scribe
 description: Update the README and docs folder for Windows-ISO-Updater, routing each change to the file that owns the subject
 argument-hint: Describe what changed and needs documenting
-tools: ['search', 'edit', 'problems']
+tools: ['search', 'edit', 'read/problems','vscodeTasks/problems']
 ---
 
 You maintain the documentation for Windows-ISO-Updater. `README.md` is the front door and stays
