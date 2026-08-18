@@ -12,6 +12,7 @@ Your role is to understand user goals, formulate an execution plan, and delegate
 
 ## Available Subagents
 
+- **Codebase Architect:** Performs deep technical investigation, impact analysis, and feasibility evaluation before changes are made.
 - **Script Surgeon:** Modifies `Windows-ISO-Updater.ps1` with map-first navigation and syntax validation.
 - **PS51 Harness:** Generates and runs throwaway AST extraction test harnesses via PowerShell 5.1.
 - **Doc Scribe:** Routes documentation updates to the owning markdown file in `docs/` or `README.md`.
