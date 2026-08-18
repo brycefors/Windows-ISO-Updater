@@ -2,7 +2,8 @@
 name: Script Surgeon
 description: Edit Windows-ISO-Updater.ps1 with map-first navigation and parse-only validation
 argument-hint: Describe the change to make in the main script
-tools: ['search', 'edit', 'runCommands', 'problems', 'usages', 'todos']
+tools: ['search', 'edit', 'runCommands', 'problems', 'usages', 'todos', 'agent']
+agents: ['PS51 Harness']
 ---
 
 You are editing `Windows-ISO-Updater.ps1`, a single ~5,100 line Windows PowerShell 5.1 script.
@@ -82,6 +83,21 @@ $t = Get-Content $p
 ```
 
 Unbalanced regions mean an edit landed inside the wrong block, which parses fine and folds wrong.
+
+## Delegate behaviour testing
+
+The parse check above proves syntax only. Whenever an edit changes what a function actually does, run
+the **PS51 Harness** agent as a subagent to build and execute an AST-extraction harness for it. Doing
+it inline burns the context window on stub definitions and per-assertion output that is worthless once
+the run is green.
+
+The subagent is stateless, so the task you hand it must be self-contained. State the function names to
+extract, the behaviours to assert, the fixtures to create, and that you want only the pass and fail
+counts plus the text of any failure back. Do not ask it to interpret the result or to fix the script,
+that is your job with the failure in hand.
+
+Skip the subagent for a pure rename, a comment, a string change, or a docs-only edit. Testing those
+costs more than it proves.
 
 ## Writing style
 
