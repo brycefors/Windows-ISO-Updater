@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.16.30   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.17.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -136,7 +136,7 @@ param(
     [Parameter(HelpMessage = 'Working folder used to extract and service the media. Must be on a fast drive with lots of free space. Defaults to <SystemDrive>\WISO-Work')]
     [string]$WorkPath,
 
-    [Parameter(HelpMessage = 'Full path for the recompiled ISO. Defaults to an auto-generated name in the Output folder under the working folder')]
+    [Parameter(HelpMessage = 'Where to write the recompiled ISO. Give it a full file path to name the ISO yourself, or a folder to keep the generated name and only change where it lands. Defaults to the Output folder under the working folder')]
     [string]$OutputIsoPath,
 
     [Parameter(HelpMessage = 'Volume label written into the finished ISO, which is what File Explorer shows and what Rufus and Ventoy copy onto the USB stick. Defaults to a label describing the contents, such as WIN11_MULTI_X64_26100_4652. Maximum 32 characters, no spaces')]
@@ -253,7 +253,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.16.30'
+$ScriptVersion = '2026.08.17.1'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -336,6 +336,23 @@ $DlDir      = if ($DownloadPath) { $DownloadPath } else { Join-Path -Path $WorkR
 $LogDirWanted = if ($LogPath) { $LogPath } else { Join-Path -Path $WorkRoot -ChildPath 'Logs' }
 # The finished ISO gets its own folder so it is never mistaken for a source ISO sitting in Downloads.
 $FinishedIsoDir = Join-Path -Path $WorkRoot -ChildPath 'Output'
+if ($OutputIsoPath) {
+    # Absolute from the start, so the run header, the write check, the stamp and the tattoo all quote one path.
+    $OutputIsoPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputIsoPath)
+    $OutputIsFolder = $false
+    try {
+        $OutputIsFolder = ($OutputIsoPath -match '[\\/]$') -or
+            -not [System.IO.Path]::GetExtension($OutputIsoPath) -or
+            (Test-Path -LiteralPath $OutputIsoPath -PathType Container -ErrorAction Stop)
+    }
+    catch { }   # a malformed or unreachable path is reported properly by the output check further down
+    # A folder is shorthand for "put it there under the generated name". Clearing the path is what hands the
+    # naming back to the default, so nothing downstream needs a special case.
+    if ($OutputIsFolder) {
+        $FinishedIsoDir = $OutputIsoPath
+        $OutputIsoPath  = $null
+    }
+}
 # Stamps record what each finished build contained, so a scheduled run can tell whether building again
 # would produce anything new. -StampPath moves them (e.g. onto a share, so several machines share state).
 $StampRoot       = if ($StampPath) { $StampPath } else { Join-Path -Path $WorkRoot -ChildPath 'Stamps' }
@@ -470,6 +487,61 @@ function Test-RemotePath {
         return ([int]$Drive.DriveType -eq 4)
     }
     catch { return $false }   # WMI is not answering, so assume local and carry on as before
+}
+
+# Proves the finished ISO can actually be written before the build starts, by creating the destination
+# folder and writing a probe file into it. Returns a sentence describing the problem, or $null when the
+# location is usable. oscdimg runs at the very end of a build measured in hours, so an unwritable output
+# folder that is only discovered there throws away all of that work.
+function Get-OutputPathProblem {
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [string]$FilePath
+    )
+    if ($FilePath) {
+        # Character checks come first: Test-Path itself throws on a path containing something like a pipe.
+        $BadPathChar = @($FilePath.ToCharArray() | Where-Object { [System.IO.Path]::GetInvalidPathChars() -contains $_ })
+        if ($BadPathChar.Count -gt 0) {
+            return "'$FilePath' contains a character Windows does not allow in a path."
+        }
+        $Leaf = Split-Path -Path $FilePath -Leaf
+        if (-not $Leaf) { return "'$FilePath' does not name a file. Pass -OutputIsoPath a full file name, such as D:\ISOs\Windows11.iso." }
+        $BadNameChar = @($Leaf.ToCharArray() | Where-Object { [System.IO.Path]::GetInvalidFileNameChars() -contains $_ })
+        if ($BadNameChar.Count -gt 0) {
+            return "The file name '$Leaf' contains a character Windows does not allow in a file name."
+        }
+    }
+    if (-not $Directory) { return "'$FilePath' has no folder part, so there is nowhere to write the ISO." }
+    # -ErrorAction Stop inside a try is the only reliable way to quieten Test-Path here: an unreachable share
+    # raises an IOException that SilentlyContinue does not suppress.
+    $DirectoryExists = try { Test-Path -LiteralPath $Directory -ErrorAction Stop } catch { $false }
+    if (-not $DirectoryExists) {
+        try { New-Item -ItemType Directory -Path $Directory -Force -ErrorAction Stop | Out-Null }
+        catch { return "The output folder '$Directory' does not exist and could not be created: $($_.Exception.Message)" }
+    }
+    # An ISO left at the target path by a previous run is deleted before oscdimg writes, so a copy that is
+    # mounted in Explorer or being read by something else blocks the build just as surely as a bad folder.
+    $TargetExists = if ($FilePath) { try { Test-Path -LiteralPath $FilePath -PathType Leaf -ErrorAction Stop } catch { $false } } else { $false }
+    if ($TargetExists) {
+        try {
+            $Handle = [System.IO.File]::Open($FilePath, 'Open', 'Read', 'None')
+            $Handle.Close()
+        }
+        catch {
+            return "An ISO already exists at '$FilePath' and something else has it open, so it cannot be replaced. Dismount it or close whatever is using it: $($_.Exception.Message)"
+        }
+    }
+    $Probe = Join-Path -Path $Directory -ChildPath ('wiso-write-test-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+    try {
+        [System.IO.File]::WriteAllText($Probe, 'Windows-ISO-Updater write test')
+    }
+    catch {
+        return "The output folder '$Directory' cannot be written to: $($_.Exception.Message)"
+    }
+    finally {
+        Remove-Item -LiteralPath $Probe -Force -ErrorAction SilentlyContinue
+    }
+    return $null
 }
 
 # An export stages a second copy of the image beside the original, so both must fit at the same time.
@@ -3219,6 +3291,49 @@ else {
     }
 }
 Write-Host $LineBreak
+
+#endregion
+
+#region Validate the output ISO location
+# The rest of the build takes hours and oscdimg is the last thing it runs, so a missing folder, a share
+# that is not writable, or an ISO still mounted from a previous run has to be caught here instead.
+if (-not $ListEditions -and -not $CheckOnly) {
+    $OutputDir = if ($OutputIsoPath) { Split-Path -Path $OutputIsoPath -Parent } else { $FinishedIsoDir }
+    $OutputProblem = Get-OutputPathProblem -Directory $OutputDir -FilePath $OutputIsoPath
+    if ($OutputProblem) {
+        Write-HostTimestamp 'The finished ISO could not be written where it is meant to go.' -ForegroundColor Red
+        Write-HostTimestamp "  $OutputProblem" -ForegroundColor Red
+        Write-HostTimestamp '  Fix the destination or point -OutputIsoPath somewhere else, then run again.' -ForegroundColor Red
+        Stop-Transcript | Out-Null
+        exit 1
+    }
+    if ($OutputIsoPath) {
+        Write-HostTimestamp "Output ISO     : $OutputIsoPath" -ForegroundColor Green
+        if ($OutputIsoPath -notmatch '(?i)\.iso$') {
+            Write-HostTimestamp '  That name does not end in .iso, so nothing will recognise the file as an image.' -ForegroundColor Yellow
+        }
+        if (Test-Path -LiteralPath $OutputIsoPath -PathType Leaf) {
+            Write-HostTimestamp '  An ISO already exists at that path and will be replaced.' -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-HostTimestamp "Output folder  : $OutputDir" -ForegroundColor Green
+    }
+    # A mapped drive or a share is writable here yet absent under the scheduled task's logon session.
+    if (Test-RemotePath -Path $OutputDir) {
+        Write-HostTimestamp '  That is a network location. Drive mappings belong to a logon session, so a scheduled run may not see it. A UNC path is the safer choice.' -ForegroundColor Yellow
+    }
+    # Only worth saying when the ISO lands somewhere other than the working drive, which was measured above.
+    $OutputQualifier = try { Split-Path -Path $OutputDir -Qualifier -ErrorAction SilentlyContinue } catch { $null }
+    $WorkQualifier   = try { Split-Path -Path $WorkRoot -Qualifier -ErrorAction SilentlyContinue } catch { $null }
+    if ($OutputQualifier -and $OutputQualifier -ne $WorkQualifier) {
+        $OutputFreeGB = Get-DriveFreeGB -Path $OutputDir
+        if ($null -ne $OutputFreeGB -and $OutputFreeGB -lt 12) {
+            Write-HostTimestamp "  Only $OutputFreeGB GB is free there, and a finished ISO is usually 5 to 8 GB." -ForegroundColor Yellow
+        }
+    }
+    Write-Host $LineBreak
+}
 
 #endregion
 

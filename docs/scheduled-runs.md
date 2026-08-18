@@ -120,6 +120,12 @@ It only ever deletes files that a stamp recorded, so an ISO you dropped in yours
 at with `-UpdatePath`, and anything else living in those folders are never touched. The source ISO the
 current run is using is always protected.
 
+The folder it prunes is the one the ISO is written to, so pointing `-OutputIsoPath` at a folder of your own
+moves the pruning there as well. Only files matching this script's own generated name, right down to the
+`_yyyyMMdd-HHmm` stamp, are candidates, so anything you named yourself is safe. Note that `-KeepIsoCount`
+applies to that folder as a whole: aiming a Windows 10 run and a Windows 11 run at one shared output folder
+makes them compete for the same slots.
+
 ```shell
 :: Keep the last five generated ISOs instead of three
 .\Run-Windows-ISO-Updater.bat -Scheduled -AutoClean -KeepIsoCount 5

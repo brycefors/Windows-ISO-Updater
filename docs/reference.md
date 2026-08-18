@@ -23,7 +23,9 @@ flowchart TD
     subgraph Preflight ["Pre-flight, nothing downloaded yet"]
         Sweep["Sweep an interrupted run, discard stale DISM mounts"] --> Disk{"50 GB free on the work drive?"}
         Disk -- "no" --> Halt3["Stop, pick a bigger drive with -WorkPath"]
-        Disk -- "yes" --> Validate["Validate -UnattendPath, -DriverPath and -ExtraFilesPath, parsed and never executed"]
+        Disk -- "yes" --> Output{"Output folder reachable and writable?"}
+        Output -- "no" --> Halt6["Stop, the finished ISO would have nowhere to go"]
+        Output -- "yes" --> Validate["Validate -UnattendPath, -DriverPath and -ExtraFilesPath, parsed and never executed"]
         Validate --> Confirm{"Confirmed, or -Force?"}
         Confirm -- "no" --> Halt4["Cancelled"]
         Confirm -- "yes" --> Oscdimg["Locate oscdimg.exe, symbol server or ADK, fail fast if missing"]
@@ -117,6 +119,8 @@ Pass `-SkipTattoo` to leave the media untouched. The switch is build-affecting, 
 Because the download, the extracted media, the mounted image, and the re-exported image all coexist, the working drive should have at least **50 GB free**. The script checks this up front and stops if the working drive is too small, so choose a larger drive with `-WorkPath` if needed.
 
 The shrink steps near the end of the build stage a second copy of the image beside the original, so each one re-checks free space first. If the drive has filled up, that step is skipped with a warning and the build still finishes, leaving an ISO that is just larger than it could have been.
+
+The destination for the finished ISO is proved writable in the same pre-flight pass, before anything is downloaded. `-OutputIsoPath` takes either a full file path or a folder: anything that already exists as a folder, ends in a separator, or carries no file extension is treated as a folder, and the ISO lands there under its generated name. The script then creates that folder if it is missing, writes and deletes a probe file to confirm it really has access, and refuses to start when the folder cannot be created or written, or when an ISO already sitting at the target path is held open by something else (a mounted copy in Explorer, for example). It also warns when the output lands on a network location, since a mapped drive belongs to a logon session and may not exist when a scheduled run fires, and when the drive holding it is short on space. oscdimg only runs at the very end of a build, so these are exactly the failures that would otherwise waste the whole run.
 
 ## Where Files Are Written
 
