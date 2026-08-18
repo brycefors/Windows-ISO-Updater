@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.17.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.17.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -253,7 +253,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.17.2'
+$ScriptVersion = '2026.08.17.3'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -358,6 +358,8 @@ if ($OutputIsoPath) {
 $StampRoot       = if ($StampPath) { $StampPath } else { Join-Path -Path $WorkRoot -ChildPath 'Stamps' }
 $StampHistoryDir = Join-Path -Path $StampRoot -ChildPath 'History'
 $StampFile       = Join-Path -Path $StampRoot -ChildPath 'last-build.json'
+# A stamp is only written when a build succeeds, so hashes are kept here as well the moment they are read.
+$HashCacheFile   = Join-Path -Path $StampRoot -ChildPath 'hash-cache.json'
 
 #endregion
 
@@ -1519,6 +1521,59 @@ function Write-BuildStamp {
     }
 }
 
+# Hashes already taken for a file, keyed on its path, size and write time. Reading 8 GB costs minutes on
+# slow storage, and a run that dies during servicing would otherwise make the next one pay it all over
+# again, because the build stamp is only written once a build has finished.
+function Read-HashCache {
+    if (-not (Test-Path -LiteralPath $HashCacheFile -PathType Leaf)) { return @() }
+    try {
+        # Windows PowerShell 5.1 emits a deserialised array as ONE pipeline item, so it has to be assigned
+        # before @() can enumerate it. Wrapping the call itself yields an array holding a single array.
+        $Parsed = Get-Content -LiteralPath $HashCacheFile -Raw -ErrorAction Stop | ConvertFrom-Json
+        return @($Parsed)
+    }
+    catch { return @() }   # an unreadable cache costs a re-hash, so it is rebuilt rather than reported
+}
+
+function Get-CachedSha256 {
+    param([Parameter(Mandatory)][System.IO.FileInfo]$Item)
+    foreach ($Entry in @(Read-HashCache)) {
+        if ("$($Entry.Path)" -ieq $Item.FullName -and
+            "$($Entry.Length)" -eq "$($Item.Length)" -and
+            "$($Entry.LastWriteTimeUtc)" -eq $Item.LastWriteTimeUtc.ToString('o')) {
+            return "$($Entry.Sha256)"
+        }
+    }
+    return $null
+}
+
+function Set-CachedSha256 {
+    param(
+        [Parameter(Mandatory)][System.IO.FileInfo]$Item,
+        [Parameter(Mandatory)][string]$Sha256
+    )
+    try {
+        $Entries = New-Object System.Collections.Generic.List[object]
+        [void]$Entries.Add([ordered]@{
+                Path             = $Item.FullName
+                Length           = $Item.Length
+                LastWriteTimeUtc = $Item.LastWriteTimeUtc.ToString('o')
+                Sha256           = $Sha256
+                HashedUtc        = (Get-Date).ToUniversalTime().ToString('o')
+            })
+        foreach ($Entry in @(Read-HashCache)) {
+            # Dropping older rows for this path keeps one per file, whatever it hashed to before.
+            if ("$($Entry.Path)" -ine $Item.FullName) { [void]$Entries.Add($Entry) }
+        }
+        if (-not (Test-Path -LiteralPath $StampRoot)) { New-Item -ItemType Directory -Path $StampRoot -Force -ErrorAction Stop | Out-Null }
+        $Kept = @($Entries | Select-Object -First 20)
+        Set-Content -LiteralPath $HashCacheFile -Value (Format-Json -Json ($Kept | ConvertTo-Json -Depth 4 -Compress)) -Encoding UTF8 -ErrorAction Stop
+    }
+    catch {
+        Write-HostTimestamp "  Could not record the hash for a later run: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+}
+
 # SHA-256 of the source ISO, reused from the stamp when this is provably the same file that was hashed
 # last time (same path, size and write time). Re-reading 8 GB on every hourly run buys nothing.
 function Get-SourceIsoHash {
@@ -1535,8 +1590,16 @@ function Get-SourceIsoHash {
         Write-HostTimestamp '  The source ISO is untouched since the last run, so its recorded hash is reused.' -ForegroundColor DarkGray
         return "$($Stamp.Source.Sha256)"
     }
+    $Cached = Get-CachedSha256 -Item $Item
+    if ($Cached) {
+        Write-HostTimestamp '  The source ISO was hashed by an earlier run that did not finish, and it has not changed since, so that hash is reused.' -ForegroundColor DarkGray
+        return $Cached
+    }
     Write-HostTimestamp "  Hashing the source ISO ($([math]::Round($Item.Length / 1GB, 2)) GB)..."
-    return (Get-Sha256 -Path $Path -ShowProgress)
+    $Hash = Get-Sha256 -Path $Path -ShowProgress
+    # Saved before the caller does anything else with it, which is the whole point of the cache.
+    if ($Hash) { Set-CachedSha256 -Item $Item -Sha256 $Hash }
+    return $Hash
 }
 
 # Resolves the newest catalog entry for a query WITHOUT downloading it - the cheap half of

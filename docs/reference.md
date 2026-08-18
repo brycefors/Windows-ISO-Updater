@@ -136,6 +136,12 @@ C:\WISO-Work\              <- -WorkPath (moves everything below it)
   Stamps\                  <- -StampPath (record of each finished build, see Scheduled Runs)
 ```
 
+Alongside the stamps, `Stamps\hash-cache.json` remembers the SHA-256 of the last few files the script
+hashed, keyed on path, size and write time. Reading a source ISO takes minutes on slow storage, and a
+stamp is only written once a build succeeds, so without this a run that failed during servicing would make
+the next one re-read the whole ISO for a hash it had already calculated. Delete it any time, the worst
+that happens is one extra read.
+
 Dropping your own `.iso` into `Downloads\` is all it takes to skip the Microsoft download, with no `-IsoPath` needed. The finished ISO is written to `Output\` instead, so a previous build is never picked up as the source for the next one. `-DownloadPath`, `-LogPath` and `-OutputIsoPath` override the individual folders if you want them elsewhere. Nothing outside these folders is changed, because all servicing happens against files in the working folder, never against the running system.
 
 ## Logging
