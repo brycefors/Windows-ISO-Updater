@@ -121,7 +121,9 @@ a shared `Downloads` folder.
 ```
 
 A source ISO on a network share or a cloud-synced folder is copied into the download folder first, so the
-library itself can live wherever is convenient. The working folder still has to be a local disk.
+library itself can live wherever is convenient. The working folder still has to be a local disk. Sending the
+finished ISO back to the share works the same way round: `-OutputIsoPath "\\nas\isos\patched"` is built in
+the working folder and copied over once it is done, so a share that stalls cannot cost the whole build.
 
 ### On a schedule
 

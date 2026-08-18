@@ -122,6 +122,10 @@ The shrink steps near the end of the build stage a second copy of the image besi
 
 The destination for the finished ISO is proved writable in the same pre-flight pass, before anything is downloaded. `-OutputIsoPath` takes either a full file path or a folder: anything that already exists as a folder, ends in a separator, or carries no file extension is treated as a folder, and the ISO lands there under its generated name. The script then creates that folder if it is missing, writes and deletes a probe file to confirm it really has access, and refuses to start when the folder cannot be created or written, or when an ISO already sitting at the target path is held open by something else (a mounted copy in Explorer, for example). It also warns when the output lands on a network location, since a mapped drive belongs to a logon session and may not exist when a scheduled run fires, and when the drive holding it is short on space. oscdimg only runs at the very end of a build, so these are exactly the failures that would otherwise waste the whole run.
 
+A network destination (a UNC path or a mapped drive) is never written into directly. oscdimg builds the ISO in `OutputStaging\` under the working folder, and the finished file is copied across in one pass and its size checked before the local copy is deleted, so a share that stalls or drops halfway cannot cost hours of servicing. The build stamp, the media tattoo, `-AutoClean` and the closing summary all quote the real destination, so nothing else behaves differently. If the copy itself fails the run stops with an error and the finished ISO is left in `OutputStaging\` for you to move by hand, and any staged ISO left behind by a run that was killed is swept at the start of the next one.
+
+Both large-file copies, the finished ISO on its way out and a source ISO on its way in, go through **robocopy** rather than `Copy-Item`: it retries a share that blips, and its unbuffered mode (`/J`) is noticeably faster than a cached copy for a file this size. They run with `/COPY:DAT`, which takes the data, attributes and timestamps and nothing else, so **permissions are never carried across in either direction**. An ISO copied onto a share picks up the permissions that share hands out, and one copied off a share lands under whatever the local folder inherits, instead of arriving with an ACL full of unresolvable server accounts.
+
 ## Where Files Are Written
 
 Everything the script writes lives under a single working folder, which defaults to `<SystemDrive>\WISO-Work`. The script prints this layout before it asks for confirmation, so you can see exactly what it will touch:
@@ -132,6 +136,7 @@ C:\WISO-Work\              <- -WorkPath (moves everything below it)
   Mount\                   <- DISM mount point
   Downloads\               <- -DownloadPath (source ISO and updates)
   Output\                  <- the finished ISO (-OutputIsoPath overrides it)
+  OutputStaging\           <- only used when the ISO is bound for a network path, emptied after the copy
   Logs\                    <- -LogPath
   Stamps\                  <- -StampPath (record of each finished build, see Scheduled Runs)
 ```

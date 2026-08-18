@@ -121,7 +121,8 @@ at with `-UpdatePath`, and anything else living in those folders are never touch
 current run is using is always protected.
 
 The folder it prunes is the one the ISO is written to, so pointing `-OutputIsoPath` at a folder of your own
-moves the pruning there as well. Only files matching this script's own generated name, right down to the
+moves the pruning there as well, including a share (the stamp records where the ISO ended up, not the local
+folder it was staged in). Only files matching this script's own generated name, right down to the
 `_yyyyMMdd-HHmm` stamp, are candidates, so anything you named yourself is safe. Note that `-KeepIsoCount`
 applies to that folder as a whole: aiming a Windows 10 run and a Windows 11 run at one shared output folder
 makes them compete for the same slots.

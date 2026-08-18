@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.17.5   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.17.6   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -253,7 +253,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.17.5'
+$ScriptVersion = '2026.08.17.6'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -353,6 +353,9 @@ if ($OutputIsoPath) {
         $OutputIsoPath  = $null
     }
 }
+# oscdimg writes an ISO as hours of small writes, which a share cannot be trusted with, so a network
+# destination is built here first and copied over as one sequential pass at the end.
+$IsoStageDir = Join-Path -Path $WorkRoot -ChildPath 'OutputStaging'
 # Stamps record what each finished build contained, so a scheduled run can tell whether building again
 # would produce anything new. -StampPath moves them (e.g. onto a share, so several machines share state).
 $StampRoot       = if ($StampPath) { $StampPath } else { Join-Path -Path $WorkRoot -ChildPath 'Stamps' }
@@ -422,6 +425,8 @@ $script:ExtraFilesHash      = $null
 $script:ExtraFilesCopied    = 0
 $script:ExtraFileRecords    = @()
 $script:ExtraFileOverwrites = New-Object System.Collections.Generic.List[string]
+# Taken while a staged ISO is still local, so the stamp does not have to read it back over the wire.
+$script:OutputIsoSha256 = $null
 #endregion
 
 #region Functions
@@ -631,6 +636,55 @@ function Get-InstalledWindowsInfo {
 #endregion
 
 #region Downloads
+# Moves one multi-GB file with robocopy, which retries a share that blips and whose /J unbuffered mode is
+# measurably faster than Copy-Item over SMB. /COPY:DAT is the important part: it takes data, attributes and
+# timestamps only, deliberately leaving out S (the ACL), O (the owner) and U (auditing), so a file landing
+# on a share inherits that share's permissions and one coming off a share does not carry the server's ACL
+# onto the local disk. Throws unless the destination ends up byte-for-byte the size of the source.
+# The destination must keep the source file name, which is all this script ever asks of it.
+function Copy-LargeFile {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    $SourceLength = (Get-Item -LiteralPath $Path -ErrorAction Stop).Length
+    $Started = Get-Date
+
+    if (Get-Command -Name 'robocopy.exe' -ErrorAction SilentlyContinue) {
+        $SourceDir = Split-Path -Path $Path -Parent
+        $TargetDir = Split-Path -Path $Destination -Parent
+        # A trailing backslash escapes the closing quote PowerShell adds around an argument containing a
+        # space, which is how robocopy ends up seeing two paths run together as one.
+        foreach ($Name in 'SourceDir', 'TargetDir') {
+            $Value = (Get-Variable -Name $Name -ValueOnly).TrimEnd('\')
+            if ($Value -match '^[A-Za-z]:$') { $Value += '\' }
+            Set-Variable -Name $Name -Value $Value
+        }
+        $RoboArgs = @($SourceDir, $TargetDir, (Split-Path -Leaf $Path),
+            '/COPY:DAT', '/J', '/R:2', '/W:5', '/NP', '/NJH', '/NJS', '/NFL', '/NDL')
+        $RoboOutput = & robocopy.exe @RoboArgs 2>&1
+        # robocopy counts anything under 8 as success (0 is "already identical", 1 is "copied").
+        if ($LASTEXITCODE -ge 8) {
+            $Detail = (@($RoboOutput) | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) -join ' '
+            throw "robocopy returned exit code $LASTEXITCODE. $Detail"
+        }
+    }
+    else {
+        # Only reachable where robocopy has been removed or blocked, and losing a finished build over that
+        # would be worse than a slower copy.
+        Copy-Item -LiteralPath $Path -Destination $Destination -Force -ErrorAction Stop
+    }
+
+    $Copied = Get-Item -LiteralPath $Destination -ErrorAction SilentlyContinue
+    if (-not $Copied) { throw "nothing arrived at '$Destination'" }
+    if ($Copied.Length -ne $SourceLength) {
+        throw "the copy at '$Destination' is $($Copied.Length) bytes against $SourceLength bytes at the source, so it did not arrive intact"
+    }
+    $Elapsed = (Get-Date) - $Started
+    $SpeedMB = if ($Elapsed.TotalSeconds -gt 0) { ($SourceLength / 1MB) / $Elapsed.TotalSeconds } else { 0 }
+    Write-HostTimestamp ('  Copied {0:N2} GB in {1} ({2:N0} MB/s).' -f ($SourceLength / 1GB), (Format-Duration $Elapsed), $SpeedMB) -ForegroundColor DarkGray
+}
+
 # Downloads a file with BITS when available (resumable, shows progress) and falls back to
 # Invoke-WebRequest. Returns $true on success. Never throws.
 function Get-FileDownload {
@@ -3414,6 +3468,20 @@ if ($StaleStages.Count -gt 0) {
     }
 }
 
+# An ISO staged for a network destination is deleted the moment it has been copied, so anything still here
+# belongs to a run that died in between, or to a copy that failed and has since been dealt with by hand.
+foreach ($StaleIso in @(Get-ChildItem -LiteralPath $IsoStageDir -Filter '*.iso' -File -ErrorAction SilentlyContinue)) {
+    try {
+        $StaleSizeMB = $StaleIso.Length / 1MB
+        Remove-Item -LiteralPath $StaleIso.FullName -Force -ErrorAction Stop
+        Write-HostTimestamp ('Removed a staged ISO left behind by an interrupted run: {0} ({1:N0} MB).' -f $StaleIso.Name, $StaleSizeMB) -ForegroundColor DarkGray
+        Write-Host $LineBreak
+    }
+    catch {
+        Write-HostTimestamp "  Could not remove the staged ISO '$($StaleIso.Name)': $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 # A run killed while an image was mounted leaves the mount folders full of files owned by TrustedInstaller,
 # and DISM will not mount into a directory that is not empty. Released here rather than at first use so the
 # problem surfaces in seconds instead of after the download and extraction have already run.
@@ -3482,6 +3550,7 @@ Write-Host $LineBreak
 #region Validate the output ISO location
 # The rest of the build takes hours and oscdimg is the last thing it runs, so a missing folder, a share
 # that is not writable, or an ISO still mounted from a previous run has to be caught here instead.
+$OutputIsRemote = $false
 if (-not $ListEditions -and -not $CheckOnly) {
     $OutputDir = if ($OutputIsoPath) { Split-Path -Path $OutputIsoPath -Parent } else { $FinishedIsoDir }
     $OutputProblem = Get-OutputPathProblem -Directory $OutputDir -FilePath $OutputIsoPath
@@ -3505,8 +3574,10 @@ if (-not $ListEditions -and -not $CheckOnly) {
         Write-HostTimestamp "Output folder  : $OutputDir" -ForegroundColor Green
     }
     # A mapped drive or a share is writable here yet absent under the scheduled task's logon session.
-    if (Test-RemotePath -Path $OutputDir) {
+    $OutputIsRemote = Test-RemotePath -Path $OutputDir
+    if ($OutputIsRemote) {
         Write-HostTimestamp '  That is a network location. Drive mappings belong to a logon session, so a scheduled run may not see it. A UNC path is the safer choice.' -ForegroundColor Yellow
+        Write-HostTimestamp "  The ISO will be built in $IsoStageDir and copied there once it is finished, so a share that stalls cannot cost the whole build." -ForegroundColor DarkGray
     }
     # Only worth saying when the ISO lands somewhere other than the working drive, which was measured above.
     $OutputQualifier = try { Split-Path -Path $OutputDir -Qualifier -ErrorAction SilentlyContinue } catch { $null }
@@ -3781,7 +3852,7 @@ if ($IsoPath) {
         else {
             try {
                 Invoke-Task -Description "The ISO is on $RemoteKind, so it is copied to a local disk first ($([math]::Round($SourceLen / 1GB, 2)) GB): $LocalIso ..." -ScriptBlock {
-                    Copy-Item -LiteralPath $ResolvedIso -Destination $LocalIso -Force -ErrorAction Stop
+                    Copy-LargeFile -Path $ResolvedIso -Destination $LocalIso
                     Write-HostTimestamp '  Copy complete.' -ForegroundColor Green
                 }
                 $ResolvedIso = $LocalIso
@@ -4789,6 +4860,13 @@ try {
     if ($OutDir -and -not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force -ErrorAction Stop | Out-Null }
 }
 catch { }
+# Where oscdimg actually writes. Everything else (the stamp, the tattoo, -AutoClean, the closing summary)
+# keeps quoting the real destination, so only the build and the copy know a staging file existed.
+$BuildIsoPath = $OutputIsoPath
+if ($OutputIsRemote) {
+    $BuildIsoPath = Join-Path -Path $IsoStageDir -ChildPath (Split-Path -Leaf $OutputIsoPath)
+    New-Item -ItemType Directory -Path $IsoStageDir -Force -ErrorAction SilentlyContinue | Out-Null
+}
 
 #endregion
 
@@ -4902,9 +4980,9 @@ if (-not $SkipTattoo) {
 $EtfsBoot = Join-Path $ExtractDir 'boot\etfsboot.com'
 $EfiSys   = Join-Path $ExtractDir 'efi\microsoft\boot\efisys.bin'
 
-Invoke-Task -Description "Recompiling the bootable ISO to $OutputIsoPath ..." -ScriptBlock {
+Invoke-Task -Description "Recompiling the bootable ISO to $BuildIsoPath ..." -ScriptBlock {
     # Remove any leftover ISO at the target path from a previous run so oscdimg starts clean.
-    if (Test-Path -LiteralPath $OutputIsoPath) { Remove-Item -LiteralPath $OutputIsoPath -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $BuildIsoPath) { Remove-Item -LiteralPath $BuildIsoPath -Force -ErrorAction SilentlyContinue }
 
     # Build the dual (BIOS + UEFI) boot data. Use 8.3 short paths for the boot files so any spaces in the
     # working path do not break oscdimg's -bootdata argument.
@@ -4931,7 +5009,7 @@ Invoke-Task -Description "Recompiling the bootable ISO to $OutputIsoPath ..." -S
     # last two arguments are the source folder to package and the output ISO path.
     $OscdimgArgs = @('-m', '-o', '-u2', '-udfver102', "-l$IsoVolumeLabel")
     if ($BootArg) { $OscdimgArgs += "-bootdata:$BootArg" }
-    $OscdimgArgs += @($ExtractDir, $OutputIsoPath)
+    $OscdimgArgs += @($ExtractDir, $BuildIsoPath)
     Write-HostTimestamp "  Volume label: $IsoVolumeLabel" -ForegroundColor DarkGray
 
     # Run oscdimg and wait for it to finish, then verify it actually produced the ISO.
@@ -4941,14 +5019,37 @@ Invoke-Task -Description "Recompiling the bootable ISO to $OutputIsoPath ..." -S
         # A non-zero exit code means oscdimg failed to build the image.
         throw "oscdimg returned exit code $($Proc.ExitCode)."
     }
-    if (-not (Test-Path -LiteralPath $OutputIsoPath)) {
+    if (-not (Test-Path -LiteralPath $BuildIsoPath)) {
         # Guard against the rare case where oscdimg exits 0 but no file was written.
         throw 'oscdimg reported success but the output ISO was not created.'
     }
-    $SizeGB = [math]::Round((Get-Item -LiteralPath $OutputIsoPath).Length / 1GB, 2)
+    $SizeGB = [math]::Round((Get-Item -LiteralPath $BuildIsoPath).Length / 1GB, 2)
     Write-HostTimestamp "  New ISO created ($SizeGB GB)." -ForegroundColor Green
 }
 Write-Host $LineBreak
+
+# One sequential copy at the end, rather than oscdimg writing across the wire for the length of the build.
+if ($BuildIsoPath -ne $OutputIsoPath) {
+    Invoke-Task -Description "Copying the finished ISO to $OutputIsoPath ..." -ScriptBlock {
+        # Hashed while the file is still local, because the stamp wants this hash and reading 8 GB back off
+        # a share to get it would cost about as much as the copy itself.
+        if (-not $NoStamp) {
+            Write-HostTimestamp '  Hashing the finished ISO before it leaves the local disk...'
+            $script:OutputIsoSha256 = Get-Sha256 -Path $BuildIsoPath -ShowProgress
+        }
+        try {
+            if (Test-Path -LiteralPath $OutputIsoPath) { Remove-Item -LiteralPath $OutputIsoPath -Force -ErrorAction SilentlyContinue }
+            Copy-LargeFile -Path $BuildIsoPath -Destination $OutputIsoPath
+        }
+        catch {
+            # The staged ISO is deliberately left behind, it is a finished build and only the copy failed.
+            throw "The ISO was built but could not be copied to '$OutputIsoPath': $($_.Exception.Message). It is still at $BuildIsoPath, so you can move it there by hand."
+        }
+        Write-HostTimestamp "  The finished ISO is at $OutputIsoPath." -ForegroundColor Green
+        Remove-Item -LiteralPath $BuildIsoPath -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host $LineBreak
+}
 
 #endregion
 
@@ -4984,7 +5085,10 @@ if (-not $NoStamp) {
 
         $ParameterSet = Get-BuildParameterSet
         $OutputHash = $null
-        if ($OutputItem) {
+        if ($script:OutputIsoSha256) {
+            $OutputHash = $script:OutputIsoSha256
+        }
+        elseif ($OutputItem) {
             Write-HostTimestamp "  Hashing the finished ISO ($([math]::Round($OutputItem.Length / 1GB, 2)) GB)..."
             $OutputHash = Get-Sha256 -Path $OutputItem.FullName -ShowProgress
         }
