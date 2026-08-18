@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.17.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.17.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -253,7 +253,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.17.1'
+$ScriptVersion = '2026.08.17.2'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1298,10 +1298,46 @@ function Get-LatestCatalogPackage {
 # itself with the newest stamp and does nothing when all three still match - which is what makes it safe
 # to point an hourly scheduled task at a job that takes an hour or two when it does run.
 
+# Hashes in 4 MB reads rather than through Get-FileHash, whose stream is pulled 4 KB at a time. That is
+# invisible on a local SSD and brutal on a share or a cloud-synced folder, where every read is a round trip.
 function Get-Sha256 {
-    param([Parameter(Mandatory)][string]$Path)
-    try { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash }
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$ShowProgress
+    )
+    $BufferSize = 4MB
+    $Algorithm = $null
+    $Stream = $null
+    try {
+        $Length = (Get-Item -LiteralPath $Path -ErrorAction Stop).Length
+        # SHA256Cng is the hardware-accelerated provider, the base factory hands back the managed one.
+        $Algorithm = try { New-Object System.Security.Cryptography.SHA256Cng } catch { [System.Security.Cryptography.SHA256]::Create() }
+        $Stream = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read, $BufferSize, [System.IO.FileOptions]::SequentialScan)
+        $Buffer = New-Object byte[] $BufferSize
+        $Done = [long]0
+        $NextPercent = 20
+        $Timer = [System.Diagnostics.Stopwatch]::StartNew()
+        while (($Count = $Stream.Read($Buffer, 0, $Buffer.Length)) -gt 0) {
+            [void]$Algorithm.TransformBlock($Buffer, 0, $Count, $null, 0)
+            $Done += $Count
+            # Reported only for the multi-gigabyte ISOs, where a slow source can make this take minutes.
+            if ($ShowProgress -and $Length -gt 1GB) {
+                $Percent = [int](100 * $Done / $Length)
+                if ($Percent -ge $NextPercent -and $Timer.Elapsed.TotalSeconds -gt 0) {
+                    Write-HostTimestamp ('    {0}% ({1:N0} MB/s)' -f $Percent, ($Done / 1MB / $Timer.Elapsed.TotalSeconds)) -ForegroundColor DarkGray
+                    $NextPercent = $Percent + 20
+                }
+            }
+        }
+        [void]$Algorithm.TransformFinalBlock((New-Object byte[] 0), 0, 0)
+        return [System.BitConverter]::ToString($Algorithm.Hash).Replace('-', '')
+    }
     catch { return $null }
+    finally {
+        if ($Stream) { $Stream.Dispose() }
+        if ($Algorithm) { $Algorithm.Dispose() }
+    }
 }
 
 function Get-TextSha256 {
@@ -1500,7 +1536,7 @@ function Get-SourceIsoHash {
         return "$($Stamp.Source.Sha256)"
     }
     Write-HostTimestamp "  Hashing the source ISO ($([math]::Round($Item.Length / 1GB, 2)) GB)..."
-    return (Get-Sha256 -Path $Path)
+    return (Get-Sha256 -Path $Path -ShowProgress)
 }
 
 # Resolves the newest catalog entry for a query WITHOUT downloading it - the cheap half of
@@ -4796,7 +4832,7 @@ if (-not $NoStamp) {
         $OutputHash = $null
         if ($OutputItem) {
             Write-HostTimestamp "  Hashing the finished ISO ($([math]::Round($OutputItem.Length / 1GB, 2)) GB)..."
-            $OutputHash = Get-Sha256 -Path $OutputItem.FullName
+            $OutputHash = Get-Sha256 -Path $OutputItem.FullName -ShowProgress
         }
         # Taken from the image list read before the working folder was removed.
         $KeptEditionNames = @($InstallImages | Where-Object { $KeepIndexes -contains [int]$_.ImageIndex } | ForEach-Object { "$($_.ImageName)" })
