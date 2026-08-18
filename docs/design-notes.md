@@ -70,6 +70,22 @@ Because a wrong "already patched" decision would quietly ship an unpatched ISO, 
 
 So the worst case is a few wasted minutes on a confirmation mount, and the update still gets applied. A skip only happens when the image's own registry proves it is already at or past the update's build.
 
+## How a New Windows Release Is Recognised
+
+Every Update Catalog query the script makes is built around a release name, for example `Cumulative Update for Windows 11 Version 24H2 for x64-based Systems`. Nothing in the WIM header carries that name, only a build number, so the two have to be connected somehow.
+
+A lookup table covers the builds that existed when the script was last touched. That is fast and works offline, but on its own it would rot: when 26H2 or 27H2 ships, its build is not in the table, the version token drops out of the query, and the search widens to every Windows 11 release at once. Since several releases are serviced in parallel and their updates all publish on the same Patch Tuesday, the "newest" result is then effectively arbitrary. The update would download, DISM would reject it as not applicable, and the run would finish with a bootable but unpatched ISO.
+
+So when the table has no answer, the script asks the media instead. Setup records the marketing name in the image's `SOFTWARE` hive as `DisplayVersion`, which is the same value `winver` shows, and mounting read-only to read it is the same trick the already-patched check uses. Media from a release that did not exist when this script was written still says exactly what it is.
+
+The cost is one read-only mount, so it is arranged not to be paid twice:
+
+- Builds already in the table never mount at all.
+- A run that makes no catalog queries (`-SkipUpdates`, or `-UpdatePath` supplying packages directly) never mounts either, because it has nothing to search for.
+- The result is cached for the run, so the already-patched check that follows reuses the same read rather than mounting a second time.
+
+If the image has no `DisplayVersion` either, client media falls back to the broad query with a warning, and Server media stops instead. The Server product name without a version reads `Microsoft server operating system`, which matches every Server release ever published, so a broad search there is guaranteed to return the wrong thing.
+
 ## Why Both boot.wim Indexes Are Serviced
 
 `boot.wim` never becomes the installed OS (index 1 is Windows PE, index 2 is Windows Setup), so patching it looks like time that could be saved. It isn't, and both indexes get the same treatment as `install.wim`:

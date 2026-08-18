@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.17.4   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.17.5   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -253,7 +253,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.17.4'
+$ScriptVersion = '2026.08.17.5'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -412,6 +412,8 @@ $script:FinalBuildString = $null
 $script:TattooServicing   = New-Object System.Collections.Generic.List[object]
 $script:TattooResidueMB   = 0
 $script:TattooResidueFound = New-Object System.Collections.Generic.List[string]
+# Keyed on WIM path and index, because reading a build costs a read-only mount and more than one caller wants it.
+$script:WimBuildCache = @{}
 # The -DriverPath set, resolved once during validation and reused by every image the run services.
 $script:DriverInfFiles = @()
 $script:DriverHash     = $null
@@ -1056,6 +1058,34 @@ function Get-FeatureUpdateName {
         14393  { '1607'; break }   # Windows Server 2016
         default { $null }
     }
+}
+
+# The table above can only know releases that existed when this script was last touched, and every catalog
+# query is built from its answer. The image does not have that problem: Setup records the marketing name in
+# the offline SOFTWARE hive as DisplayVersion, so media from a release nobody has heard of yet still says
+# what it is. That costs a read-only mount, which is why it is a fallback and not the first move.
+function Resolve-FeatureUpdateName {
+    param(
+        [Parameter(Mandatory)][int]$Build,
+        [string]$WimPath
+    )
+
+    $Known = Get-FeatureUpdateName -Build $Build
+    if ($Known) { return $Known }
+    # Nothing before Windows 10 records DisplayVersion, and those releases are all in the table already.
+    if ($Build -lt 10240) { return $null }
+    if (-not $WimPath -or -not (Test-Path -LiteralPath $WimPath)) { return $null }
+
+    Write-HostTimestamp "  Build $Build is newer than any release this script has a name for, so the image is being asked directly. This takes a few minutes..." -ForegroundColor Yellow
+    $BuildString = Get-WimBuildViaMount -WimPath $WimPath
+    # Get-MountedImageBuild appends the hive's DisplayVersion in brackets, e.g. "10.0.26200.9168 (25H2)".
+    if ("$BuildString" -match '\(\s*(\d{2}H\d|\d{4})\s*\)') {
+        $Name = $Matches[1].ToUpperInvariant()
+        Write-HostTimestamp "  The image identifies itself as $Name, so that is what the Microsoft Update Catalog will be asked for." -ForegroundColor Green
+        return $Name
+    }
+    Write-HostTimestamp '  The image does not record a release name either, so the catalog search cannot be narrowed by version.' -ForegroundColor Yellow
+    return $null
 }
 
 # The product wording the Microsoft Update Catalog uses in update titles, e.g. "Windows 11 Version 24H2".
@@ -3062,6 +3092,10 @@ function Get-WimBuildViaMount {
         [int]$Index = 1
     )
 
+    # Every caller runs before servicing, so the answer cannot change within a run and one mount covers them all.
+    $CacheKey = "$WimPath|$Index"
+    if ($script:WimBuildCache.ContainsKey($CacheKey)) { return $script:WimBuildCache[$CacheKey] }
+
     $Mnt = Join-Path -Path $WorkRoot -ChildPath 'BuildCheck'
     $Build = $null
     try {
@@ -3078,6 +3112,7 @@ function Get-WimBuildViaMount {
             Remove-Item -LiteralPath $Mnt -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+    $script:WimBuildCache[$CacheKey] = $Build
     return $Build
 }
 
@@ -4105,7 +4140,12 @@ if ($ImageInfo -and $ImageInfo.Version -match '^\d+\.\d+\.(\d+)') { $ImageBuild 
 # The WIM header carries the UBR as the "service pack build", so the image's exact patch level is known
 # without mounting anything.
 $ImageUbr = if ($ImageInfo -and $null -ne $ImageInfo.SPBuild) { [int]$ImageInfo.SPBuild } else { 0 }
-$FeatureName = if ($ImageBuild) { Get-FeatureUpdateName -Build $ImageBuild } else { $null }
+# Only the catalog queries need the release name, so a run that is not going to make any is not charged the
+# mount it would take to work one out for an unrecognised build.
+$FeatureName =
+    if (-not $ImageBuild) { $null }
+    elseif ($SkipUpdates -or $UpdatePath) { Get-FeatureUpdateName -Build $ImageBuild }
+    else { Resolve-FeatureUpdateName -Build $ImageBuild -WimPath $InstallWimExtracted }
 $ImageArch = switch ($ImageInfo.Architecture) { 0 { 'x86' } 9 { 'x64' } 12 { 'arm64' } default { $WinInfo.Architecture } }
 $CatalogArch = switch ($ImageArch) { 'x64' { 'x64' } 'arm64' { 'ARM64' } 'x86' { 'x86' } default { 'x64' } }
 
@@ -4196,7 +4236,7 @@ else {
     # becomes "Microsoft server operating system", which matches every release and would hand back the
     # newest Server LCU no matter how old this media is.
     if ($Server -and -not $FeatureName) {
-        Write-HostTimestamp "Build $ImageBuild is not a Windows Server release this script recognises, so there is no catalog query that can identify it." -ForegroundColor Red
+        Write-HostTimestamp "Neither this script nor the image itself could name the release build $ImageBuild belongs to, so there is no catalog query that can identify this media." -ForegroundColor Red
         Write-HostTimestamp '  Searching on the product name alone would return an update for a different Server release, which DISM would refuse to apply, so this run stops here.' -ForegroundColor Red
         Write-HostTimestamp '  Supply the packages yourself with -UpdatePath, or use -SkipUpdates to repack the media unchanged.' -ForegroundColor Yellow
         Stop-Transcript | Out-Null
