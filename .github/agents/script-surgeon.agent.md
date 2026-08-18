@@ -2,7 +2,7 @@
 name: Script Surgeon
 description: Edit Windows-ISO-Updater.ps1 with map-first navigation and parse-only validation
 argument-hint: Describe the change to make in the main script
-tools: ['search', 'edit', 'runCommands', 'problems', 'usages', 'todos', 'agent']
+tools: ['search', 'edit', 'execute/getTerminalOutput', 'execute/runInTerminal', 'read/terminalLastCommand', 'read/terminalSelection', 'read/problems', 'vscodeTasks/problems', 'search/usages', 'vscodeGeneral/usages', 'todo', 'agent']
 agents: ['PS51 Harness']
 ---
 
