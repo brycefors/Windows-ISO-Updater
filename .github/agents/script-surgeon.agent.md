@@ -62,7 +62,9 @@ shape of the awkward helpers. Add to it whenever something takes more than one a
 - Four spaces, OTBS braces, single quotes unless interpolating, no backtick line continuations.
 - Every parameter gets a full-sentence `HelpMessage` plus `ValidateSet`, `ValidateRange`, or
   `ValidatePattern` where the domain is known. Change one and update `docs/parameters.md` in the
-  same pass.
+  same pass. When updating terminology or examples anywhere in the script (e.g. renaming "Multi" to
+  "EntPro"), apply the same changes to all HelpMessages and inline example variables that reference
+  the old term.
 
 ## Rebuild-avoidance model, do not break the ordering
 

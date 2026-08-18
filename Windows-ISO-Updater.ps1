@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.18.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.18.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -139,7 +139,7 @@ param(
     [Parameter(HelpMessage = 'Where to write the recompiled ISO. Give it a full file path to name the ISO yourself, or a folder to keep the generated name and only change where it lands. Defaults to the Output folder under the working folder')]
     [string]$OutputIsoPath,
 
-    [Parameter(HelpMessage = 'Volume label written into the finished ISO, which is what File Explorer shows and what Rufus and Ventoy copy onto the USB stick. Defaults to a label describing the contents, such as WIN11_MULTI_X64_26100_4652. Maximum 32 characters, no spaces')]
+    [Parameter(HelpMessage = 'Volume label written into the finished ISO, which is what File Explorer shows and what Rufus and Ventoy copy onto the USB stick. Defaults to a label describing the contents, such as WIN11_ENTPRO_X64_26100_4652. Maximum 32 characters, no spaces')]
     [ValidatePattern('^[A-Za-z0-9._-]{1,32}$')]
     [string]$VolumeLabel,
 
@@ -253,7 +253,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.18.1'
+$ScriptVersion = '2026.08.18.2'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -3411,7 +3411,7 @@ Write-Host "  Downloads        : $DlDir"
 if (-not $IsoPath) { Write-Host '                     (drop your own .iso here and it is used instead of downloading one)' -ForegroundColor DarkGray }
 Write-Host "  Logs             : $LogDir"
 if (-not $NoStamp) { Write-Host "  Build stamps     : $StampRoot" }
-$IsoNameExample = if ($Server) { 'Server2025_StandardGUI_x64_<build>.<UBR>_<date-time>.iso' } else { 'Win11_Multi_x64_<build>.<UBR>_<date-time>.iso' }
+$IsoNameExample = if ($Server) { 'Server2025_StandardGUI_x64_<build>.<UBR>_<date-time>.iso' } else { 'Win11_EntPro_x64_<build>.<UBR>_<date-time>.iso' }
 Write-Host "  Finished ISO     : $(if ($OutputIsoPath) { $OutputIsoPath } else { Join-Path $FinishedIsoDir $IsoNameExample })"
 Write-Host ''
 Write-Host '  Nothing outside these folders is changed. -WorkPath moves all of it, and -DownloadPath, -LogPath' -ForegroundColor DarkGray
