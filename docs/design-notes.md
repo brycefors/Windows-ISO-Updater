@@ -174,3 +174,20 @@ The parts of this script that matter most are the ones that came from knowing th
 - Windows PowerShell 5.1 is the target throughout, which rules out a long list of syntax and a few overloads that look correct and refuse to bind.
 
 None of those came out of a prompt. They came out of having been bitten before, and the reason they are written down here is so the next person does not have to be.
+
+## Offline Servicing and Hot-Patch Eligibility
+
+Windows 11 24H2 Enterprise supports hot-patching through Intune or Azure Arc on a quarterly cadence. Months 1 and 4 of each quarter require a full cumulative update baseline. Months 2 and 3 receive lightweight in-memory hot patches that do not rewrite image files on disk.
+
+When this tool integrates the Latest Cumulative Update offline with DISM, the WIM is updated by direct package injection rather than through the online Windows Update Agent and CBS stack that a running system uses. The CBS state the hot-patch subsystem reads to confirm baseline eligibility is built up by that online stack during a normal update, and offline servicing does not replicate it fully.
+
+If the integrated LCU is a non-baseline (in-quarter) update, the resulting image may not carry the CBS metadata the hot-patch system expects. The symptom is that hot patches fail to apply and the machine waits until the next baseline month before hot-patching resumes.
+
+For environments where hot-patch eligibility is a hard requirement, two postures are reliable:
+
+- **Service against a known baseline CU.** Only run this tool after a baseline month's cumulative update has published (months 1 and 4 of each quarter). The resulting image starts at baseline level and is eligible for hot patches in the months that follow.
+- **Deploy a lightly-patched image and patch online first.** Build the ISO against any available LCU, deploy the machine, and let Windows Update apply the current LCU through the normal online stack before enrolling the device in Intune hot-patch policy. This guarantees that CBS state is established the way Microsoft's hot-patch stack expects.
+
+This is a known tradeoff in offline servicing, not a defect in this tool.
+
+[← Back to README](../README.md)
