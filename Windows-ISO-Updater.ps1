@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.18.5   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.18.6   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -259,7 +259,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.18.5'
+$ScriptVersion = '2026.08.18.6'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1942,7 +1942,7 @@ function Invoke-AutoClean {
     foreach ($Stamp in (@($CurrentStamp) + @($History))) {
         if (-not $Stamp -or -not $Stamp.Output -or -not $Stamp.Output.Path) { continue }
         $Item = Get-Item -LiteralPath "$($Stamp.Output.Path)" -ErrorAction SilentlyContinue
-        if ($Item) { $Candidates[$Item.FullName.ToLowerInvariant()] = $Item }
+        if ($Item -and -not $Item.PSIsContainer) { $Candidates[$Item.FullName.ToLowerInvariant()] = $Item }
     }
     # Must track every tag Get-DefaultIsoName can emit, including the Server release names.
     $GeneratedName = '(Win10|Win11|Windows|Server[A-Za-z0-9]*)_[A-Za-z0-9]+_[A-Za-z0-9]+(_[\d.]+)?_\d{8}-\d{4}.*\.iso$'
