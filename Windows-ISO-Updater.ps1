@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.18.4   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.18.5   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -139,6 +139,12 @@ param(
     [Parameter(HelpMessage = 'Where to write the recompiled ISO. Give it a full file path to name the ISO yourself, or a folder to keep the generated name and only change where it lands. Defaults to the Output folder under the working folder')]
     [string]$OutputIsoPath,
 
+    [Parameter(HelpMessage = 'Text to prepend to the auto-generated ISO file name (e.g. "Company-" produces Company-Win11_Pro_x64_....iso). Has no effect when -OutputIsoPath is a full file path')]
+    [string]$IsoNamePrefix,
+
+    [Parameter(HelpMessage = 'Text to append to the auto-generated ISO file name base, before the .iso extension (e.g. "-Unattended" produces Win11_Pro_x64_...-Unattended.iso). Has no effect when -OutputIsoPath is a full file path')]
+    [string]$IsoNameSuffix,
+
     [Parameter(HelpMessage = 'Volume label written into the finished ISO, which is what File Explorer shows and what Rufus and Ventoy copy onto the USB stick. Defaults to a label describing the contents, such as WIN11_ENTPRO_X64_26100_4652. Maximum 32 characters, no spaces')]
     [ValidatePattern('^[A-Za-z0-9._-]{1,32}$')]
     [string]$VolumeLabel,
@@ -253,7 +259,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.18.4'
+$ScriptVersion = '2026.08.18.5'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1939,7 +1945,7 @@ function Invoke-AutoClean {
         if ($Item) { $Candidates[$Item.FullName.ToLowerInvariant()] = $Item }
     }
     # Must track every tag Get-DefaultIsoName can emit, including the Server release names.
-    $GeneratedName = '^(Win10|Win11|Windows|Server[A-Za-z0-9]*)_[A-Za-z0-9]+_[A-Za-z0-9]+(_[\d.]+)?_\d{8}-\d{4}\.iso$'
+    $GeneratedName = '(Win10|Win11|Windows|Server[A-Za-z0-9]*)_[A-Za-z0-9]+_[A-Za-z0-9]+(_[\d.]+)?_\d{8}-\d{4}.*\.iso$'
     # When the output is a remote file path, $FinishedIsoDir is still the default local folder and any ISOs
     # there are orphans from earlier runs, not candidates for this remote-output run.
     if (-not $OutputIsRemote) {
@@ -3422,7 +3428,8 @@ Write-Host "  Downloads        : $DlDir"
 if (-not $IsoPath) { Write-Host '                     (drop your own .iso here and it is used instead of downloading one)' -ForegroundColor DarkGray }
 Write-Host "  Logs             : $LogDir"
 if (-not $NoStamp) { Write-Host "  Build stamps     : $StampRoot" }
-$IsoNameExample = if ($Server) { 'Server2025_StandardGUI_x64_<build>.<UBR>_<date-time>.iso' } else { 'Win11_EntPro_x64_<build>.<UBR>_<date-time>.iso' }
+$IsoNameBase = if ($Server) { 'Server2025_StandardGUI_x64_<build>.<UBR>_<date-time>' } else { 'Win11_EntPro_x64_<build>.<UBR>_<date-time>' }
+$IsoNameExample = "$IsoNamePrefix$IsoNameBase$IsoNameSuffix.iso"
 Write-Host "  Finished ISO     : $(if ($OutputIsoPath) { $OutputIsoPath } else { Join-Path $FinishedIsoDir $IsoNameExample })"
 Write-Host ''
 Write-Host '  Nothing outside these folders is changed. -WorkPath moves all of it, and -DownloadPath, -LogPath' -ForegroundColor DarkGray
@@ -4860,6 +4867,9 @@ if ($ResolvedExtraFiles) {
 # The name describes what the ISO actually contains: Win11_Pro_x64_26100.4061_20260815-1332.iso. It is
 # built even when -OutputIsoPath overrides the path, because the volume label is derived from it.
 $DefaultIsoName = Get-DefaultIsoName -Images $InstallImages -Indexes $KeepIndexes -BuildString $script:FinalBuildString -FallbackVersion $ImageInfo.Version -Architecture $ImageArch
+if ($IsoNamePrefix -or $IsoNameSuffix) {
+    $DefaultIsoName = "$IsoNamePrefix$([System.IO.Path]::GetFileNameWithoutExtension($DefaultIsoName))$IsoNameSuffix.iso"
+}
 if (-not $OutputIsoPath) {
     $OutputIsoPath = Join-Path -Path $FinishedIsoDir -ChildPath $DefaultIsoName
 }

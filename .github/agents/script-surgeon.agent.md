@@ -73,6 +73,20 @@ parameter set and answer-file hash, and the newest KBs resolved from the stamp b
 `Get-ExpectedUpdateSet`. An unreachable catalog is informational and must never block. Anything that
 forces extraction before the decision defeats the whole feature.
 
+## AutoClean compatibility check
+
+`Invoke-AutoClean` finds old ISOs two ways: `Output.Path` from the build stamps, and a regex fallback
+that scans the output folder for files whose stamps have aged out.
+
+When an edit touches any of these, verify that the `$GeneratedName` regex in `Invoke-AutoClean` still
+matches every file name the script can now produce:
+
+- `Get-DefaultIsoName` - changes the base name structure
+- `IsoNamePrefix` or `IsoNameSuffix` - adds text before or after the base name
+- Output path assembly in `#region Decide the output ISO name and volume label`
+
+If the regex no longer matches, update it in the same edit.
+
 ## Validation after every edit
 
 One command, not three round trips:
