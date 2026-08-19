@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.18.9   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.18.10   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -117,6 +117,9 @@ param(
 
     [Parameter(HelpMessage = 'Export the finished image as install.esd (LZMS "recovery" compression) instead of install.wim. Typically 25-40% smaller, which can bring the image under the 4 GB FAT32 limit for UEFI USB sticks, but the export is slow and the finished media cannot be serviced again without converting it back')]
     [switch]$CompressEsd,
+
+    [Parameter(HelpMessage = 'Use Fast WIM compression instead of Max when exporting install.wim, boot.wim, or converting install.esd. Builds faster with a slightly larger output WIM. Has no effect when -CompressEsd is active.')]
+    [switch]$FastCompression,
 
     [Parameter(HelpMessage = 'Path to an unattended answer file to place on the finished ISO as \autounattend.xml, so Windows Setup runs without prompting')]
     [string]$UnattendPath,
@@ -262,7 +265,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.18.9'
+$ScriptVersion = '2026.08.18.10'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1553,7 +1556,7 @@ function Get-UpdateFileRecords {
 # deliberately left out: moving the working folder does not make last month's ISO wrong.
 $script:BuildAffectingParameters = @(
     'WindowsVersion', 'Server', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
-    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'SkipUpdates', 'SkipServicing', 'CompressEsd', 'VolumeLabel',
+    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'SkipUpdates', 'SkipServicing', 'CompressEsd', 'FastCompression', 'VolumeLabel',
     'SkipTattoo', 'StripImageResidue', 'DriverPath', 'AllowUnsignedDrivers', 'ExtraFilesPath'
 )
 
@@ -4103,6 +4106,8 @@ elseif ($CheckOnly) {
 
 #endregion
 
+$WimCompression = if ($FastCompression) { 'Fast' } else { 'Max' }
+
 #region Extract the ISO to the working folder
 $MountedImage = $null
 try {
@@ -4209,7 +4214,7 @@ if (-not (Test-Path -LiteralPath $InstallWimExtracted) -and (Test-Path -LiteralP
             $Img = $Images | Where-Object { [int]$_.ImageIndex -eq [int]$Want } | Select-Object -First 1
             if (-not $Img) { continue }
             Write-HostTimestamp "  Exporting index $($Img.ImageIndex): $($Img.ImageName) ..."
-            Export-WindowsImage -SourceImagePath $InstallEsdExtracted -SourceIndex $Img.ImageIndex -DestinationImagePath $InstallWimExtracted -CompressionType Max -ErrorAction Stop | Out-Null
+            Export-WindowsImage -SourceImagePath $InstallEsdExtracted -SourceIndex $Img.ImageIndex -DestinationImagePath $InstallWimExtracted -CompressionType $WimCompression -ErrorAction Stop | Out-Null
         }
         Remove-Item -LiteralPath $InstallEsdExtracted -Force -ErrorAction SilentlyContinue
         Write-HostTimestamp '  Conversion complete.' -ForegroundColor Green
@@ -4673,7 +4678,7 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
                         # Index 2 (Windows Setup) carries the WIM's bootable flag, and without -Setbootable the ISO will not boot.
                         $Boot = ([int]$Img.ImageIndex -eq 2)
                         Write-HostTimestamp "  Exporting index $($Img.ImageIndex) ($($Img.ImageName))$(if ($Boot) { ' [bootable]' }) ..."
-                        Export-WindowsImage -SourceImagePath $BootWim -SourceIndex $Img.ImageIndex -DestinationImagePath $TempBoot -CompressionType Max -Setbootable:$Boot -ErrorAction Stop | Out-Null
+                        Export-WindowsImage -SourceImagePath $BootWim -SourceIndex $Img.ImageIndex -DestinationImagePath $TempBoot -CompressionType $WimCompression -Setbootable:$Boot -ErrorAction Stop | Out-Null
                     }
                     Set-ItemProperty -LiteralPath $BootWim -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
                     Remove-Item -LiteralPath $BootWim -Force -ErrorAction Stop
@@ -4752,7 +4757,7 @@ if (($UpdateGroups.Count -gt 0) -or $TrimNeeded -or $CompressEsd) {
         if (-not (Test-RoomForExport -SourceImage $InstallWimExtracted -Label 'install image')) { return }
         $TempName    = if ($CompressEsd) { 'install_new.esd' } else { 'install_new.wim' }
         $FinalName   = if ($CompressEsd) { 'install.esd' } else { 'install.wim' }
-        $Compression = if ($CompressEsd) { 'Recovery' } else { 'Max' }
+        $Compression = if ($CompressEsd) { 'Recovery' } else { $WimCompression }
         $Temp = Join-Path $ExtractDir "sources\$TempName"
         $Dest = Join-Path $ExtractDir "sources\$FinalName"
         try {
