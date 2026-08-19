@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.18.7   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.18.8   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -262,7 +262,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.18.7'
+$ScriptVersion = '2026.08.18.8'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1995,25 +1995,27 @@ function Get-ScheduledTaskArgumentString {
         'RegisterScheduledTask', 'UnregisterScheduledTask', 'Schedule', 'ScheduleTime', 'ScheduleDay',
         'TaskName', 'CheckOnly', 'Force', 'ListEditions', 'Unattended', 'SkipInteractive', 'Scheduled'
     )
-    $Arguments = New-Object System.Collections.Generic.List[string]
-    $Arguments.Add('-NoProfile')
-    $Arguments.Add('-ExecutionPolicy')
-    $Arguments.Add('Bypass')
-    $Arguments.Add('-File')
-    $Arguments.Add("`"$($script:ScriptPath)`"")
-    $Arguments.Add('-Scheduled')
+    # -Command keeps single-quoted string literals intact; -File strips quotes and misreads
+    # hyphen-prefixed values (e.g. '-unattended') as switch names.
+    $EscapedPath = $script:ScriptPath -replace "'", "''"
+    $Parts = New-Object System.Collections.Generic.List[string]
+    $Parts.Add("& '$EscapedPath'")
+    $Parts.Add('-Scheduled')
 
     foreach ($Name in @($script:ScriptBoundParameters.Keys)) {
         if ($Excluded -contains $Name) { continue }
         $Value = $script:ScriptBoundParameters[$Name]
         if ($Value -is [switch]) {
-            if ($Value.IsPresent) { $Arguments.Add("-$Name") }
+            if ($Value.IsPresent) { $Parts.Add("-$Name") }
             continue
         }
-        $Arguments.Add("-$Name")
-        foreach ($Item in @($Value)) { $Arguments.Add("`"$Item`"") }
+        $Parts.Add("-$Name")
+        foreach ($Item in @($Value)) {
+            $EscapedItem = "$Item" -replace "'", "''"
+            $Parts.Add("'$EscapedItem'")
+        }
     }
-    return ($Arguments -join ' ')
+    return "-NoProfile -ExecutionPolicy Bypass -Command `"$($Parts -join ' ')`""
 }
 
 # Microsoft publishes Patch Tuesday updates around 10:00 Pacific, so -Schedule PatchTuesday aims for 10:30
