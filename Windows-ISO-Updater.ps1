@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.18.6   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.18.7   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -111,6 +111,9 @@ param(
 
     [Parameter(HelpMessage = 'Skip integrating updates entirely and simply extract and recompile the ISO (useful for testing the build pipeline)')]
     [switch]$SkipUpdates,
+
+    [Parameter(HelpMessage = 'Extract and recompile the ISO without applying any updates, drivers, or WIM servicing. Combine with -UnattendPath or -ExtraFilesPath to inject files into the extracted layout before it is repacked.')]
+    [switch]$SkipServicing,
 
     [Parameter(HelpMessage = 'Export the finished image as install.esd (LZMS "recovery" compression) instead of install.wim. Typically 25-40% smaller, which can bring the image under the 4 GB FAT32 limit for UEFI USB sticks, but the export is slow and the finished media cannot be serviced again without converting it back')]
     [switch]$CompressEsd,
@@ -259,7 +262,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.18.6'
+$ScriptVersion = '2026.08.18.7'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1550,7 +1553,7 @@ function Get-UpdateFileRecords {
 # deliberately left out: moving the working folder does not make last month's ISO wrong.
 $script:BuildAffectingParameters = @(
     'WindowsVersion', 'Server', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
-    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'SkipUpdates', 'CompressEsd', 'VolumeLabel',
+    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'SkipUpdates', 'SkipServicing', 'CompressEsd', 'VolumeLabel',
     'SkipTattoo', 'StripImageResidue', 'DriverPath', 'AllowUnsignedDrivers', 'ExtraFilesPath'
 )
 
@@ -4044,7 +4047,7 @@ if (-not $NoStamp) {
 
             # Says out loud that the catalog really was queried - a run that finishes in a second
             # otherwise looks like it only compared local files and never asked Microsoft anything.
-            if ($script:ExpectedUpdateSet -and -not $SkipUpdates -and -not $UpdatePath) {
+            if ($script:ExpectedUpdateSet -and -not $SkipUpdates -and -not $SkipServicing -and -not $UpdatePath) {
                 $Listed = @($script:ExpectedUpdateSet | ForEach-Object { $_ -replace '^(\w+)=(.+)@(.+)$', '$1 $2 (published $3)' })
                 Write-HostTimestamp "  The Microsoft Update Catalog was checked for $(Get-CatalogProductQuery -FeatureUpdate $StampFeature) $StampArch, newest available:" -ForegroundColor DarkGray
                 foreach ($Item in $Listed) { Write-HostTimestamp "    $Item" -ForegroundColor DarkGray }
@@ -4232,7 +4235,7 @@ $ImageUbr = if ($ImageInfo -and $null -ne $ImageInfo.SPBuild) { [int]$ImageInfo.
 # mount it would take to work one out for an unrecognised build.
 $FeatureName =
     if (-not $ImageBuild) { $null }
-    elseif ($SkipUpdates -or $UpdatePath) { Get-FeatureUpdateName -Build $ImageBuild }
+    elseif ($SkipUpdates -or $SkipServicing -or $UpdatePath) { Get-FeatureUpdateName -Build $ImageBuild }
     else { Resolve-FeatureUpdateName -Build $ImageBuild -WimPath $InstallWimExtracted }
 $ImageArch = switch ($ImageInfo.Architecture) { 0 { 'x86' } 9 { 'x64' } 12 { 'arm64' } default { $WinInfo.Architecture } }
 $CatalogArch = switch ($ImageArch) { 'x64' { 'x64' } 'arm64' { 'ARM64' } 'x86' { 'x86' } default { 'x64' } }
@@ -4266,7 +4269,7 @@ elseif ($Server -and $ImageInfo -and -not $ImageIsServer) {
 # published cumulative updates for those releases either, so all that is possible on media that old is a
 # straight repack.
 if ($ImageBuild -gt 0 -and $ImageBuild -lt 10240) {
-    $WillService = (-not $SkipUpdates) -or $DriverPath
+    $WillService = ((-not $SkipUpdates) -and (-not $SkipServicing)) -or $DriverPath
     Write-HostTimestamp "This image is build $ImageBuild, older than Windows 10 and Windows Server 2016 (build 10240)." -ForegroundColor $(if ($WillService) { 'Red' } else { 'Yellow' })
     if ($WillService) {
         Write-HostTimestamp '  DISM on this host cannot service an image that old, and the Microsoft Update Catalog has no cumulative update for it, so this run stops here.' -ForegroundColor Red
@@ -4298,7 +4301,7 @@ $UpdateGroups = New-Object System.Collections.Generic.List[object]
 $SafeOsGroup = $null
 $script:SetupDu = $null
 
-if ($SkipUpdates) {
+if ($SkipUpdates -or $SkipServicing) {
     Write-HostTimestamp 'Skipping update integration (-SkipUpdates was specified).' -ForegroundColor Yellow
     Write-Host $LineBreak
 }
