@@ -116,6 +116,15 @@ that is your job with the failure in hand.
 Skip the subagent for a pure rename, a comment, a string change, or a docs-only edit. Testing those
 costs more than it proves.
 
+## Documentation validation
+
+After implementation and behaviour testing are complete, invoke **Doc Scribe** as a subagent to check
+whether any documentation needs updating. Tell it what changed (new parameters, renamed terms, altered
+behaviour, new constraints) and let it decide which files are affected.
+
+Skip Doc Scribe for a pure internal refactor that changes no user-visible behaviour, parameter names,
+output, or file layout.
+
 ## Writing style
 
 Never use em dashes or semicolons in prose, including code comments and host output strings. Use
