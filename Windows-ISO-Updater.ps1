@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.18.8   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.18.9   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -262,7 +262,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.18.8'
+$ScriptVersion = '2026.08.18.9'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -3704,7 +3704,7 @@ if ($ExtraFilesPath) {
         exit 1
     }
     $script:ExtraFilesHash = Get-FolderContentHash -Records $script:ExtraFileRecords
-    $ExtraSizeMB = [math]::Round((($script:ExtraFileRecords | Measure-Object -Property SizeKB -Sum).Sum) / 1024, 1)
+    $ExtraSizeMB = [math]::Round((($script:ExtraFileRecords | ForEach-Object { $_['SizeKB'] } | Measure-Object -Sum).Sum) / 1024, 1)
     Write-HostTimestamp "Extra files    : $($script:ExtraFileRecords.Count) file(s) in $ResolvedExtraFiles ($ExtraSizeMB MB), copied to the root of the ISO" -ForegroundColor Green
     Write-Host $LineBreak
 }
