@@ -188,6 +188,8 @@ For environments where hot-patch eligibility is a hard requirement, two postures
 - **Service against a known baseline CU.** Only run this tool after a baseline month's cumulative update has published (months 1 and 4 of each quarter). The resulting image starts at baseline level and is eligible for hot patches in the months that follow.
 - **Deploy a lightly-patched image and patch online first.** Build the ISO against any available LCU, deploy the machine, and let Windows Update apply the current LCU through the normal online stack before enrolling the device in Intune hot-patch policy. This guarantees that CBS state is established the way Microsoft's hot-patch stack expects.
 
+The script also provides a `-BaselineOnly` switch for automating the first posture. When set, it checks the Update Catalog for a co-published "Hotpatch" title and, if one is found, skips the cumulative update step so the image stays on the prior baseline CU and remains hotpatch-eligible after deployment.
+
 This is a known tradeoff in offline servicing, not a defect in this tool.
 
 [← Back to README](../README.md)

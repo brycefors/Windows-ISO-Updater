@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.18.11   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.19.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -108,6 +108,9 @@ param(
 
     [Parameter(HelpMessage = 'Also service the recovery image (winre.wim). Off by default. The correct component for WinRE is the Safe OS Dynamic Update, which is fetched when available')]
     [switch]$ServiceWinRE,
+
+    [Parameter(HelpMessage = 'Skip the cumulative update in hotpatch non-baseline months (February, March, May, June, August, September, November, December). Use only for Windows 11 Enterprise 24H2 media enrolled in Intune or Azure Arc hotpatch. In baseline months (January, April, July, October) the cumulative update is integrated normally.')]
+    [switch]$BaselineOnly,
 
     [Parameter(HelpMessage = 'Skip integrating updates entirely and simply extract and recompile the ISO (useful for testing the build pipeline)')]
     [switch]$SkipUpdates,
@@ -265,7 +268,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.18.11'
+$ScriptVersion = '2026.08.19.1'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1310,6 +1313,19 @@ function Get-KbTargetBuilds {
     return $Builds
 }
 
+function Test-IsHotpatchMonth {
+    param(
+        [Parameter(Mandatory)][object[]]$AllResults,
+        [Parameter(Mandatory)][datetime]$ReferenceDate
+    )
+    $Ym = $ReferenceDate.ToString('yyyy-MM')
+    return [bool]($AllResults | Where-Object {
+        $_.Title -match '(?i)hotpatch' -and
+        $_.LastUpdated -and
+        ([datetime]$_.LastUpdated).ToString('yyyy-MM') -eq $Ym
+    })
+}
+
 # Finds the newest, non-preview cumulative update in the catalog for a given search query, downloads it
 # to the download folder, and returns the local .msu path (or $null on failure).
 function Get-LatestCatalogPackage {
@@ -1322,7 +1338,8 @@ function Get-LatestCatalogPackage {
         [int]$CurrentBuild,      # OS build already in the image - set to enable the up-to-date check
         [int]$CurrentUbr,        # UBR from the WIM header (only a hint - it is confirmed before use)
         [string]$VerifyWimPath,  # WIM to mount read-only to confirm that UBR before anything is skipped
-        [ref]$AlreadyCurrent     # receives the image's confirmed build when the update is not needed
+        [ref]$AlreadyCurrent,    # receives the image's confirmed build when the update is not needed
+        [switch]$BaselineOnly
     )
 
     Write-HostTimestamp "  Searching the Microsoft Update Catalog for: $Query"
@@ -1352,6 +1369,12 @@ function Get-LatestCatalogPackage {
     }
 
     Write-HostTimestamp "  Selected: $($Selected.Title)$(if ($Selected.LastUpdated) { " (released $($Selected.LastUpdated.ToString('yyyy-MM-dd')))" })" -ForegroundColor Green
+
+    if ($BaselineOnly -and $Selected.LastUpdated -and (Test-IsHotpatchMonth -AllResults $Results -ReferenceDate ([datetime]$Selected.LastUpdated))) {
+        Write-HostTimestamp "  -BaselineOnly: $($Selected.LastUpdated.ToString('yyyy-MM')) is a hotpatch non-baseline month - skipping this cumulative update." -ForegroundColor Yellow
+        $script:LcuSkippedBaselineOnly = $true
+        return $null
+    }
 
     $PrimaryKb = if ($Selected.Title -match '(?i)KB(\d{6,})') { $Matches[1] } else { $null }
 
@@ -1556,7 +1579,7 @@ function Get-UpdateFileRecords {
 # deliberately left out: moving the working folder does not make last month's ISO wrong.
 $script:BuildAffectingParameters = @(
     'WindowsVersion', 'Server', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
-    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'SkipUpdates', 'SkipServicing', 'CompressEsd', 'FastCompression', 'VolumeLabel',
+    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'BaselineOnly', 'SkipUpdates', 'SkipServicing', 'CompressEsd', 'FastCompression', 'VolumeLabel',
     'SkipTattoo', 'StripImageResidue', 'DriverPath', 'AllowUnsignedDrivers', 'ExtraFilesPath'
 )
 
@@ -1812,7 +1835,16 @@ function Get-ExpectedUpdateSet {
         $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude
     }
     if (-not $Lcu) { return $null }
-    $Set.Add("LCU=$(Get-CatalogEntryTag -Entry $Lcu)")
+    if ($BaselineOnly -and $Lcu.LastUpdated) {
+        $LcuRaw = Search-UpdateCatalog -Query "Cumulative Update for $Product for $CatalogArch-based Systems"
+        if ($LcuRaw -and (Test-IsHotpatchMonth -AllResults $LcuRaw -ReferenceDate ([datetime]$Lcu.LastUpdated))) {
+            $Set.Add('LCU=Skipped-BaselineOnly')
+        } else {
+            $Set.Add("LCU=$(Get-CatalogEntryTag -Entry $Lcu)")
+        }
+    } else {
+        $Set.Add("LCU=$(Get-CatalogEntryTag -Entry $Lcu)")
+    }
 
     if (-not $SkipDotNet) {
         $DotNet = Get-CatalogLatestEntry -Query "Cumulative Update for .NET Framework $Product for $CatalogArch" -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update'
@@ -4337,13 +4369,14 @@ else {
         $Include = '(?i)cumulative update for (windows|microsoft server operating system)'
         $Exclude = '(?i)\.net|dynamic update'
         $script:LcuUpToDate = $null
-        $script:Lcu = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate)
+        $script:LcuSkippedBaselineOnly = $false
+        $script:Lcu = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly
         if (-not $script:Lcu -and -not $script:LcuUpToDate -and -not $Server) {
             # Retry with a looser query (some releases omit the "Version xxHx" token in the title). Server
             # media is excluded because its product name without the version matches every Server release.
             $Query2 = "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems"
             Write-HostTimestamp "  Retrying with a broader query: $Query2" -ForegroundColor Yellow
-            $script:Lcu = Get-LatestCatalogPackage -Query $Query2 -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate)
+            $script:Lcu = Get-LatestCatalogPackage -Query $Query2 -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly
         }
     }
     if ($script:Lcu) { $UpdateGroups.Add(@($script:Lcu)) }
@@ -4351,6 +4384,9 @@ else {
         # Nothing will change the OS build now, so reuse the build already confirmed by the check.
         if (-not $script:FinalBuildString) { $script:FinalBuildString = $script:LcuUpToDate }
         Write-HostTimestamp "The image is already fully patched ($script:LcuUpToDate), so no cumulative update is needed." -ForegroundColor Green
+    }
+    elseif ($script:LcuSkippedBaselineOnly) {
+        Write-HostTimestamp '  Cumulative update skipped - image stays on prior baseline for hotpatch compatibility.' -ForegroundColor Yellow
     }
     else {
         Write-HostTimestamp 'Could not obtain a cumulative update from the catalog. You can supply one with -UpdatePath, or use -SkipUpdates to just recompile the ISO.' -ForegroundColor Red
