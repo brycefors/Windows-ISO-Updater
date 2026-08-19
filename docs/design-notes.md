@@ -179,6 +179,8 @@ None of those came out of a prompt. They came out of having been bitten before, 
 
 Windows 11 24H2 Enterprise supports hot-patching through Intune or Azure Arc on a quarterly cadence. Months 1 and 4 of each quarter require a full cumulative update baseline. Months 2 and 3 receive lightweight in-memory hot patches that do not rewrite image files on disk.
 
+Hotpatch updates cannot be applied offline via DISM at all. A regular cumulative update replaces binaries on disk, which is exactly what DISM's offline package injection does. A hotpatch instead modifies already-loaded code in the running kernel's address space and has no files to swap into a WIM image, so there is nothing for DISM to inject. The intended workflow is to offline-service the ISO with the baseline CU using `-BaselineOnly`, deploy the image, enroll the device in Intune or Azure Arc hotpatch policy, and let Windows Update deliver the in-quarter hotpatches to the live system at runtime.
+
 When this tool integrates the Latest Cumulative Update offline with DISM, the WIM is updated by direct package injection rather than through the online Windows Update Agent and CBS stack that a running system uses. The CBS state the hot-patch subsystem reads to confirm baseline eligibility is built up by that online stack during a normal update, and offline servicing does not replicate it fully.
 
 If the integrated LCU is a non-baseline (in-quarter) update, the resulting image may not carry the CBS metadata the hot-patch system expects. The symptom is that hot patches fail to apply and the machine waits until the next baseline month before hot-patching resumes.
