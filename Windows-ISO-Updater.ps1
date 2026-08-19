@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.18.10   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.18.11   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -265,7 +265,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.18.10'
+$ScriptVersion = '2026.08.18.11'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -3199,7 +3199,10 @@ function Get-WimBuildViaMount {
 # the image's offline SOFTWARE hive - reusing the value captured during servicing, or mounting read-only if
 # there is none (mounting a finished image, especially a recovery-compressed .esd, costs several minutes).
 function Show-FinalImageInfo {
-    param([Parameter(Mandatory)][string]$WimPath)
+    param(
+        [Parameter(Mandatory)][string]$WimPath,
+        [string]$FallbackBuildString = ''
+    )
 
     $Images = $null
     try { $Images = @(Get-WindowsImage -ImagePath $WimPath -ErrorAction Stop) } catch { }
@@ -3212,27 +3215,9 @@ function Show-FinalImageInfo {
     foreach ($Img in $Images) { Write-Host ("    [{0}] {1}" -f $Img.ImageIndex, $Img.ImageName) }
 
     # Read the exact build (with UBR) from the first index's SOFTWARE hive.
-    $BuildStr = $script:FinalBuildString
-    if (-not $BuildStr) {
-        $Mnt = Join-Path -Path $WorkRoot -ChildPath 'BuildCheck'
-        Write-HostTimestamp '  Nothing was serviced this run, so the image has to be mounted to read its exact build. This takes a few minutes...' -ForegroundColor DarkGray
-        try {
-            Reset-MountDirectory -Path $Mnt -ImagePath $WimPath
-            Mount-WindowsImage -ImagePath $WimPath -Index $Images[0].ImageIndex -Path $Mnt -ReadOnly -ErrorAction Stop | Out-Null
-            $BuildStr = Get-MountedImageBuild -MountPath $Mnt
-            Dismount-ImageDiscard -Path $Mnt | Out-Null
-        }
-        catch {
-            Dismount-ImageDiscard -Path $Mnt | Out-Null
-        }
-        finally {
-            # Removing a directory DISM still tracks as mounted is what orphans a mount point, so leave it alone
-            # if the discard above did not take.
-            if (-not (Get-WindowsImage -Mounted -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.TrimEnd('\') -ieq $Mnt.TrimEnd('\') })) {
-                Remove-Item -LiteralPath $Mnt -Recurse -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
+    $BuildStr = if ($script:FinalBuildString) { $script:FinalBuildString }
+                elseif ($FallbackBuildString) { $FallbackBuildString }
+                else { $null }
 
     if ($BuildStr) { Write-HostTimestamp "Final OS build: $BuildStr" -ForegroundColor Cyan }
     else { Write-HostTimestamp "Final OS build: $($Images[0].Version) (revision unavailable)" -ForegroundColor Cyan }
@@ -5085,7 +5070,8 @@ if ($BuildIsoPath -ne $OutputIsoPath) {
 
 #region Report the final image contents (editions + build) before the working files are removed
 Invoke-Task -Description 'Reading the final image details...' -ScriptBlock {
-    Show-FinalImageInfo -WimPath $FinalInstallImage
+    $FallbackBuild = if ($FeatureName) { "$ImageVersionText ($FeatureName)" } else { $ImageVersionText }
+    Show-FinalImageInfo -WimPath $FinalInstallImage -FallbackBuildString $FallbackBuild
 }
 
 #endregion
