@@ -45,7 +45,7 @@ param(
     [switch]$Deep,
 
     [Parameter(HelpMessage = 'Catalog search to test the Update Catalog parsing with. Defaults to the current client cumulative update')]
-    [string]$CatalogQuery = 'Cumulative Update for Windows 11 Version 24H2 x64',
+    [string]$CatalogQuery = 'Cumulative Update for Windows 11 Version 25H2 x64',
 
     [Parameter(HelpMessage = 'Seconds to wait on any single web request')]
     [ValidateRange(5, 600)]
@@ -187,12 +187,14 @@ function Get-ScriptFunctionText {
 }
 
 $Borrowed = @(
-    'Test-MicrosoftDownloadUrl',
-    'Test-FidoUrl',
-    'Test-FidoScript',
-    'Search-UpdateCatalog',
+    'Get-KbTargetBuilds',
+    'Get-ScheduledTaskArgumentString',
     'Get-UpdateCatalogDownloadUrl',
-    'Get-KbTargetBuilds'
+    'Search-UpdateCatalog',
+    'Test-FidoScript',
+    'Test-FidoUrl',
+    'Test-IsHotpatchMonth',
+    'Test-MicrosoftDownloadUrl'
 )
 $Missing = @($Borrowed | Where-Object { -not (Get-ScriptFunctionText -Name $_) })
 if ($Missing.Count -gt 0) {
@@ -543,6 +545,124 @@ try {
             }
             catch {
                 Add-Result -Area 'Self-update' -Status 'Fail' -Message "Could not fetch the published script: $($_.Exception.Message)" -Action 'The batch file cannot self-heal a missing .ps1 until this URL works again. Check the repository name, branch and visibility.'
+            }
+        }
+    }
+
+    # --- Argument string (credential exclusion) ---
+
+    Write-Section 'Argument string (credential exclusion)'
+
+    $ArgStringFn = Get-ScriptFunctionText -Name 'Get-ScheduledTaskArgumentString'
+    if (-not $ArgStringFn) {
+        Add-Result -Area 'ArgString' -Status 'Fail' -Message 'Get-ScheduledTaskArgumentString was not found in the script.' -Action 'The function was renamed or removed. Update this tester.'
+    }
+    else {
+        try {
+            $script:ScriptBoundParameters = @{ TaskPassword = 'hunter2'; TaskUsername = 'DOMAIN\svc'; IsoPath = 'C:\test.iso'; WindowsVersion = '11' }
+            $script:ScriptPath = $ScriptPath
+            . ([scriptblock]::Create($ArgStringFn))
+            $ArgOut = Get-ScheduledTaskArgumentString
+            if ($ArgOut -match 'hunter2') {
+                Add-Result -Area 'ArgString' -Status 'Fail' -Message 'The TaskPassword value appeared in the serialised argument string.' -Action 'Add TaskPassword to the $Excluded list in Get-ScheduledTaskArgumentString immediately.'
+            }
+            elseif ($ArgOut -match 'TaskPassword') {
+                Add-Result -Area 'ArgString' -Status 'Fail' -Message 'The TaskPassword parameter name appeared in the serialised argument string.' -Action 'Add TaskPassword to the $Excluded list in Get-ScheduledTaskArgumentString immediately.'
+            }
+            else {
+                Add-Result -Area 'ArgString' -Status 'Pass' -Message 'TaskPassword is excluded from the serialised argument string.'
+                Write-Detail $ArgOut
+            }
+        }
+        catch {
+            Add-Result -Area 'ArgString' -Status 'Fail' -Message "Get-ScheduledTaskArgumentString threw: $($_.Exception.Message)" -Action 'The function signature or its dependencies changed. Read the function and update this test.'
+        }
+        finally {
+            $script:ScriptBoundParameters = @{}
+        }
+    }
+
+    # --- Hotpatch month detection ---
+
+    Write-Section 'Hotpatch month detection'
+
+    $HotpatchFn = Get-ScriptFunctionText -Name 'Test-IsHotpatchMonth'
+    if (-not $HotpatchFn) {
+        Add-Result -Area 'Hotpatch' -Status 'Fail' -Message 'Test-IsHotpatchMonth was not found in the script.' -Action 'The function was renamed or removed. Update this tester.'
+    }
+    else {
+        try {
+            . ([scriptblock]::Create($HotpatchFn))
+            $Today = [datetime]::Today
+            $PriorMonth = $Today.AddMonths(-1)
+            $HotpatchEntry = [pscustomobject]@{ Title = 'Hotpatch Update for Windows 11'; LastUpdated = $Today.ToString('M/d/yyyy') }
+            $PriorEntry    = [pscustomobject]@{ Title = 'Hotpatch Update for Windows 11'; LastUpdated = $PriorMonth.ToString('M/d/yyyy') }
+            $NullEntry     = [pscustomobject]@{ Title = 'Regular Update'; LastUpdated = $null }
+            if (-not (Test-IsHotpatchMonth -AllResults @($HotpatchEntry) -ReferenceDate $Today)) {
+                Add-Result -Area 'Hotpatch' -Status 'Fail' -Message 'Test-IsHotpatchMonth returned false for a hotpatch entry in the current month.' -Action 'The date comparison or title regex changed. Read the function and fix it.'
+            }
+            elseif (Test-IsHotpatchMonth -AllResults @($PriorEntry) -ReferenceDate $Today) {
+                Add-Result -Area 'Hotpatch' -Status 'Fail' -Message 'Test-IsHotpatchMonth returned true for a prior-month hotpatch entry.' -Action 'The date comparison in Test-IsHotpatchMonth changed. Read the function and fix it.'
+            }
+            else {
+                Test-IsHotpatchMonth -AllResults @($NullEntry) -ReferenceDate $Today | Out-Null
+                Add-Result -Area 'Hotpatch' -Status 'Pass' -Message 'Test-IsHotpatchMonth correctly identifies hotpatch months and handles null LastUpdated.'
+            }
+        }
+        catch {
+            Add-Result -Area 'Hotpatch' -Status 'Fail' -Message "Test-IsHotpatchMonth threw unexpectedly: $($_.Exception.Message)" -Action 'The function signature changed. Read the function and update this test.'
+        }
+    }
+
+    # --- Answer file scripts (Examples/) ---
+
+    Write-Section 'Answer file scripts (Examples/)'
+
+    $ExamplesDir = Join-Path -Path (Split-Path -Parent $ScriptPath) -ChildPath 'Examples'
+    $XmlFiles = @(Get-ChildItem -LiteralPath $ExamplesDir -Filter '*.xml' -ErrorAction SilentlyContinue)
+    if ($XmlFiles.Count -eq 0) {
+        Add-Result -Area 'AnswerFiles' -Status 'Warn' -Message 'No .xml files found in Examples/.' -Action 'Check that the Examples folder is next to Windows-ISO-Updater.ps1.'
+    }
+    else {
+        foreach ($XmlFile in $XmlFiles) {
+            Write-Detail $XmlFile.Name
+            try {
+                [xml]$Doc = Get-Content -LiteralPath $XmlFile.FullName -Raw -ErrorAction Stop
+            }
+            catch {
+                Add-Result -Area 'AnswerFiles' -Status 'Fail' -Message "$($XmlFile.Name) is not valid XML: $($_.Exception.Message)" -Action 'Fix the XML syntax error before next deployment.'
+                continue
+            }
+
+            $Ns = New-Object System.Xml.XmlNamespaceManager($Doc.NameTable)
+            $Ns.AddNamespace('e', 'https://schneegans.de/windows/unattend-generator/')
+
+            $PayloadNodes = @($Doc.SelectNodes('//e:File | //e:ExtractScript', $Ns))
+            if ($PayloadNodes.Count -eq 0) {
+                Add-Result -Area 'AnswerFiles' -Status 'Pass' -Message "$($XmlFile.Name): no embedded script payloads found."
+                continue
+            }
+
+            $PayloadErrors = 0
+            foreach ($Node in $PayloadNodes) {
+                $Src = $Node.InnerText
+                if ([string]::IsNullOrWhiteSpace($Src)) { continue }
+                $PsErrors = $null
+                [System.Management.Automation.Language.Parser]::ParseInput($Src, [ref]$null, [ref]$PsErrors) | Out-Null
+                if ($PsErrors -and $PsErrors.Count -gt 0) {
+                    $PayloadErrors++
+                    $NodeId = if ($Node.path) { $Node.path } elseif ($Node.name) { $Node.name } else { $Node.LocalName }
+                    foreach ($E in $PsErrors) {
+                        Write-Detail "  $NodeId line $($E.Extent.StartLineNumber): $($E.Message)"
+                    }
+                }
+            }
+
+            if ($PayloadErrors -gt 0) {
+                Add-Result -Area 'AnswerFiles' -Status 'Fail' -Message "$($XmlFile.Name): $PayloadErrors embedded script(s) have parse errors." -Action 'Fix the payload scripts before next deployment. Run this tester after every answer file edit.'
+            }
+            else {
+                Add-Result -Area 'AnswerFiles' -Status 'Pass' -Message "$($XmlFile.Name): all $($PayloadNodes.Count) embedded script(s) parse cleanly."
             }
         }
     }
