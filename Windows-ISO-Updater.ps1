@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.19.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.19.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -256,6 +256,12 @@ param(
     [Parameter(HelpMessage = 'Name of the scheduled task to create or delete. Defaults to "Windows ISO Updater"')]
     [string]$TaskName = 'Windows ISO Updater',
 
+    [Parameter(HelpMessage = 'Username of the account to run the scheduled task as (e.g. DOMAIN\SvcAccount). Defaults to SYSTEM when omitted.')]
+    [string]$TaskUsername,
+
+    [Parameter(HelpMessage = 'Password for the TaskUsername account. Never stored in the task action arguments or written to logs.')]
+    [string]$TaskPassword,
+
     [switch]$SkipInteractive # Skips the interactive confirmation prompt
 )
 #endregion
@@ -268,7 +274,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.19.1'
+$ScriptVersion = '2026.08.19.2'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2028,7 +2034,7 @@ function Invoke-AutoClean {
 function Get-ScheduledTaskArgumentString {
     $Excluded = @(
         'RegisterScheduledTask', 'UnregisterScheduledTask', 'Schedule', 'ScheduleTime', 'ScheduleDay',
-        'TaskName', 'CheckOnly', 'Force', 'ListEditions', 'Unattended', 'SkipInteractive', 'Scheduled'
+        'TaskName', 'TaskUsername', 'TaskPassword', 'CheckOnly', 'Force', 'ListEditions', 'Unattended', 'SkipInteractive', 'Scheduled'
     )
     # -Command keeps single-quoted string literals intact; -File strips quotes and misreads
     # hyphen-prefixed values (e.g. '-unattended') as switch names.
@@ -2101,6 +2107,21 @@ function Register-UpdaterScheduledTask {
     }
     if (-not $script:ScriptPath -or -not (Test-Path -LiteralPath $script:ScriptPath)) {
         throw 'The path of this script could not be determined, so a scheduled task cannot point at it.'
+    }
+
+    if ($TaskPassword -and -not $TaskUsername) {
+        throw '-TaskPassword requires -TaskUsername. Omit both to run the task as SYSTEM.'
+    }
+
+    # NT SERVICE\ virtual accounts are synthetic and will not resolve through NTAccount.Translate
+    if ($TaskUsername -and $TaskUsername -notlike 'NT SERVICE\*') {
+        try {
+            ([System.Security.Principal.NTAccount]$TaskUsername).Translate(
+                [System.Security.Principal.SecurityIdentifier]) | Out-Null
+        }
+        catch {
+            throw "The account '$TaskUsername' could not be resolved: $($_.Exception.Message)"
+        }
     }
 
     $TimeText = $ScheduleTime
@@ -2184,24 +2205,49 @@ function Register-UpdaterScheduledTask {
     $Exe = if ($PSVersionTable.PSEdition -eq 'Core') { Join-Path -Path $PSHOME -ChildPath 'pwsh.exe' } else { Join-Path -Path $PSHOME -ChildPath 'powershell.exe' }
     $ArgumentString = Get-ScheduledTaskArgumentString
     $Action = New-ScheduledTaskAction -Execute $Exe -Argument $ArgumentString -WorkingDirectory (Split-Path -Parent $script:ScriptPath)
-    # SYSTEM so the task needs no stored password, and it is also already elevated, which DISM requires.
-    $Principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    if ($TaskUsername) {
+        $Principal = New-ScheduledTaskPrincipal -UserId $TaskUsername -LogonType Password -RunLevel Highest
+    } else {
+        # SYSTEM needs no stored password and is already elevated for DISM.
+        $Principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    }
     $Settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
         -ExecutionTimeLimit (New-TimeSpan -Hours 8)
 
-    Register-ScheduledTask -TaskName $TaskName -Trigger $Trigger -Action $Action -Principal $Principal `
-        -Settings $Settings -Description 'Rebuilds an up-to-date Windows installation ISO (Windows-ISO-Updater). Skips the build when nothing has changed.' -Force -ErrorAction Stop | Out-Null
+    $RegParams = @{
+        TaskName    = $TaskName
+        Trigger     = $Trigger
+        Action      = $Action
+        Principal   = $Principal
+        Settings    = $Settings
+        Description = 'Rebuilds an up-to-date Windows installation ISO (Windows-ISO-Updater). Skips the build when nothing has changed.'
+        Force       = $true
+        ErrorAction = 'Stop'
+    }
+    if ($TaskPassword) { $RegParams['Password'] = $TaskPassword }
+    Register-ScheduledTask @RegParams | Out-Null
 
     if ($CalendarXml) {
-        # No -User here: the exported XML already carries the principal, settings and action unchanged.
+        # Monthly triggers can only be set through XML; re-register after swapping the placeholder weekly trigger.
         $TaskXml = (Export-ScheduledTask -TaskName $TaskName) -replace '(?s)<ScheduleByWeek>.*?</ScheduleByWeek>', $CalendarXml
-        Register-ScheduledTask -TaskName $TaskName -Xml $TaskXml -Force -ErrorAction Stop | Out-Null
+        $XmlRegParams = @{
+            TaskName    = $TaskName
+            Xml         = $TaskXml
+            Force       = $true
+            ErrorAction = 'Stop'
+        }
+        if ($TaskUsername) { $XmlRegParams['User'] = $TaskUsername }
+        if ($TaskPassword) { $XmlRegParams['Password'] = $TaskPassword }
+        Register-ScheduledTask @XmlRegParams | Out-Null
     }
 
-    Write-HostTimestamp "Scheduled task '$TaskName' registered: runs $When as SYSTEM." -ForegroundColor Green
+    $PrincipalUser = if ($TaskUsername) { $TaskUsername } else { 'SYSTEM' }
+    Write-HostTimestamp "Scheduled task '$TaskName' registered: runs $When as $PrincipalUser." -ForegroundColor Green
     Write-HostTimestamp "  Command: `"$Exe`" $ArgumentString" -ForegroundColor DarkGray
-    Write-HostTimestamp '  It runs as SYSTEM, so every path it uses must be a local path SYSTEM can reach (not a mapped drive or a cloud-synced user folder).' -ForegroundColor Yellow
+    if (-not $TaskUsername) {
+        Write-HostTimestamp '  It runs as SYSTEM, so every path it uses must be a local path SYSTEM can reach (not a mapped drive or a cloud-synced user folder).' -ForegroundColor Yellow
+    }
     Write-HostTimestamp "  Each run compares the build stamp in $StampRoot and exits in a minute or two when nothing has changed." -ForegroundColor DarkGray
     Write-HostTimestamp "  Remove it again with: -UnregisterScheduledTask -TaskName `"$TaskName`"" -ForegroundColor DarkGray
 }

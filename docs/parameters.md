@@ -75,3 +75,5 @@ See [Scheduled Runs](scheduled-runs.md) for how these fit together.
 | `-ScheduleTime` | Time of day the registered task starts, as 24-hour `HH:mm`. Defaults to `03:00`, or for `-Schedule PatchTuesday` to whatever **10:30 Pacific** works out to in this machine's time zone, daylight saving included. |
 | `-ScheduleDay` | Which day the registered task runs: a weekday name for `-Schedule Weekly` (default `Sunday`), or a day number `1`-`31` for `-Schedule Monthly` (default `15`, a few days after Patch Tuesday). Ignored by `-Schedule PatchTuesday`. |
 | `-TaskName` | Name of the scheduled task to create or delete. Defaults to `Windows ISO Updater`. |
+| `-TaskUsername` | Username of the account to run the scheduled task as (e.g. `DOMAIN\SvcAccount`). Defaults to `SYSTEM` when omitted. |
+| `-TaskPassword` | Password for the `-TaskUsername` account. Never written to logs or stored in the task action arguments. |
