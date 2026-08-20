@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.19.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.19.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -65,6 +65,8 @@
 #endregion
 
 #region Parameters
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'TaskPassword',
+    Justification = 'Register-ScheduledTask -Password requires [string]. The value is excluded from all command-line surfaces and logs by design.')]
 param(
     [Parameter(HelpMessage = 'Runs the script without any confirmation prompts')]
     [switch]$Unattended,
@@ -274,7 +276,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.19.2'
+$ScriptVersion = '2026.08.19.3'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -316,6 +318,7 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
         $ArgumentList = @("-File", "`"$($MyInvocation.MyCommand.Path)`"")
         # Re-add any passed parameters
         foreach ($Parameter in $PSBoundParameters.Keys) {
+            if ($Parameter -eq 'TaskPassword') { continue }
             $Value = $PSBoundParameters[$Parameter]
             if ($Value -is [switch]) {
                 if ($Value.IsPresent) { $ArgumentList += "-$Parameter" }
@@ -324,6 +327,12 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
                 $ArgumentList += "-$Parameter"
                 $ArgumentList += "`"$Value`""
             }
+        }
+
+        # Prompt for the password here rather than passing it on the command line
+        if ($PSBoundParameters.ContainsKey('TaskUsername') -and -not $Unattended -and -not $SkipInteractive) {
+            $ArgumentList += '-TaskPassword'
+            $ArgumentList += "`"$(Read-Host 'TaskPassword (for the elevated session)')`""
         }
 
         Start-Process -FilePath PowerShell.exe -Verb Runas -ArgumentList $ArgumentList
@@ -730,7 +739,7 @@ function Get-FileDownload {
     # Fallback: Invoke-WebRequest. Slower and not resumable, but dependency-free.
     try {
         Write-HostTimestamp '  Downloading with Invoke-WebRequest...'
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -ErrorAction Stop
         if (Test-Path -LiteralPath $Destination) { return $true }
     }
@@ -819,7 +828,10 @@ function Test-FidoScript {
         'Add-LocalGroupMember', 'reg', 'reg.exe', 'regedit', 'regedit.exe', 'regsvr32', 'regsvr32.exe',
         'bcdedit', 'bcdedit.exe', 'certutil', 'certutil.exe', 'bitsadmin', 'bitsadmin.exe', 'mshta', 'mshta.exe',
         'rundll32', 'rundll32.exe', 'wmic', 'wmic.exe', 'vssadmin', 'vssadmin.exe', 'diskpart', 'diskpart.exe',
-        'cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe'
+        'cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe',
+        'msiexec', 'msiexec.exe', 'wscript', 'wscript.exe', 'cscript', 'cscript.exe',
+        'msbuild', 'msbuild.exe', 'installutil', 'installutil.exe', 'regasm', 'regasm.exe',
+        'regsvcs', 'regsvcs.exe'
     )
     $Used = $Ast.FindAll({ param($Node) $Node -is [System.Management.Automation.Language.CommandAst] }, $true) |
         ForEach-Object { $_.GetCommandName() } | Where-Object { $_ }
@@ -1207,7 +1219,7 @@ function Search-UpdateCatalog {
 
     $EncodedQuery = [System.Uri]::EscapeDataString($Query)
     $SearchUrl = "https://www.catalog.update.microsoft.com/Search.aspx?q=$EncodedQuery"
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
     try {
         $Response = Invoke-WebRequest -Uri $SearchUrl -UseBasicParsing -ErrorAction Stop
@@ -1277,7 +1289,7 @@ function Get-UpdateCatalogDownloadUrl {
 
     $DialogUrl = 'https://www.catalog.update.microsoft.com/DownloadDialog.aspx'
     $Body = "updateIDs=[{`"size`":0,`"languages`":`"`",`"uidInfo`":`"$Guid`",`"updateID`":`"$Guid`"}]&updateIDsBlockedForImport=&wsusApiPresent=&contentImport=&sqlserverImport=&updateID=$Guid"
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
     try {
         $Response = Invoke-WebRequest -Uri $DialogUrl -Method Post -Body $Body -ContentType 'application/x-www-form-urlencoded' -UseBasicParsing -ErrorAction Stop
@@ -2307,7 +2319,7 @@ function Get-OscdimgDownload {
     Remove-Item -LiteralPath $Temp -Force -ErrorAction SilentlyContinue
     Write-HostTimestamp "  Downloading oscdimg.exe from the Microsoft symbol server: $OscdimgUrl"
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $OscdimgUrl -OutFile $Temp -UseBasicParsing -UserAgent 'Microsoft-Symbol-Server/10.0.0.0' -ErrorAction Stop
     }
     catch {
@@ -2384,6 +2396,14 @@ function Install-AdkDeploymentTools {
         Write-HostTimestamp '  Could not download the ADK setup bootstrapper.' -ForegroundColor Red
         return $null
     }
+
+    $Signature = Get-AuthenticodeSignature -LiteralPath $Setup -ErrorAction SilentlyContinue
+    if ($Signature.Status -ne 'Valid' -or $Signature.SignerCertificate.Subject -notmatch '(?i)O=Microsoft Corporation') {
+        Write-HostTimestamp "  The downloaded ADK setup is not validly signed by Microsoft (status: $($Signature.Status)). Discarding it." -ForegroundColor Red
+        Remove-Item -LiteralPath $Setup -Force -ErrorAction SilentlyContinue
+        return $null
+    }
+    Write-HostTimestamp '  Verified the ADK setup bootstrapper carries a valid Microsoft signature.' -ForegroundColor Green
 
     Write-HostTimestamp '  Installing the ADK Deployment Tools silently (this downloads a few hundred MB and takes a few minutes)...'
     try {
@@ -2613,9 +2633,12 @@ function Register-MountCleanupTask {
     # teardown DISM should have done itself: strip the reparse point and attributes the WIM filter leaves
     # on a half-released mount, drop the registry entry that /Cleanup-Mountpoints skips when the mount is
     # too broken for DISM to recognise, and only then take ownership and delete.
+    $EscCleanupLog    = $CleanupLog    -replace "'", "''"
+    $EscCleanupScript = $CleanupScript -replace "'", "''"
+    $EscCleanupTaskName = $CleanupTaskName -replace "'", "''"
     $Body = @"
 `$ErrorActionPreference = 'SilentlyContinue'
-Start-Transcript -Path '$CleanupLog' -Append | Out-Null
+Start-Transcript -Path '$EscCleanupLog' -Append | Out-Null
 `$Targets = @($PathList)
 
 foreach (`$Target in `$Targets) {
@@ -2664,8 +2687,8 @@ foreach (`$Target in `$Targets) {
 Remove-Item -LiteralPath `$EmptyDir -Recurse -Force
 
 Stop-Transcript | Out-Null
-Unregister-ScheduledTask -TaskName '$CleanupTaskName' -Confirm:`$false
-Remove-Item -LiteralPath '$CleanupScript' -Force
+Unregister-ScheduledTask -TaskName '$EscCleanupTaskName' -Confirm:`$false
+Remove-Item -LiteralPath '$EscCleanupScript' -Force
 "@
 
     try {

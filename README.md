@@ -8,7 +8,7 @@ This PowerShell script automates the whole process. A clean install or in-place 
 
 ## Quick Start
 
-1.  Put `Run-Windows-ISO-Updater.bat` and `Windows-ISO-Updater.ps1` in the same folder. (If the `.ps1` is missing, the batch file downloads it.)
+1.  Put `Run-Windows-ISO-Updater.bat` and `Windows-ISO-Updater.ps1` in the same folder.
 2.  Have a Windows ISO ready. Drop it into `C:\WISO-Work\Downloads` or pass it with `-IsoPath`. The script does not fetch one for you unless you add `-UseFido` ([why](docs/design-notes.md#why-the-iso-has-to-come-from-you)).
 3.  Double-click the batch file and accept the UAC prompt.
 4.  Read the summary it prints and confirm.

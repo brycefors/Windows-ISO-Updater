@@ -76,4 +76,4 @@ See [Scheduled Runs](scheduled-runs.md) for how these fit together.
 | `-ScheduleDay` | Which day the registered task runs: a weekday name for `-Schedule Weekly` (default `Sunday`), or a day number `1`-`31` for `-Schedule Monthly` (default `15`, a few days after Patch Tuesday). Ignored by `-Schedule PatchTuesday`. |
 | `-TaskName` | Name of the scheduled task to create or delete. Defaults to `Windows ISO Updater`. |
 | `-TaskUsername` | Username of the account to run the scheduled task as (e.g. `DOMAIN\SvcAccount`). Defaults to `SYSTEM` when omitted. |
-| `-TaskPassword` | Password for the `-TaskUsername` account. Never written to logs or stored in the task action arguments. |
+| `-TaskPassword` | Password for the `-TaskUsername` account. Not stored in the task action arguments or written to logs. When the script self-elevates via UAC, the elevated process prompts for the password interactively rather than reading it from the command line. For non-interactive use with `-TaskUsername`, start the script already elevated so no re-elevation occurs. |

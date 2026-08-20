@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-:: Version: 2026.08.16.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+:: Version: 2026.08.19.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 
 :: Check for administrative privileges
 NET SESSION >NUL 2>&1
@@ -31,16 +31,11 @@ set "SCRIPT_DIR=%~dp0"
 :: Construct the full path to the PowerShell script.
 set "PS_SCRIPT=%SCRIPT_DIR%Windows-ISO-Updater.ps1"
 
-:: Check if the script exists. If not, download it.
 IF NOT EXIST "%PS_SCRIPT%" (
-    ECHO Windows-ISO-Updater.ps1 not found. Downloading from GitHub...
-    powershell -Command "Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/brycefors/Windows-ISO-Updater/refs/heads/main/Windows-ISO-Updater.ps1' -OutFile '%PS_SCRIPT%'"
-    IF NOT EXIST "%PS_SCRIPT%" (
-        ECHO Failed to download Windows-ISO-Updater.ps1.
-        PAUSE
-        EXIT /B 1
-    )
-    ECHO Download complete.
+    ECHO Windows-ISO-Updater.ps1 was not found in the same folder as this batch file.
+    ECHO Place Windows-ISO-Updater.ps1 next to Run-Windows-ISO-Updater.bat and run again.
+    PAUSE
+    EXIT /B 1
 )
 
 :: Execute the PowerShell script.
