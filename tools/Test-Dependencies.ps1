@@ -509,43 +509,47 @@ try {
         }
     }
 
-    # --- The batch file's self-download of the script ---
+    # --- Published script on GitHub ---
 
-    Write-Section 'Batch file self-download (GitHub)'
+    Write-Section 'Published script on GitHub'
 
-    $BatPath = Join-Path -Path (Split-Path -Parent $ScriptPath) -ChildPath 'Run-Windows-ISO-Updater.bat'
-    if (-not (Test-Path -LiteralPath $BatPath)) {
-        Add-Result -Area 'Self-update' -Status 'Warn' -Message 'Run-Windows-ISO-Updater.bat was not found next to the script, so its download URL was not checked.'
+    $RawUrl = $null
+    try {
+        $RemoteUrl = & git -C (Split-Path -Parent $ScriptPath) remote get-url origin 2>&1
+        if ($LASTEXITCODE -eq 0 -and "$RemoteUrl" -match '(?i)github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$') {
+            $Slug = $Matches[1]
+            $RawUrl = "https://raw.githubusercontent.com/$Slug/refs/heads/main/$(Split-Path -Leaf $ScriptPath)"
+        }
+    }
+    catch { }
+
+    if (-not $RawUrl) {
+        Add-Result -Area 'Published' -Status 'Warn' -Message 'Could not derive the GitHub raw URL from the git remote. Skipping the published-script check.' -Action 'Run this tester from inside a git repository whose origin points at GitHub.'
     }
     else {
-        $BatText = Get-Content -LiteralPath $BatPath -Raw
-        $RawMatch = [regex]::Match($BatText, "(?i)(https://raw\.githubusercontent\.com/[^']+\.ps1)")
-        if (-not $RawMatch.Success) {
-            Add-Result -Area 'Self-update' -Status 'Warn' -Message 'No raw.githubusercontent.com URL was found in the batch file.'
-        }
-        else {
-            Write-Detail $RawMatch.Groups[1].Value
-            try {
-                $Published = (Invoke-WebRequest -Uri $RawMatch.Groups[1].Value -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop).Content
-                $RemoteErrors = $null
-                [System.Management.Automation.Language.Parser]::ParseInput($Published, [ref]$null, [ref]$RemoteErrors) | Out-Null
-                if ($RemoteErrors -and $RemoteErrors.Count -gt 0) {
-                    Add-Result -Area 'Self-update' -Status 'Fail' -Message "The published script has $($RemoteErrors.Count) parse error(s)." -Action 'A broken script is being served to anyone who double-clicks the batch file without the .ps1 next to it. Push a fix.'
+        Write-Detail $RawUrl
+        try {
+            $Published = (Invoke-WebRequest -Uri $RawUrl -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop).Content
+            $RemoteErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseInput($Published, [ref]$null, [ref]$RemoteErrors) | Out-Null
+            if ($RemoteErrors -and $RemoteErrors.Count -gt 0) {
+                Add-Result -Area 'Published' -Status 'Fail' -Message "The published script has $($RemoteErrors.Count) parse error(s)." -Action 'A broken script is on the main branch. Push a fix.'
+            }
+            else {
+                $RemoteVersion = if ($Published -match "(?m)^\s*\`$ScriptVersion\s*=\s*'([\d.]+)'") { $Matches[1] } else { 'unknown' }
+                $LocalContent  = Get-Content -LiteralPath $ScriptPath -Raw
+                $LocalVersion  = if ($LocalContent -match "(?m)^\s*\`$ScriptVersion\s*=\s*'([\d.]+)'") { $Matches[1] } else { 'unknown' }
+                Write-Detail "published $RemoteVersion / local $LocalVersion"
+                if ($RemoteVersion -eq $LocalVersion) {
+                    Add-Result -Area 'Published' -Status 'Pass' -Message "The published script parses cleanly and matches this working copy (version $LocalVersion)."
                 }
                 else {
-                    $RemoteVersion = if ($Published -match "(?m)^\s*\`$ScriptVersion\s*=\s*'([\d.]+)'") { $Matches[1] } else { 'unknown' }
-                    $LocalVersion = if ((Get-Content -LiteralPath $ScriptPath -Raw) -match "(?m)^\s*\`$ScriptVersion\s*=\s*'([\d.]+)'") { $Matches[1] } else { 'unknown' }
-                    if ($RemoteVersion -eq $LocalVersion) {
-                        Add-Result -Area 'Self-update' -Status 'Pass' -Message "The published script parses and matches this working copy (version $LocalVersion)."
-                    }
-                    else {
-                        Add-Result -Area 'Self-update' -Status 'Warn' -Message "The published script is version $RemoteVersion, this working copy is $LocalVersion." -Action 'Expected while you have unpushed work. Push when you are done, so the batch file hands out the current script.'
-                    }
+                    Add-Result -Area 'Published' -Status 'Warn' -Message "The published script is version $RemoteVersion, this working copy is $LocalVersion." -Action 'Expected while you have unpushed work. Push when you are done so the published version stays current.'
                 }
             }
-            catch {
-                Add-Result -Area 'Self-update' -Status 'Fail' -Message "Could not fetch the published script: $($_.Exception.Message)" -Action 'The batch file cannot self-heal a missing .ps1 until this URL works again. Check the repository name, branch and visibility.'
-            }
+        }
+        catch {
+            Add-Result -Area 'Published' -Status 'Fail' -Message "Could not fetch the published script: $($_.Exception.Message)" -Action 'Check the repository visibility and that the main branch exists.'
         }
     }
 
