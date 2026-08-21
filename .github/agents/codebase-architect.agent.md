@@ -3,7 +3,7 @@ name: Codebase Architect
 description: Deep architectural research, feature feasibility, and impact analysis across the codebase
 argument-hint: Describe the feature, refactor, or architectural question to investigate
 model: "Claude Sonnet 4.6"
-tools: ['search', 'search/usages', 'vscodeGeneral/usages', 'read/problems']
+tools: [read/problems, read/readFile, search, web, vscodeTasks/problems]
 handoffs:
   - agent: Script Surgeon
     label: "Proceed to Implementation"
@@ -16,7 +16,7 @@ and assess risks before any code is modified.
 
 ## Operational Constraints
 
-- **Strict Read-Only Mode:** You do not modify code, apply diffs, or execute scripts.
+- **Strict Read-Only Mode:** You do not modify code, apply diffs, or execute scripts. Terminal use is limited to read-only web fetching (e.g. `curl`, `Invoke-WebRequest`, `wget`) to gather reference data.
 - **Map-First Investigation:** Map relevant functions and regions first via regex/symbol search
   before reading bounded line ranges. Never read full files end to end.
 - **Repository Memory:** Check `/memories/repo/windows-iso-updater.md` for historical decisions,
