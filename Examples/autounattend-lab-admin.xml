@@ -46,6 +46,11 @@
 		   default schemes restored (so never-sleep timeouts baked in by a gold image build do not follow
 		   the image onto laptops), and the CloudContent policies that suppress suggested app installs are
 		   set on every machine.
+
+		6. C:\Windows\Setup\Scripts\Install-ModelDrivers.ps1 (new file)
+		   Installs driver packages from C:\Drivers\ that match the current hardware model. It runs in the
+		   background at first logon, launched by FirstLogon.ps1 before the other cleanup tasks begin, so
+		   driver installation overlaps with the rest of first-logon setup rather than blocking it.
 	-->
 	<!--https://schneegans.de/windows/unattend-generator/?LanguageMode=Unattended&UILanguage=en-US&Locale=en-US&Keyboard=00000409&GeoLocation=244&PEMode=Generated&Disable8Dot3Names=true&PauseBeforeFormatting=true&InstallFromMode=Interactive&PartitionMode=Unattended&TargetDisk=0&PartitionLayout=Automatic&SystemSize=300&RecoveryMode=Partition&RecoverySize=1000&DiskAssertionMode=Generated&AssertMinSize=100&AssertMaxSize=4000&AssertNoPartitions=true&ProcessorArchitecture=amd64&BypassRequirementsCheck=true&ComputerNameMode=Random&TimeZoneMode=Implicit&UserAccountMode=Unattended&AutoLogonMode=Builtin&BuiltinAdministratorPassword=Password123&PasswordExpirationMode=Unlimited&LockoutMode=Default&HideFiles=Hidden&TaskbarSearch=Box&TaskbarIconsMode=Default&StartTilesMode=Default&StartPinsMode=Default&EnableLongPaths=true&EnableRemoteDesktop=true&AllowPowerShellScripts=true&DisableLastAccess=true&PreventDeviceEncryption=true&HideEdgeFre=true&DeleteWindowsOld=true&EffectsMode=Default&DesktopIconsMode=Default&StartFoldersMode=Default&CoreIsolationMode=Enabled&VMwareTools=true&WifiMode=Skip&ExpressSettings=EnableAll&LockKeysMode=Skip&StickyKeysMode=Default&ColorMode=Default&WallpaperMode=Default&LockScreenMode=Default&AppLockerMode=Skip-->
 	<!-- offlineServicing: would apply packages/drivers to the image before it boots. Unused here. -->
@@ -503,6 +508,12 @@ $scripts = @(
 		<File path="C:\Windows\Setup\Scripts\FirstLogon.ps1">
 $scripts = @(
 	{
+		# Start model-based driver install in the background while other tasks run.
+		if (Test-Path -LiteralPath 'C:\Windows\Setup\Scripts\Install-ModelDrivers.ps1') {
+			Start-Process -FilePath 'powershell.exe' -ArgumentList '-WindowStyle Hidden -ExecutionPolicy Unrestricted -NoProfile -File "C:\Windows\Setup\Scripts\Install-ModelDrivers.ps1"' -WindowStyle Hidden
+		}
+	};
+	{
 		# Turn autologon off now that setup is done, so the next boot asks for credentials.
 		Set-ItemProperty -LiteralPath 'Registry::HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'AutoLogonCount' -Type 'DWord' -Force -Value 0;
 	};
@@ -539,6 +550,53 @@ $scripts = @(
     $complete += $increment;
   }
 } *&gt;&amp;1 | Out-String -Width 1KB -Stream &gt;&gt; "C:\Windows\Setup\Scripts\FirstLogon.log";
+		</File>
+		<File path="C:\Windows\Setup\Scripts\Install-ModelDrivers.ps1">
+# Install driver packages matching the current hardware model from C:\Drivers\.
+$LogFile = 'C:\Windows\Setup\Scripts\Install-ModelDrivers.log'
+$DriversRoot = 'C:\Drivers'
+
+function Write-Log {
+    param([string]$Message)
+    "$([datetime]::Now.ToString('[MM/dd/yyyy|HH:mm:ss]')) $Message" | Out-File -FilePath $LogFile -Append -Encoding UTF8
+}
+
+if (-not (Test-Path -LiteralPath $DriversRoot)) {
+    Write-Log 'No C:\Drivers folder found; skipping.'
+    return
+}
+
+$Model = (Get-CimInstance -ClassName Win32_ComputerSystem).Model
+Write-Log "Model detected: $Model"
+
+# Match a subfolder whose name is a substring of the full model string.
+$Match = Get-ChildItem -LiteralPath $DriversRoot -Directory |
+    Where-Object { $Model -like "*$($_.Name)*" } |
+    Select-Object -First 1
+
+if (-not $Match) {
+    Write-Log "No driver folder matched '$Model'; nothing to install."
+    return
+}
+
+Write-Log "Installing from: $($Match.FullName)"
+
+# MSI packages first so they register their own INFs before pnputil runs.
+Get-ChildItem -LiteralPath $Match.FullName -Filter '*.msi' -Recurse | ForEach-Object {
+    Write-Log "  msiexec: $($_.Name)"
+    $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/i `"$($_.FullName)`" /quiet /norestart" -Wait -PassThru
+    Write-Log "    exit: $($p.ExitCode)"
+}
+
+# Loose INF drivers not covered by an MSI.
+Get-ChildItem -LiteralPath $Match.FullName -Filter '*.inf' -Recurse | ForEach-Object {
+    Write-Log "  pnputil: $($_.Name)"
+    $pnpOutput = pnputil.exe /add-driver $_.FullName /install | Out-String
+    Write-Log $pnpOutput.Trim()
+}
+
+Write-Log 'Done. Removing C:\Drivers.'
+Remove-Item -LiteralPath $DriversRoot -Recurse -Force -ErrorAction SilentlyContinue
 		</File>
 	</Extensions>
 </unattend>

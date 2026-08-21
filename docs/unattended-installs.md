@@ -61,3 +61,61 @@ It drops a `SEAL-THIS-IMAGE.txt` checklist on the public desktop with the remain
 
 > [!CAUTION]
 > This example uses the same plain-text `Password123` build credential and automatic first sign-in as the lab example. `sysprep /oobe` disables the built-in Administrator, but its hash survives generalize, so anything that later re-enables the account without setting a new password inherits it. Change it before you build anything you intend to keep.
+
+## Model-based driver install
+
+The lab-admin answer file (`autounattend-lab-admin.xml`) runs `Install-ModelDrivers.ps1` as a hidden background process at first logon, started by `FirstLogon.ps1`.
+
+### What it does
+
+The script reads `Win32_ComputerSystem.Model`, looks for a subfolder under `C:\Drivers\` whose name is a substring of that model string, installs any `.msi` packages in that folder silently with no reboot, then stages any loose `.inf` files via `pnputil /add-driver /install`. It logs to `C:\Windows\Setup\Scripts\Install-ModelDrivers.log` and removes `C:\Drivers\` when done.
+
+### Why not inject the drivers into the WIM
+
+Injecting drivers into the WIM with DISM makes the WIM hardware-specific. This approach keeps the WIM hardware-neutral: each machine picks up only the drivers in the folder that matches its model, and different machines served from the same ISO get only their own packages.
+
+### Folder structure
+
+Driver packages go into `$OEM$\$1\Drivers\<Model Name>\` at the root of the ISO, at the same level as `sources\`, `boot\`, and `efi\`. Windows Setup copies `$OEM$\$1\` to `C:\` automatically, so the packages land at `C:\Drivers\<Model Name>\`.
+
+Use the exact string that `(Get-CimInstance Win32_ComputerSystem).Model` returns on the target hardware as the folder name. A folder named `Surface Pro 9` matches any model whose reported name contains that string, so partial names work when the full string varies across firmware revisions.
+
+```
+<ISO root>\
+  $OEM$\
+    $1\
+      Drivers\
+        Surface Pro 9\
+          SurfaceProDrivers.msi
+        Surface Laptop 5\
+          SurfaceLaptopDrivers.msi
+  boot\
+  efi\
+  sources\
+```
+
+Run this on the target hardware before building the ISO to get the exact model string:
+
+```powershell
+(Get-CimInstance Win32_ComputerSystem).Model
+```
+
+### MSI vs INF
+
+If the vendor ships a `.msi` driver pack, place the `.msi` directly in the model folder. Surface driver packs are published at [microsoft.com/en-us/download/search/?q=surface+drivers](https://www.microsoft.com/en-us/download/search/?q=surface+drivers).
+
+For hardware where only `.inf` files are available, place them and any supporting files (in subfolders if needed) in the model folder and `pnputil` will recurse into subdirectories.
+
+### Gold image
+
+`autounattend-gold-image.xml` does not include this script. The gold image is sysprepped and captured before deployment, and model-specific drivers installed before capture would be baked into the image and applied to every machine deployed from it. This feature belongs only in the deployment answer file.
+
+### Logging and cleanup
+
+The log is at `C:\Windows\Setup\Scripts\Install-ModelDrivers.log`. `C:\Drivers\` is deleted after a successful install.
+
+### Adding models without rebuilding
+
+The `$OEM$` folder lives in the ISO file structure outside the WIM. Adding or updating model folders does not affect any WIM content, so you can re-populate `$OEM$` and rebuild the ISO without re-servicing the images. The rebuild-avoidance stamp is not affected.
+
+[← Back to the README](../README.md)
