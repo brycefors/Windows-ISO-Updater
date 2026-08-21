@@ -82,6 +82,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 function Get-CatalogFromSupportPage {
@@ -92,10 +93,10 @@ function Get-CatalogFromSupportPage {
     $Catalog = [ordered]@{}
 
     try {
-        $MainResponse = Invoke-WebRequest -Uri $MainUrl -UseBasicParsing -TimeoutSec 30
+        [void]($MainResponse = Invoke-WebRequest -Uri $MainUrl -UseBasicParsing -TimeoutSec 30)
     }
     catch {
-        Write-Host "Failed to fetch Surface support page - $_" -ForegroundColor Red
+        Write-Host "Failed to fetch Surface support page - $($_.Exception.Message)" -ForegroundColor Red
         return $Catalog
     }
 
@@ -153,10 +154,10 @@ function Get-CatalogFromSupportPage {
 
         $PageResponse = $null
         try {
-            $PageResponse = Invoke-WebRequest -Uri $PageUrl -UseBasicParsing -TimeoutSec 30
+            [void]($PageResponse = Invoke-WebRequest -Uri $PageUrl -UseBasicParsing -TimeoutSec 30)
         }
         catch {
-            Write-Host "  Warning: failed to fetch '$PageUrl' - $_" -ForegroundColor Yellow
+            Write-Host "  Warning: failed to fetch '$PageUrl' - $($_.Exception.Message)" -ForegroundColor Yellow
             continue
         }
 
@@ -174,10 +175,10 @@ function Get-CatalogFromSupportPage {
         }
 
         # Table rows pair model name (first td) with download link href (second td)
-        $RowPattern = '(?s)<tr>\s*<td>(.*?)</td>\s*<td>.*?href="(https://www\.microsoft\.com/(?:[a-z-]+/)?download/details\.aspx\?id=\d+)"'
+        $RowPattern = '<tr>\s*<td>\s*([^<>]{1,100}?)\s*</td>\s*<td>[^<]*<a[^>]+href="(https://www\.microsoft\.com/(?:[a-z-]+/)?download/details\.aspx\?id=\d+)"'
         $RowMatches = [regex]::Matches($PageText, $RowPattern)
         foreach ($RowMatch in $RowMatches) {
-            $ModelName = [regex]::Replace($RowMatch.Groups[1].Value, '<[^>]+>', '').Trim()
+            $ModelName = $RowMatch.Groups[1].Value.Trim()
             $DownloadUrl = $RowMatch.Groups[2].Value
             if ($ModelName -and -not $Catalog.Contains($ModelName)) {
                 $Catalog[$ModelName] = $DownloadUrl
@@ -237,37 +238,7 @@ function Resolve-MsiDownloadUrl {
         $Id = $Matches[1]
     }
 
-    # Build the step 1 URL based on link type
-    if ($Url -match 'details\.aspx') {
-        $RedirectUrl = "https://www.microsoft.com/en-us/download/confirmation.aspx?id=$Id"
-    }
-    elseif ($Url -match 'confirmation\.aspx') {
-        $RedirectUrl = $Url
-    }
-    else {
-        $RedirectUrl = $Url
-    }
-
-    # Step 1: follow redirects - pages that redirect straight to the MSI bypass HTML entirely
-    try {
-        $RedirectResponse = Invoke-WebRequest -Uri $RedirectUrl -UseBasicParsing -TimeoutSec 30
-        $FinalUri = $RedirectResponse.BaseResponse.ResponseUri.AbsoluteUri
-        if ($FinalUri -match 'download\.microsoft\.com' -and $FinalUri -like '*.msi') {
-            return $FinalUri
-        }
-    }
-    catch {
-        $ExResponse = $_.Exception.Response
-        if ($ExResponse -ne $null) {
-            $FinalUri = $ExResponse.ResponseUri.AbsoluteUri
-            if ($FinalUri -match 'download\.microsoft\.com' -and $FinalUri -like '*.msi') {
-                return $FinalUri
-            }
-        }
-        Write-Host "  Warning: redirect-follow request failed for '$Url' - $_" -ForegroundColor Yellow
-    }
-
-    # Steps 2 and 3: use no_redirect to get the page with direct download links
+    # Fetch the no_redirect page to find direct download links
     $NoRedirectUrl = $null
     if ($Id) {
         $NoRedirectUrl = "https://www.microsoft.com/en-us/download/confirmation.aspx?id=$Id&no_redirect=true"
@@ -283,30 +254,20 @@ function Resolve-MsiDownloadUrl {
 
     $SpaResponse = $null
     try {
-        $SpaResponse = Invoke-WebRequest -Uri $NoRedirectUrl -UseBasicParsing -TimeoutSec 30
+        [void]($SpaResponse = Invoke-WebRequest -Uri $NoRedirectUrl -UseBasicParsing -TimeoutSec 30)
     }
     catch {
-        Write-Host "  Warning: could not resolve download URL for '$Url' - $_" -ForegroundColor Yellow
+        Write-Host "  Warning: could not resolve download URL for '$Url' - $($_.Exception.Message)" -ForegroundColor Yellow
         return $null
     }
 
+    $SpaContent = $SpaResponse.Content -replace '\\/', '/'
+
     $Candidates = @()
 
-    # Step 2: Next.js SPA pages embed all data in a __NEXT_DATA__ JSON blob
-    $NextDataMatches = [regex]::Matches($SpaResponse.Content, '<script id="__NEXT_DATA__"[^>]*>([\s\S]+?)</script>')
-    if ($NextDataMatches.Count -gt 0) {
-        $JsonText = $NextDataMatches[0].Groups[1].Value
-        $UrlMatches = [regex]::Matches($JsonText, $MsiPattern)
-        foreach ($m in $UrlMatches) {
-            $Candidates += $m.Value
-        }
-    }
-    else {
-        # Step 3: legacy ASP.NET pages still carry the URL in plain HTML
-        $UrlMatches = [regex]::Matches($SpaResponse.Content, $MsiPattern)
-        foreach ($m in $UrlMatches) {
-            $Candidates += $m.Value
-        }
+    $UrlMatches = [regex]::Matches($SpaContent, $MsiPattern)
+    foreach ($m in $UrlMatches) {
+        $Candidates += $m.Value
     }
 
     if ($Candidates.Count -eq 0) {
@@ -336,21 +297,21 @@ function Get-DriverPackage {
     try {
         if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
             try {
-                Start-BitsTransfer -Source $Url -Destination $DestFile -DisplayName $FileName -ErrorAction Stop
+                [void](Start-BitsTransfer -Source $Url -Destination $DestFile -DisplayName $FileName -ErrorAction Stop)
             }
             catch {
-                Write-Host "    BITS failed, falling back to WebRequest - $_" -ForegroundColor Yellow
-                Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing
+                Write-Host "    BITS failed, falling back to WebRequest - $($_.Exception.Message)" -ForegroundColor Yellow
+                [void](Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing)
             }
         }
         else {
-            Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing
+            [void](Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing)
         }
         Unblock-File -LiteralPath $DestFile -ErrorAction SilentlyContinue
         return $true
     }
     catch {
-        Write-Host "    Download failed - $_" -ForegroundColor Red
+        Write-Host "    Download failed - $($_.Exception.Message)" -ForegroundColor Red
         if (Test-Path -LiteralPath $DestFile) {
             Remove-Item -LiteralPath $DestFile -Force -ErrorAction SilentlyContinue
         }
