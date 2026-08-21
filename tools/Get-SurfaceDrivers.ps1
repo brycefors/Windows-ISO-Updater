@@ -101,24 +101,66 @@ function Resolve-MsiDownloadUrl {
         [string]$WindowsVersion
     )
 
-    $ConfirmUrl = "https://www.microsoft.com/en-us/download/confirmation.aspx?id=$PageId&no_redirect=true"
+    $VersionTag = if ($WindowsVersion -eq '10') { '_Win10_' } else { '_Win11_' }
+    $MsiPattern = 'https://download\.microsoft\.com/[^"'']+\.msi'
+
+    # Step 1: follow redirects - pages that redirect straight to the MSI bypass HTML entirely
     try {
-        $Response = Invoke-WebRequest -Uri $ConfirmUrl -UseBasicParsing -TimeoutSec 30
-        $MsiMatches = [regex]::Matches($Response.Content, 'https://download\.microsoft\.com/[^"'']+\.msi')
-        if ($MsiMatches.Count -eq 0) {
-            return $null
+        $RedirectResponse = Invoke-WebRequest -Uri "https://www.microsoft.com/en-us/download/confirmation.aspx?id=$PageId" -UseBasicParsing -TimeoutSec 30
+        $FinalUri = $RedirectResponse.BaseResponse.ResponseUri.AbsoluteUri
+        if ($FinalUri -match 'download\.microsoft\.com' -and $FinalUri -like '*.msi') {
+            return $FinalUri
         }
-        $VersionTag = if ($WindowsVersion -eq '10') { '_Win10_' } else { '_Win11_' }
-        $Preferred = $MsiMatches | Where-Object { $_.Value -like "*$VersionTag*" } | Select-Object -First 1
-        if ($Preferred) {
-            return $Preferred.Value
+    }
+    catch {
+        $ExResponse = $_.Exception.Response
+        if ($ExResponse -ne $null) {
+            $FinalUri = $ExResponse.ResponseUri.AbsoluteUri
+            if ($FinalUri -match 'download\.microsoft\.com' -and $FinalUri -like '*.msi') {
+                return $FinalUri
+            }
         }
-        return $MsiMatches[0].Value
+        Write-Host "  Warning: redirect-follow request failed for page ID $PageId - $_" -ForegroundColor Yellow
+    }
+
+    # Steps 2 and 3 share one request to the no_redirect confirmation page
+    $SpaResponse = $null
+    try {
+        $SpaResponse = Invoke-WebRequest -Uri "https://www.microsoft.com/en-us/download/confirmation.aspx?id=$PageId&no_redirect=true" -UseBasicParsing -TimeoutSec 30
     }
     catch {
         Write-Host "  Warning: could not resolve download URL for page ID $PageId - $_" -ForegroundColor Yellow
         return $null
     }
+
+    $Candidates = @()
+
+    # Step 2: Next.js SPA pages embed all data in a __NEXT_DATA__ JSON blob
+    $NextDataMatches = [regex]::Matches($SpaResponse.Content, '<script id="__NEXT_DATA__"[^>]*>([\s\S]+?)</script>')
+    if ($NextDataMatches.Count -gt 0) {
+        $JsonText = $NextDataMatches[0].Groups[1].Value
+        $UrlMatches = [regex]::Matches($JsonText, $MsiPattern)
+        foreach ($m in $UrlMatches) {
+            $Candidates += $m.Value
+        }
+    }
+    else {
+        # Step 3: legacy ASP.NET pages still carry the URL in plain HTML
+        $UrlMatches = [regex]::Matches($SpaResponse.Content, $MsiPattern)
+        foreach ($m in $UrlMatches) {
+            $Candidates += $m.Value
+        }
+    }
+
+    if ($Candidates.Count -eq 0) {
+        return $null
+    }
+
+    $Preferred = $Candidates | Where-Object { $_ -like "*$VersionTag*" } | Select-Object -First 1
+    if ($Preferred) {
+        return $Preferred
+    }
+    return $Candidates[0]
 }
 
 function Get-DriverPackage {
