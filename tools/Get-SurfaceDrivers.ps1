@@ -4,8 +4,9 @@
     required by Examples/autounattend-driver-install.xml.
 
 .DESCRIPTION
-    For each requested model, the script resolves the direct MSI download URL from the Microsoft
-    Download Center, then downloads the package to:
+    The script discovers all available Surface driver packages by scraping the Microsoft
+    Surface drivers support page, then resolves each link to a direct MSI download URL. It downloads
+    each package to:
 
         <OutputPath>\<WMI Model Name>\<filename>.msi
 
@@ -57,8 +58,9 @@
     to C:\ before the specialize pass runs, making C:\Drivers\ is populated when Install-ModelDrivers.ps1
     executes.
 
-    Verify and update the page ID table from the Microsoft Surface Driver and Firmware Lifecycle page
-    at the URL in the catalog comment inside this script.
+    Model names and download links are discovered at runtime from
+    https://support.microsoft.com/en-us/surface/drivers-firmware/download-drivers-and-firmware-for-surface
+    so the catalog is always current. No hardcoded ID table needs updating.
 #>
 [CmdletBinding()]
 param(
@@ -82,31 +84,156 @@ param(
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-# Verify/update page IDs from: https://learn.microsoft.com/en-us/surface/surface-driver-and-firmware-lifecycle-for-surface-devices
-$ModelCatalog = @{
-    'Surface Pro 9'                 = @{ Win10 = 104679; Win11 = 104679 }
-    'Surface Pro 9 with 5G'        = @{ Win11 = 104721 }
-    'Surface Pro 10 for Business'  = @{ Win11 = 105937 }
-    'Surface Laptop 5'              = @{ Win10 = 104678; Win11 = 104678 }
-    'Surface Laptop 6 for Business' = @{ Win11 = 105938 }
-    'Surface Go 3'                  = @{ Win10 = 103039; Win11 = 103039 }
-    'Surface Go 4'                  = @{ Win11 = 105543 }
-    'Surface Book 3'                = @{ Win10 = 101315; Win11 = 101315 }
-    'Surface Studio 2+'             = @{ Win11 = 105067 }
+function Get-CatalogFromSupportPage {
+    param([string]$WindowsVersion)
+
+    $MainUrl = 'https://support.microsoft.com/en-us/surface/drivers-firmware/download-drivers-and-firmware-for-surface'
+    $FamilyBase = 'https://support.microsoft.com/en-us/surface/drivers-firmware/download-drivers-and-firmware-for-surface-'
+    $LinkPattern = 'https://(?:www\.microsoft\.com/[a-z-]+/download/(?:details|confirmation)\.aspx\?id=\d+|go\.microsoft\.com/fwlink/\?[Ll]ink[Ii][Dd]=\d+)'
+    $ModelPattern = 'Surface(?:\s+[\w+()-]+){1,10}'
+    $Catalog = [ordered]@{}
+
+    try {
+        $MainResponse = Invoke-WebRequest -Uri $MainUrl -UseBasicParsing -TimeoutSec 30
+    }
+    catch {
+        Write-Host "Failed to fetch Surface support page - $_" -ForegroundColor Red
+        return $Catalog
+    }
+
+    $MainText = $null
+    $NextMatches = [regex]::Matches($MainResponse.Content, '<script id="__NEXT_DATA__"[^>]*>([\s\S]+?)</script>')
+    if ($NextMatches.Count -gt 0) {
+        $MainText = $NextMatches[0].Groups[1].Value
+    }
+    if (-not $MainText) {
+        $MainText = $MainResponse.Content
+    }
+
+    # Family sub-pages carry the full path prefix plus a distinct slug
+    $SlugMatches = [regex]::Matches($MainText, 'download-drivers-and-firmware-for-surface-([a-z][a-z-]*)')
+    $FamilyUrls = New-Object System.Collections.ArrayList
+    $SeenSlugs = @{}
+    foreach ($SlugMatch in $SlugMatches) {
+        $FamilyUrl = $FamilyBase + $SlugMatch.Groups[1].Value
+        if (-not $SeenSlugs.ContainsKey($FamilyUrl)) {
+            [void]$FamilyUrls.Add($FamilyUrl)
+            $SeenSlugs[$FamilyUrl] = $true
+        }
+    }
+
+    if ($FamilyUrls.Count -eq 0) {
+        Write-Host '  Warning: no family sub-pages found on the main support page.' -ForegroundColor Yellow
+        return $Catalog
+    }
+
+    foreach ($FamilyUrl in $FamilyUrls) {
+        Write-Host "  Scanning family page: $FamilyUrl" -ForegroundColor DarkGray
+
+        $FamilyResponse = $null
+        try {
+            $FamilyResponse = Invoke-WebRequest -Uri $FamilyUrl -UseBasicParsing -TimeoutSec 30
+        }
+        catch {
+            Write-Host "  Warning: failed to fetch '$FamilyUrl' - $_" -ForegroundColor Yellow
+            continue
+        }
+
+        $FamilyText = $null
+        $FamilyNext = [regex]::Matches($FamilyResponse.Content, '<script id="__NEXT_DATA__"[^>]*>([\s\S]+?)</script>')
+        if ($FamilyNext.Count -gt 0) {
+            $FamilyText = $FamilyNext[0].Groups[1].Value
+        }
+        if (-not $FamilyText) {
+            $FamilyText = $FamilyResponse.Content
+        }
+
+        $LinkMatches = [regex]::Matches($FamilyText, $LinkPattern)
+        foreach ($LinkMatch in $LinkMatches) {
+            $MatchIndex = $LinkMatch.Index
+            $WindowStart = [Math]::Max(0, $MatchIndex - 500)
+            $PrecedingText = $FamilyText.Substring($WindowStart, $MatchIndex - $WindowStart)
+
+            # Use the last match in the lookback window - it is closest to the link
+            $ModelMatches = [regex]::Matches($PrecedingText, $ModelPattern)
+            if ($ModelMatches.Count -eq 0) {
+                continue
+            }
+            $ModelName = $ModelMatches[$ModelMatches.Count - 1].Value.TrimEnd('"', '\', ')', '>', ' ')
+            $Url = $LinkMatch.Value
+
+            if (-not $Catalog.ContainsKey($ModelName)) {
+                $Catalog[$ModelName] = $Url
+            }
+        }
+    }
+
+    return $Catalog
+}
+
+function Select-HighestVersionUrl {
+    param(
+        [string[]]$Urls,
+        [string]$VersionTag
+    )
+
+    $Filtered = @($Urls | Where-Object { $_ -like "*$VersionTag*" })
+    if ($Filtered.Count -eq 0) {
+        $Filtered = $Urls
+    }
+
+    $Best = $null
+    $BestVersion = $null
+    foreach ($Candidate in $Filtered) {
+        $FileName = $Candidate.Split('/')[-1]
+        $VersionMatch = [regex]::Match($FileName, '(\d+\.\d+\.\d+\.\d+)')
+        if ($VersionMatch.Success) {
+            try {
+                $Ver = [Version]$VersionMatch.Groups[1].Value
+                if ($BestVersion -eq $null -or $Ver -gt $BestVersion) {
+                    $BestVersion = $Ver
+                    $Best = $Candidate
+                }
+            }
+            catch { }
+        }
+    }
+
+    if ($Best) {
+        return $Best
+    }
+    return $Filtered[0]
 }
 
 function Resolve-MsiDownloadUrl {
     param(
-        [int]$PageId,
+        [string]$Url,
         [string]$WindowsVersion
     )
 
     $VersionTag = if ($WindowsVersion -eq '10') { '_Win10_' } else { '_Win11_' }
     $MsiPattern = 'https://download\.microsoft\.com/[^"'']+\.msi'
 
+    # Extract ?id= for use in confirmation URL construction
+    $Id = $null
+    if ($Url -match '\?id=(\d+)') {
+        $Id = $Matches[1]
+    }
+
+    # Build the step 1 URL based on link type
+    if ($Url -match 'details\.aspx') {
+        $RedirectUrl = "https://www.microsoft.com/en-us/download/confirmation.aspx?id=$Id"
+    }
+    elseif ($Url -match 'confirmation\.aspx') {
+        $RedirectUrl = $Url
+    }
+    else {
+        $RedirectUrl = $Url
+    }
+
     # Step 1: follow redirects - pages that redirect straight to the MSI bypass HTML entirely
     try {
-        $RedirectResponse = Invoke-WebRequest -Uri "https://www.microsoft.com/en-us/download/confirmation.aspx?id=$PageId" -UseBasicParsing -TimeoutSec 30
+        $RedirectResponse = Invoke-WebRequest -Uri $RedirectUrl -UseBasicParsing -TimeoutSec 30
         $FinalUri = $RedirectResponse.BaseResponse.ResponseUri.AbsoluteUri
         if ($FinalUri -match 'download\.microsoft\.com' -and $FinalUri -like '*.msi') {
             return $FinalUri
@@ -120,16 +247,29 @@ function Resolve-MsiDownloadUrl {
                 return $FinalUri
             }
         }
-        Write-Host "  Warning: redirect-follow request failed for page ID $PageId - $_" -ForegroundColor Yellow
+        Write-Host "  Warning: redirect-follow request failed for '$Url' - $_" -ForegroundColor Yellow
     }
 
-    # Steps 2 and 3 share one request to the no_redirect confirmation page
+    # Steps 2 and 3: use no_redirect to get the page with direct download links
+    $NoRedirectUrl = $null
+    if ($Id) {
+        $NoRedirectUrl = "https://www.microsoft.com/en-us/download/confirmation.aspx?id=$Id&no_redirect=true"
+    }
+    elseif ($Url -match 'go\.microsoft\.com/fwlink') {
+        $NoRedirectUrl = if ($Url -match '&no_redirect=true') { $Url } else { "$Url&no_redirect=true" }
+    }
+
+    if (-not $NoRedirectUrl) {
+        Write-Host "  Warning: cannot construct no_redirect URL for '$Url'" -ForegroundColor Yellow
+        return $null
+    }
+
     $SpaResponse = $null
     try {
-        $SpaResponse = Invoke-WebRequest -Uri "https://www.microsoft.com/en-us/download/confirmation.aspx?id=$PageId&no_redirect=true" -UseBasicParsing -TimeoutSec 30
+        $SpaResponse = Invoke-WebRequest -Uri $NoRedirectUrl -UseBasicParsing -TimeoutSec 30
     }
     catch {
-        Write-Host "  Warning: could not resolve download URL for page ID $PageId - $_" -ForegroundColor Yellow
+        Write-Host "  Warning: could not resolve download URL for '$Url' - $_" -ForegroundColor Yellow
         return $null
     }
 
@@ -156,11 +296,7 @@ function Resolve-MsiDownloadUrl {
         return $null
     }
 
-    $Preferred = $Candidates | Where-Object { $_ -like "*$VersionTag*" } | Select-Object -First 1
-    if ($Preferred) {
-        return $Preferred
-    }
-    return $Candidates[0]
+    return Select-HighestVersionUrl -Urls $Candidates -VersionTag $VersionTag
 }
 
 function Get-DriverPackage {
@@ -212,40 +348,41 @@ if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
 $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
 
 if ($ListModels) {
+    Write-Host 'Fetching model catalog from Microsoft Support...' -ForegroundColor DarkGray
+    $LiveCatalog = Get-CatalogFromSupportPage -WindowsVersion $WindowsVersion
+    if ($LiveCatalog.Count -eq 0) {
+        Write-Host 'No driver links found on the support page. Check network access and try again.' -ForegroundColor Red
+        exit 1
+    }
     Write-Host 'Available models:' -ForegroundColor Cyan
     Write-Host ''
-    Write-Host ('{0,-40} {1,-10} {2}' -f 'Model', 'Win10 ID', 'Win11 ID') -ForegroundColor Cyan
-    Write-Host ('-' * 65) -ForegroundColor DarkGray
-    foreach ($Name in ($ModelCatalog.Keys | Sort-Object)) {
-        $Entry = $ModelCatalog[$Name]
-        $W10 = if ($Entry.ContainsKey('Win10')) { $Entry['Win10'].ToString() } else { '-' }
-        $W11 = if ($Entry.ContainsKey('Win11')) { $Entry['Win11'].ToString() } else { '-' }
-        Write-Host ('{0,-40} {1,-10} {2}' -f $Name, $W10, $W11)
+    Write-Host ('{0,-40} {1}' -f 'Model', 'URL') -ForegroundColor Cyan
+    Write-Host ('-' * 100) -ForegroundColor DarkGray
+    foreach ($Name in ($LiveCatalog.Keys | Sort-Object)) {
+        Write-Host ('{0,-40} {1}' -f $Name, $LiveCatalog[$Name])
     }
     Write-Host ''
     exit 0
 }
 
-$VersionKey = "Win$WindowsVersion"
+Write-Host 'Fetching model catalog from Microsoft Support...' -ForegroundColor DarkGray
+$LiveCatalog = Get-CatalogFromSupportPage -WindowsVersion $WindowsVersion
+
+if ($LiveCatalog.Count -eq 0) {
+    Write-Host 'No driver links found on the support page. Check network access and try again.' -ForegroundColor Red
+    exit 1
+}
 
 if ($Models -and $Models.Count -gt 0) {
     foreach ($RequestedName in $Models) {
-        if (-not $ModelCatalog.ContainsKey($RequestedName)) {
+        if (-not $LiveCatalog.Contains($RequestedName)) {
             Write-Host "Warning: '$RequestedName' is not in the catalog; use -ListModels to see available models." -ForegroundColor Yellow
         }
     }
-    $TargetModels = @($Models | Where-Object {
-        $ModelCatalog.ContainsKey($_) -and $ModelCatalog[$_].ContainsKey($VersionKey)
-    })
-    $NoVersionModels = @($Models | Where-Object {
-        $ModelCatalog.ContainsKey($_) -and -not $ModelCatalog[$_].ContainsKey($VersionKey)
-    })
-    foreach ($Name in $NoVersionModels) {
-        Write-Host "Warning: '$Name' has no Windows $WindowsVersion driver in the catalog; skipping." -ForegroundColor Yellow
-    }
+    $TargetModels = @($Models | Where-Object { $LiveCatalog.Contains($_) })
 }
 else {
-    $TargetModels = @($ModelCatalog.Keys | Where-Object { $ModelCatalog[$_].ContainsKey($VersionKey) })
+    $TargetModels = @($LiveCatalog.Keys)
 }
 
 if ($TargetModels.Count -eq 0) {
@@ -264,20 +401,20 @@ foreach ($ModelName in ($TargetModels | Sort-Object)) {
         Write-Host "  $ModelName" -ForegroundColor Cyan
     }
 
-    $PageId = $ModelCatalog[$ModelName][$VersionKey]
+    $DriverUrl = $LiveCatalog[$ModelName]
     $ModelFolder = Join-Path -Path $OutputPath -ChildPath $ModelName
 
     if (-not $Quiet) {
-        Write-Host "    Resolving page ID $PageId ..." -ForegroundColor DarkGray
+        Write-Host "    Resolving $DriverUrl ..." -ForegroundColor DarkGray
     }
 
-    $MsiUrl = Resolve-MsiDownloadUrl -PageId $PageId -WindowsVersion $WindowsVersion
+    $MsiUrl = Resolve-MsiDownloadUrl -Url $DriverUrl -WindowsVersion $WindowsVersion
     if (-not $MsiUrl) {
-        Write-Host "  Warning: no download URL found for '$ModelName' (page ID $PageId)." -ForegroundColor Yellow
+        Write-Host "  Warning: no download URL found for '$ModelName' ($DriverUrl)." -ForegroundColor Yellow
         $SummaryRows.Add([pscustomobject]@{
             Model  = $ModelName
             Result = 'Failed - no URL'
-            Detail = "Page ID $PageId"
+            Detail = $DriverUrl
         })
         continue
     }
