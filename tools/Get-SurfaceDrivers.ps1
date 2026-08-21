@@ -89,8 +89,6 @@ function Get-CatalogFromSupportPage {
 
     $MainUrl = 'https://support.microsoft.com/en-us/surface/drivers-firmware/download-drivers-and-firmware-for-surface'
     $FamilyBase = 'https://support.microsoft.com/en-us/surface/drivers-firmware/download-drivers-and-firmware-for-surface-'
-    $LinkPattern = 'https://(?:www\.microsoft\.com/[a-z-]+/download/(?:details|confirmation)\.aspx\?id=\d+|go\.microsoft\.com/fwlink/\?[Ll]ink[Ii][Dd]=\d+)'
-    $ModelPattern = 'Surface(?:\s+[\w+()-]+){1,10}'
     $Catalog = [ordered]@{}
 
     try {
@@ -109,13 +107,23 @@ function Get-CatalogFromSupportPage {
     if (-not $MainText) {
         $MainText = $MainResponse.Content
     }
+    $MainText = $MainText -replace '\\/', '/'
 
     # Family sub-pages carry the full path prefix plus a distinct slug
-    $SlugMatches = [regex]::Matches($MainText, 'download-drivers-and-firmware-for-surface-([a-z][a-z-]*)')
+    $SlugMatches = [regex]::Matches($MainText, 'download-drivers-and-firmware-for-surface-([a-z][a-z0-9-]*)')
     $FamilyUrls = New-Object System.Collections.ArrayList
     $SeenSlugs = @{}
     foreach ($SlugMatch in $SlugMatches) {
         $FamilyUrl = $FamilyBase + $SlugMatch.Groups[1].Value
+        if (-not $SeenSlugs.ContainsKey($FamilyUrl)) {
+            [void]$FamilyUrls.Add($FamilyUrl)
+            $SeenSlugs[$FamilyUrl] = $true
+        }
+    }
+
+    # Guarantee well-known families are visited even if absent from the __NEXT_DATA__ blob
+    foreach ($KnownSlug in @('book', 'go', 'hub', 'laptop', 'laptop-go', 'pro', 'studio')) {
+        $FamilyUrl = $FamilyBase + $KnownSlug
         if (-not $SeenSlugs.ContainsKey($FamilyUrl)) {
             [void]$FamilyUrls.Add($FamilyUrl)
             $SeenSlugs[$FamilyUrl] = $true
@@ -127,43 +135,52 @@ function Get-CatalogFromSupportPage {
         return $Catalog
     }
 
-    foreach ($FamilyUrl in $FamilyUrls) {
-        Write-Host "  Scanning family page: $FamilyUrl" -ForegroundColor DarkGray
+    # Use $FamilyUrls as the initial visit queue; grow it as sub-pages are found
+    $Visited = @{}
+    $QueueIndex = 0
+    $InitialCount = $FamilyUrls.Count
 
-        $FamilyResponse = $null
+    while ($QueueIndex -lt $FamilyUrls.Count) {
+        $PageUrl = $FamilyUrls[$QueueIndex]
+        $QueueIndex++
+
+        if ($Visited.ContainsKey($PageUrl)) { continue }
+        $Visited[$PageUrl] = $true
+
+        if ($QueueIndex -le $InitialCount) {
+            Write-Host "  Scanning: $PageUrl" -ForegroundColor DarkGray
+        }
+
+        $PageResponse = $null
         try {
-            $FamilyResponse = Invoke-WebRequest -Uri $FamilyUrl -UseBasicParsing -TimeoutSec 30
+            $PageResponse = Invoke-WebRequest -Uri $PageUrl -UseBasicParsing -TimeoutSec 30
         }
         catch {
-            Write-Host "  Warning: failed to fetch '$FamilyUrl' - $_" -ForegroundColor Yellow
+            Write-Host "  Warning: failed to fetch '$PageUrl' - $_" -ForegroundColor Yellow
             continue
         }
 
-        $FamilyText = $null
-        $FamilyNext = [regex]::Matches($FamilyResponse.Content, '<script id="__NEXT_DATA__"[^>]*>([\s\S]+?)</script>')
-        if ($FamilyNext.Count -gt 0) {
-            $FamilyText = $FamilyNext[0].Groups[1].Value
-        }
-        if (-not $FamilyText) {
-            $FamilyText = $FamilyResponse.Content
-        }
+        $PageText = $PageResponse.Content
+        $PageText = $PageText -replace '\\/', '/'
 
-        $LinkMatches = [regex]::Matches($FamilyText, $LinkPattern)
-        foreach ($LinkMatch in $LinkMatches) {
-            $MatchIndex = $LinkMatch.Index
-            $WindowStart = [Math]::Max(0, $MatchIndex - 500)
-            $PrecedingText = $FamilyText.Substring($WindowStart, $MatchIndex - $WindowStart)
-
-            # Use the last match in the lookback window - it is closest to the link
-            $ModelMatches = [regex]::Matches($PrecedingText, $ModelPattern)
-            if ($ModelMatches.Count -eq 0) {
-                continue
+        # Discover model sub-pages linked from this family page and queue any not yet seen
+        $SubSlugMatches = [regex]::Matches($PageText, 'download-drivers-and-firmware-for-surface-([a-z][a-z0-9-]*)')
+        foreach ($SubSlugMatch in $SubSlugMatches) {
+            $SubUrl = $FamilyBase + $SubSlugMatch.Groups[1].Value
+            if (-not $Visited.ContainsKey($SubUrl) -and -not $SeenSlugs.ContainsKey($SubUrl)) {
+                [void]$FamilyUrls.Add($SubUrl)
+                $SeenSlugs[$SubUrl] = $true
             }
-            $ModelName = $ModelMatches[$ModelMatches.Count - 1].Value.TrimEnd('"', '\', ')', '>', ' ')
-            $Url = $LinkMatch.Value
+        }
 
-            if (-not $Catalog.ContainsKey($ModelName)) {
-                $Catalog[$ModelName] = $Url
+        # Table rows pair model name (first td) with download link href (second td)
+        $RowPattern = '(?s)<tr>\s*<td>(.*?)</td>\s*<td>.*?href="(https://www\.microsoft\.com/(?:[a-z-]+/)?download/details\.aspx\?id=\d+)"'
+        $RowMatches = [regex]::Matches($PageText, $RowPattern)
+        foreach ($RowMatch in $RowMatches) {
+            $ModelName = [regex]::Replace($RowMatch.Groups[1].Value, '<[^>]+>', '').Trim()
+            $DownloadUrl = $RowMatch.Groups[2].Value
+            if ($ModelName -and -not $Catalog.Contains($ModelName)) {
+                $Catalog[$ModelName] = $DownloadUrl
             }
         }
     }
