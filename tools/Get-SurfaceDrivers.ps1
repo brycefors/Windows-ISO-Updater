@@ -35,8 +35,9 @@
     Suppress detail lines; show only headings and the final summary.
 
 .PARAMETER InstallLocal
-    Detects this device's Surface model, downloads only its driver package, and installs it
-    immediately via msiexec. Requires an elevated (Administrator) PowerShell session.
+    Detects this device's Surface model, also considering the baseboard product for a closer match,
+    downloads only its driver package, and installs it immediately via msiexec. Requires an elevated
+    (Administrator) PowerShell session.
 
 .EXAMPLE
     .\tools\Get-SurfaceDrivers.ps1
@@ -409,6 +410,50 @@ function Resolve-MsiDownloadUrl {
     return Select-HighestVersionUrl -Urls $Candidates -VersionTag $VersionTag
 }
 
+function Get-NormalizedModelTokens {
+    param([string]$Text)
+
+    if (-not $Text) { return @() }
+
+    # Baseboard/ComputerSystem strings use commas for edition info where the catalog uses parentheses, normalize both to bare words
+    $Clean = $Text -replace '(?i)^\s*Microsoft\s+', ''
+    $Clean = $Clean -replace '[(),]', ' '
+    $Clean = $Clean -replace '\s+', ' '
+    $Clean = $Clean.Trim().ToLowerInvariant()
+    if (-not $Clean) { return @() }
+    return @($Clean -split ' ')
+}
+
+function Get-BestCatalogMatch {
+    param(
+        [string[]]$CatalogKeys,
+        [string[]]$Candidates
+    )
+
+    # A catalog key matches only if every one of its words appears somewhere in the candidate text, word count decides which candidate/key pair wins so a specific edition beats a generic family name
+    $Best = $null
+    $BestScore = 0
+
+    foreach ($Candidate in $Candidates) {
+        if (-not $Candidate) { continue }
+        $CandidateTokens = @(Get-NormalizedModelTokens -Text $Candidate)
+        if ($CandidateTokens.Count -eq 0) { continue }
+
+        foreach ($Key in $CatalogKeys) {
+            $KeyTokens = @(Get-NormalizedModelTokens -Text $Key)
+            if ($KeyTokens.Count -eq 0) { continue }
+
+            $MatchedCount = @($KeyTokens | Where-Object { $CandidateTokens -contains $_ }).Count
+            if ($MatchedCount -eq $KeyTokens.Count -and $MatchedCount -gt $BestScore) {
+                $BestScore = $MatchedCount
+                $Best = $Key
+            }
+        }
+    }
+
+    return $Best
+}
+
 function Get-DriverPackage {
     param(
         [string]$Url,
@@ -495,18 +540,16 @@ if ($LiveCatalog.Count -eq 0) {
 
 if ($InstallLocal) {
     $LocalModel = (Get-CimInstance -ClassName Win32_ComputerSystem).Model
+    $LocalBaseboard = (Get-CimInstance -ClassName Win32_BaseBoard).Product
     if (-not $Quiet) {
         Write-Host "Detected device model: $LocalModel" -ForegroundColor DarkGray
+        Write-Host "Detected baseboard product: $LocalBaseboard" -ForegroundColor DarkGray
     }
 
-    # Catalog names are substrings of the full WMI model string (mirrors Install-ModelDrivers.ps1's matching), longest match wins to avoid a generic entry shadowing a more specific one
-    $MatchedModel = $LiveCatalog.Keys |
-        Where-Object { $LocalModel -like "*$_*" } |
-        Sort-Object -Property Length -Descending |
-        Select-Object -First 1
+    $MatchedModel = Get-BestCatalogMatch -CatalogKeys @($LiveCatalog.Keys) -Candidates @($LocalBaseboard, $LocalModel)
 
     if (-not $MatchedModel) {
-        Write-Host "No catalog entry matches this device's model ('$LocalModel'). Use -ListModels to see what's available." -ForegroundColor Red
+        Write-Host "No catalog entry matches this device (model '$LocalModel', baseboard '$LocalBaseboard'). Use -ListModels to see what's available." -ForegroundColor Red
         exit 1
     }
 
