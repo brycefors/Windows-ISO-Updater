@@ -84,6 +84,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+# .NET Framework caps concurrent connections per host at 2 by default, which would bottleneck the parallel fetches below
+[Net.ServicePointManager]::DefaultConnectionLimit = 16
 
 # Carries the anonymous session cookie the first support.microsoft.com request receives into every
 # later call, so details.aspx fetches aren't treated as sessionless and bounced to sign-in.
@@ -144,59 +146,112 @@ function Get-CatalogFromSupportPage {
         return $Catalog
     }
 
-    # Use $FamilyUrls as the initial visit queue; grow it as sub-pages are found
+    # Fetch each level of sub-pages concurrently; parsing and $Catalog/$Visited writes stay single-threaded here
     $Visited = @{}
-    $QueueIndex = 0
-    $InitialCount = $FamilyUrls.Count
+    $CurrentLevel = New-Object System.Collections.ArrayList
+    foreach ($FamilyUrl in $FamilyUrls) {
+        [void]$CurrentLevel.Add($FamilyUrl)
+        $Visited[$FamilyUrl] = $true
+    }
+    $CurrentLevel = @($CurrentLevel)
 
-    while ($QueueIndex -lt $FamilyUrls.Count) {
-        $PageUrl = $FamilyUrls[$QueueIndex]
-        $QueueIndex++
+    while ($CurrentLevel.Count -gt 0) {
+        Write-Host "  Scanning level with $($CurrentLevel.Count) page(s)..." -ForegroundColor DarkGray
+        $LevelResults = Invoke-ParallelWebRequest -Uris $CurrentLevel -WebSession $script:WebSession
+        $NextLevel = New-Object System.Collections.ArrayList
 
-        if ($Visited.ContainsKey($PageUrl)) { continue }
-        $Visited[$PageUrl] = $true
+        foreach ($r in $LevelResults) {
+            if (-not $r.Success) {
+                Write-Host "  Warning: failed to fetch '$($r.Uri)' - $($r.Error)" -ForegroundColor Yellow
+                continue
+            }
 
-        if ($QueueIndex -le $InitialCount) {
-            Write-Host "  Scanning: $PageUrl" -ForegroundColor DarkGray
-        }
+            $PageText = $r.Content -replace '\\/', '/'
 
-        $PageResponse = $null
-        try {
-            $PageRequestParams = @{ Uri = $PageUrl; UseBasicParsing = $true; TimeoutSec = 30 }
-            if ($script:WebSession) { $PageRequestParams['WebSession'] = $script:WebSession }
-            [void]($PageResponse = Invoke-WebRequest @PageRequestParams)
-        }
-        catch {
-            Write-Host "  Warning: failed to fetch '$PageUrl' - $($_.Exception.Message)" -ForegroundColor Yellow
-            continue
-        }
+            # Discover model sub-pages linked from this family page and queue any not yet seen
+            $SubSlugMatches = [regex]::Matches($PageText, 'download-drivers-and-firmware-for-surface-([a-z][a-z0-9-]*)')
+            foreach ($SubSlugMatch in $SubSlugMatches) {
+                $SubUrl = $FamilyBase + $SubSlugMatch.Groups[1].Value
+                if (-not $Visited.ContainsKey($SubUrl) -and -not $SeenSlugs.ContainsKey($SubUrl)) {
+                    [void]$NextLevel.Add($SubUrl)
+                    $Visited[$SubUrl] = $true
+                    $SeenSlugs[$SubUrl] = $true
+                }
+            }
 
-        $PageText = $PageResponse.Content
-        $PageText = $PageText -replace '\\/', '/'
-
-        # Discover model sub-pages linked from this family page and queue any not yet seen
-        $SubSlugMatches = [regex]::Matches($PageText, 'download-drivers-and-firmware-for-surface-([a-z][a-z0-9-]*)')
-        foreach ($SubSlugMatch in $SubSlugMatches) {
-            $SubUrl = $FamilyBase + $SubSlugMatch.Groups[1].Value
-            if (-not $Visited.ContainsKey($SubUrl) -and -not $SeenSlugs.ContainsKey($SubUrl)) {
-                [void]$FamilyUrls.Add($SubUrl)
-                $SeenSlugs[$SubUrl] = $true
+            # Table rows pair model name (first td) with download link href (second td)
+            $RowPattern = '<tr>\s*<td>\s*([^<>]{1,100}?)\s*</td>\s*<td>[^<]*<a[^>]+href="(https://www\.microsoft\.com/(?:[a-z-]+/)?download/details\.aspx\?id=\d+)"'
+            $RowMatches = [regex]::Matches($PageText, $RowPattern)
+            foreach ($RowMatch in $RowMatches) {
+                $ModelName = $RowMatch.Groups[1].Value.Trim()
+                $DownloadUrl = $RowMatch.Groups[2].Value
+                if ($ModelName -and -not $Catalog.Contains($ModelName)) {
+                    $Catalog[$ModelName] = $DownloadUrl
+                }
             }
         }
 
-        # Table rows pair model name (first td) with download link href (second td)
-        $RowPattern = '<tr>\s*<td>\s*([^<>]{1,100}?)\s*</td>\s*<td>[^<]*<a[^>]+href="(https://www\.microsoft\.com/(?:[a-z-]+/)?download/details\.aspx\?id=\d+)"'
-        $RowMatches = [regex]::Matches($PageText, $RowPattern)
-        foreach ($RowMatch in $RowMatches) {
-            $ModelName = $RowMatch.Groups[1].Value.Trim()
-            $DownloadUrl = $RowMatch.Groups[2].Value
-            if ($ModelName -and -not $Catalog.Contains($ModelName)) {
-                $Catalog[$ModelName] = $DownloadUrl
+        $CurrentLevel = @($NextLevel)
+    }
+
+    return $Catalog
+}
+
+function Invoke-ParallelWebRequest {
+    param(
+        [string[]]$Uris,
+        [Microsoft.PowerShell.Commands.WebRequestSession]$WebSession,
+        [int]$TimeoutSec = 30,
+        [int]$MaxConcurrency = 8
+    )
+
+    $Pool = [runspacefactory]::CreateRunspacePool(1, $MaxConcurrency)
+    $Pool.Open()
+
+    $ScriptBlock = {
+        param($Uri, $WebSession, $TimeoutSec)
+
+        try {
+            $RequestParams = @{ Uri = $Uri; UseBasicParsing = $true; TimeoutSec = $TimeoutSec }
+            if ($WebSession) { $RequestParams['WebSession'] = $WebSession }
+            $Response = Invoke-WebRequest @RequestParams
+            [pscustomobject]@{
+                Uri     = $Uri
+                Content = $Response.Content
+                Success = $true
+                Error   = $null
+            }
+        }
+        catch {
+            [pscustomobject]@{
+                Uri     = $Uri
+                Content = $null
+                Success = $false
+                Error   = $_.Exception.Message
             }
         }
     }
 
-    return $Catalog
+    $Pipelines = New-Object System.Collections.ArrayList
+    foreach ($Uri in $Uris) {
+        $Pipeline = [powershell]::Create()
+        $Pipeline.RunspacePool = $Pool
+        [void]$Pipeline.AddScript($ScriptBlock).AddArgument($Uri).AddArgument($WebSession).AddArgument($TimeoutSec)
+        $AsyncResult = $Pipeline.BeginInvoke()
+        [void]$Pipelines.Add(@{ Pipeline = $Pipeline; AsyncResult = $AsyncResult })
+    }
+
+    # EndInvoke returns a collection per pipeline (one item here), so AddRange flattens it instead of nesting collections
+    $Results = New-Object System.Collections.ArrayList
+    foreach ($Entry in $Pipelines) {
+        [void]$Results.AddRange($Entry.Pipeline.EndInvoke($Entry.AsyncResult))
+        $Entry.Pipeline.Dispose()
+    }
+
+    $Pool.Close()
+    $Pool.Dispose()
+
+    return @($Results)
 }
 
 function Select-HighestVersionUrl {
