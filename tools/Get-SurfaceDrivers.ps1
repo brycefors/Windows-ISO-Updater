@@ -34,6 +34,10 @@
 .PARAMETER Quiet
     Suppress detail lines; show only headings and the final summary.
 
+.PARAMETER InstallLocal
+    Detects this device's Surface model, downloads only its driver package, and installs it
+    immediately via msiexec. Requires an elevated (Administrator) PowerShell session.
+
 .EXAMPLE
     .\tools\Get-SurfaceDrivers.ps1
     Downloads Windows 11 driver packages for every catalogued model into .\Drivers\.
@@ -49,6 +53,10 @@
 .EXAMPLE
     .\tools\Get-SurfaceDrivers.ps1 -WindowsVersion 10 -Quiet
     Downloads Windows 10 packages for all supported models, showing only headings and the summary.
+
+.EXAMPLE
+    .\tools\Get-SurfaceDrivers.ps1 -InstallLocal
+    Detects this device's Surface model, downloads its driver package, and installs it via msiexec. Must be run elevated.
 
 .NOTES
     Folder names match the exact string returned by (Get-CimInstance Win32_ComputerSystem).Model on
@@ -77,6 +85,9 @@ param(
     [Parameter(HelpMessage = 'List available models in the catalog and exit without downloading anything.')]
     [switch]$ListModels,
 
+    [Parameter(HelpMessage = 'Detect this device''s Surface model, download only its driver package, and install it immediately via msiexec. Requires an elevated (Administrator) PowerShell session.')]
+    [switch]$InstallLocal,
+
     [Parameter(HelpMessage = 'Suppress detail lines; show only headings and the final summary.')]
     [switch]$Quiet
 )
@@ -86,6 +97,8 @@ $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 # .NET Framework caps concurrent connections per host at 2 by default, which would bottleneck the parallel fetches below
 [Net.ServicePointManager]::DefaultConnectionLimit = 16
+# support.microsoft.com's WAF rejects PowerShell's default User-Agent as bot traffic, so every request wears a browser one
+$script:UserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
 # Carries the anonymous session cookie the first support.microsoft.com request receives into every
 # later call, so details.aspx fetches aren't treated as sessionless and bounced to sign-in.
@@ -102,7 +115,7 @@ function Get-CatalogFromSupportPage {
     $Catalog = [ordered]@{}
 
     try {
-        [void]($MainResponse = Invoke-WebRequest -Uri $MainUrl -UseBasicParsing -TimeoutSec 30 -SessionVariable NewWebSession)
+        [void]($MainResponse = Invoke-WebRequest -Uri $MainUrl -UseBasicParsing -TimeoutSec 30 -SessionVariable NewWebSession -UserAgent $script:UserAgent)
         $script:WebSession = $NewWebSession
     }
     catch {
@@ -157,7 +170,7 @@ function Get-CatalogFromSupportPage {
 
     while ($CurrentLevel.Count -gt 0) {
         Write-Host "  Scanning level with $($CurrentLevel.Count) page(s)..." -ForegroundColor DarkGray
-        $LevelResults = Invoke-ParallelWebRequest -Uris $CurrentLevel -WebSession $script:WebSession
+        $LevelResults = Invoke-ParallelWebRequest -Uris $CurrentLevel -WebSession $script:WebSession -UserAgent $script:UserAgent
         $NextLevel = New-Object System.Collections.ArrayList
 
         foreach ($r in $LevelResults) {
@@ -202,17 +215,18 @@ function Invoke-ParallelWebRequest {
         [string[]]$Uris,
         [Microsoft.PowerShell.Commands.WebRequestSession]$WebSession,
         [int]$TimeoutSec = 30,
-        [int]$MaxConcurrency = 8
+        [int]$MaxConcurrency = 8,
+        [string]$UserAgent = $script:UserAgent
     )
 
     $Pool = [runspacefactory]::CreateRunspacePool(1, $MaxConcurrency)
     $Pool.Open()
 
     $ScriptBlock = {
-        param($Uri, $WebSession, $TimeoutSec)
+        param($Uri, $WebSession, $TimeoutSec, $UserAgent)
 
         try {
-            $RequestParams = @{ Uri = $Uri; UseBasicParsing = $true; TimeoutSec = $TimeoutSec }
+            $RequestParams = @{ Uri = $Uri; UseBasicParsing = $true; TimeoutSec = $TimeoutSec; UserAgent = $UserAgent }
             if ($WebSession) { $RequestParams['WebSession'] = $WebSession }
             $Response = Invoke-WebRequest @RequestParams
             [pscustomobject]@{
@@ -236,15 +250,17 @@ function Invoke-ParallelWebRequest {
     foreach ($Uri in $Uris) {
         $Pipeline = [powershell]::Create()
         $Pipeline.RunspacePool = $Pool
-        [void]$Pipeline.AddScript($ScriptBlock).AddArgument($Uri).AddArgument($WebSession).AddArgument($TimeoutSec)
+        [void]$Pipeline.AddScript($ScriptBlock).AddArgument($Uri).AddArgument($WebSession).AddArgument($TimeoutSec).AddArgument($UserAgent)
         $AsyncResult = $Pipeline.BeginInvoke()
         [void]$Pipelines.Add(@{ Pipeline = $Pipeline; AsyncResult = $AsyncResult })
     }
 
-    # EndInvoke returns a collection per pipeline (one item here), so AddRange flattens it instead of nesting collections
+    # AddRange would bulk-copy via PSDataCollection's ICollection.CopyTo, which casts to PSObject[] and fails against ArrayList's object[] store
     $Results = New-Object System.Collections.ArrayList
     foreach ($Entry in $Pipelines) {
-        [void]$Results.AddRange($Entry.Pipeline.EndInvoke($Entry.AsyncResult))
+        foreach ($Item in $Entry.Pipeline.EndInvoke($Entry.AsyncResult)) {
+            [void]$Results.Add($Item)
+        }
         $Entry.Pipeline.Dispose()
     }
 
@@ -323,7 +339,7 @@ function Resolve-MsiDownloadUrl {
 
     $SpaResponse = $null
     try {
-        $SpaRequestParams = @{ Uri = $FetchUrl; UseBasicParsing = $true; TimeoutSec = 30 }
+        $SpaRequestParams = @{ Uri = $FetchUrl; UseBasicParsing = $true; TimeoutSec = 30; UserAgent = $script:UserAgent }
         if ($script:WebSession) { $SpaRequestParams['WebSession'] = $script:WebSession }
         [void]($SpaResponse = Invoke-WebRequest @SpaRequestParams)
     }
@@ -417,11 +433,11 @@ function Get-DriverPackage {
             }
             catch {
                 Write-Host "    BITS failed, falling back to WebRequest - $($_.Exception.Message)" -ForegroundColor Yellow
-                [void](Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing)
+                [void](Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing -UserAgent $script:UserAgent)
             }
         }
         else {
-            [void](Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing)
+            [void](Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing -UserAgent $script:UserAgent)
         }
         Unblock-File -LiteralPath $DestFile -ErrorAction SilentlyContinue
         return $true
@@ -440,6 +456,16 @@ if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
     $OutputPath = Join-Path -Path (Get-Location).Path -ChildPath $OutputPath
 }
 $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+
+if ($InstallLocal -and $Models -and $Models.Count -gt 0) {
+    Write-Host '-InstallLocal auto-detects the model for this device and cannot be combined with -Models.' -ForegroundColor Red
+    exit 1
+}
+
+if ($InstallLocal -and -not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
+    Write-Host '-InstallLocal runs msiexec against this device and requires an elevated (Administrator) PowerShell session. Re-run from an elevated prompt.' -ForegroundColor Red
+    exit 1
+}
 
 if ($ListModels) {
     Write-Host 'Fetching model catalog from Microsoft Support...' -ForegroundColor DarkGray
@@ -465,6 +491,27 @@ $LiveCatalog = Get-CatalogFromSupportPage -WindowsVersion $WindowsVersion
 if ($LiveCatalog.Count -eq 0) {
     Write-Host 'No driver links found on the support page. Check network access and try again.' -ForegroundColor Red
     exit 1
+}
+
+if ($InstallLocal) {
+    $LocalModel = (Get-CimInstance -ClassName Win32_ComputerSystem).Model
+    if (-not $Quiet) {
+        Write-Host "Detected device model: $LocalModel" -ForegroundColor DarkGray
+    }
+
+    # Catalog names are substrings of the full WMI model string (mirrors Install-ModelDrivers.ps1's matching), longest match wins to avoid a generic entry shadowing a more specific one
+    $MatchedModel = $LiveCatalog.Keys |
+        Where-Object { $LocalModel -like "*$_*" } |
+        Sort-Object -Property Length -Descending |
+        Select-Object -First 1
+
+    if (-not $MatchedModel) {
+        Write-Host "No catalog entry matches this device's model ('$LocalModel'). Use -ListModels to see what's available." -ForegroundColor Red
+        exit 1
+    }
+
+    Write-Host "Matched catalog model: $MatchedModel" -ForegroundColor Cyan
+    $Models = @($MatchedModel)
 }
 
 if ($Models -and $Models.Count -gt 0) {
@@ -546,6 +593,22 @@ foreach ($ModelName in ($TargetModels | Sort-Object)) {
         if ((-not $Quiet) -and (-not $AlreadyPresent)) {
             Write-Host "    Downloaded: $FileName" -ForegroundColor Green
         }
+
+        if ($InstallLocal) {
+            if (-not $Quiet) {
+                Write-Host "    Installing $FileName ..." -ForegroundColor DarkGray
+            }
+            $InstallProcess = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/i `"$DestFile`" /quiet /norestart" -Wait -PassThru
+            if ($InstallProcess.ExitCode -eq 0) {
+                Write-Host "    Installed successfully" -ForegroundColor Green
+                $ResultLabel = 'Installed'
+            }
+            else {
+                Write-Host "    Install failed (exit $($InstallProcess.ExitCode))" -ForegroundColor Red
+                $ResultLabel = "Install failed ($($InstallProcess.ExitCode))"
+            }
+        }
+
         $SummaryRows.Add([pscustomobject]@{
             Model  = $ModelName
             Result = $ResultLabel
@@ -568,6 +631,7 @@ Write-Host ('-' * 80) -ForegroundColor DarkGray
 foreach ($Row in $SummaryRows) {
     $RowColor = switch ($Row.Result) {
         'Downloaded'      { 'Green' }
+        'Installed'       { 'Green' }
         'Already present' { 'DarkGray' }
         'Unavailable'     { 'DarkGray' }
         default           { 'Yellow' }
