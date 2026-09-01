@@ -2,7 +2,7 @@
 name: Lead
 description: Orchestrator and coordinator for Windows-ISO-Updater development workflows
 argument-hint: Describe what you want to build, fix, or update
-model: "Claude Sonnet 4.6"
+model: "Claude Sonnet 5"
 tools: ['agent', 'search', 'read/problems']
 agents: ['Codebase Architect', 'Script Surgeon', 'PS51 Harness', 'Doc Scribe', 'Answer File Editor']
 ---

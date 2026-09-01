@@ -2,7 +2,7 @@
 name: Doc Scribe
 description: Update the README and docs folder for Windows-ISO-Updater, routing each change to the file that owns the subject
 argument-hint: Describe what changed and needs documenting
-model: Claude Sonnet 4.6
+model: "Claude Sonnet 5"
 tools: [search, edit, read/problems, vscodeTasks/problems]
 ---
 

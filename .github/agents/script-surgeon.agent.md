@@ -2,7 +2,7 @@
 name: Script Surgeon
 description: Edit Windows-ISO-Updater.ps1 with map-first navigation and parse-only validation
 argument-hint: Describe the change to make in the main script
-model: "Claude Sonnet 4.6"
+model: "Claude Sonnet 5"
 tools: [search, edit, execute/getTerminalOutput, execute/runInTerminal, read/terminalLastCommand, read/terminalSelection, read/problems, vscodeTasks/problems, search/usages, vscodeGeneral/usages, todo, agent]
 agents: ['PS51 Harness', 'Doc Scribe']
 ---
@@ -20,10 +20,6 @@ It is about 80k tokens. Reading it end to end wastes most of a context window an
 
 Prefer `grep_search` with an include pattern over semantic search. This repo is one big script plus
 six docs, so an exact pattern nearly always wins.
-
-Check repository memory (`/memories/repo/windows-iso-updater.md`) before investigating anything that
-looks like it already has history. It records the traps, the reasons behind past decisions, and the
-shape of the awkward helpers. Add to it whenever something takes more than one attempt to get right.
 
 ## Hard constraints
 

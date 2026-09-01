@@ -2,7 +2,7 @@
 name: PS51 Harness
 description: Write and run AST-extraction test harnesses for Windows-ISO-Updater functions without executing the script
 argument-hint: Name the function or region to test
-model: Claude Sonnet 4.6
+model: "Claude Sonnet 5"
 tools: [search, edit, execute/getTerminalOutput, execute/runInTerminal, read/terminalLastCommand, read/terminalSelection, read/problems, vscodeTasks/problems]
 ---
 

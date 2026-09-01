@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.19.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.08.31.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -276,7 +276,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.19.3'
+$ScriptVersion = '2026.08.31.1'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2450,18 +2450,19 @@ function Resolve-EditionIndexes {
     $Matched = New-Object System.Collections.Generic.List[int]
     $NoMatch = New-Object System.Collections.Generic.List[string]
     foreach ($Token in $Tokens) {
-        $T = "$Token".Trim()
-        if (-not $T) { continue }
-        $Found = $null
-        if ($T -match '^\d+$') {
-            $Found = $Images | Where-Object { $_.ImageIndex -eq [int]$T }
+        # Batch launchers pass "-KeepEditions 1,3" as one string, so split each token on commas here too.
+        foreach ($T in ("$Token".Trim() -split '\s*,\s*' | Where-Object { $_ -ne '' })) {
+            $Found = $null
+            if ($T -match '^\d+$') {
+                $Found = $Images | Where-Object { $_.ImageIndex -eq [int]$T }
+            }
+            else {
+                $Found = $Images | Where-Object { $_.ImageName -eq $T }
+                if (-not $Found) { $Found = $Images | Where-Object { $_.ImageName -like "*$T*" } }
+            }
+            if ($Found) { $Found | ForEach-Object { [void]$Matched.Add([int]$_.ImageIndex) } }
+            else { [void]$NoMatch.Add($T) }
         }
-        else {
-            $Found = $Images | Where-Object { $_.ImageName -eq $T }
-            if (-not $Found) { $Found = $Images | Where-Object { $_.ImageName -like "*$T*" } }
-        }
-        if ($Found) { $Found | ForEach-Object { [void]$Matched.Add([int]$_.ImageIndex) } }
-        else { [void]$NoMatch.Add($T) }
     }
     if ($Unmatched) { $Unmatched.Value = $NoMatch }
     return ($Matched | Sort-Object -Unique)
