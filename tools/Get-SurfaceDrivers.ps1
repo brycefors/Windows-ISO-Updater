@@ -85,6 +85,13 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
+# Carries the anonymous session cookie the first support.microsoft.com request receives into every
+# later call, so details.aspx fetches aren't treated as sessionless and bounced to sign-in.
+$script:WebSession = $null
+
+# Lets the per-model loop tell an unavailable catalog listing (404, JSON error, or no files) apart from a transient resolution failure.
+$script:LastResolveFailureWasRetired = $false
+
 function Get-CatalogFromSupportPage {
     param([string]$WindowsVersion)
 
@@ -93,7 +100,8 @@ function Get-CatalogFromSupportPage {
     $Catalog = [ordered]@{}
 
     try {
-        [void]($MainResponse = Invoke-WebRequest -Uri $MainUrl -UseBasicParsing -TimeoutSec 30)
+        [void]($MainResponse = Invoke-WebRequest -Uri $MainUrl -UseBasicParsing -TimeoutSec 30 -SessionVariable NewWebSession)
+        $script:WebSession = $NewWebSession
     }
     catch {
         Write-Host "Failed to fetch Surface support page - $($_.Exception.Message)" -ForegroundColor Red
@@ -154,7 +162,9 @@ function Get-CatalogFromSupportPage {
 
         $PageResponse = $null
         try {
-            [void]($PageResponse = Invoke-WebRequest -Uri $PageUrl -UseBasicParsing -TimeoutSec 30)
+            $PageRequestParams = @{ Uri = $PageUrl; UseBasicParsing = $true; TimeoutSec = 30 }
+            if ($script:WebSession) { $PageRequestParams['WebSession'] = $script:WebSession }
+            [void]($PageResponse = Invoke-WebRequest @PageRequestParams)
         }
         catch {
             Write-Host "  Warning: failed to fetch '$PageUrl' - $($_.Exception.Message)" -ForegroundColor Yellow
@@ -229,48 +239,99 @@ function Resolve-MsiDownloadUrl {
         [string]$WindowsVersion
     )
 
+    $script:LastResolveFailureWasRetired = $false
+
     $VersionTag = if ($WindowsVersion -eq '10') { '_Win10_' } else { '_Win11_' }
     $MsiPattern = 'https://download\.microsoft\.com/[^"'']+\.msi'
 
-    # Extract ?id= for use in confirmation URL construction
+    # Extract ?id= for use in details-page URL construction
     $Id = $null
     if ($Url -match '\?id=(\d+)') {
         $Id = $Matches[1]
     }
 
-    # Fetch the no_redirect page to find direct download links
-    $NoRedirectUrl = $null
+    # The details.aspx page itself carries the download links as an embedded JSON blob, so no
+    # separate confirmation.aspx step is needed. fwlink URLs carry no id, keep the legacy no_redirect
+    # fetch for those.
+    $FetchUrl = $null
     if ($Id) {
-        $NoRedirectUrl = "https://www.microsoft.com/en-us/download/confirmation.aspx?id=$Id&no_redirect=true"
+        $FetchUrl = "https://www.microsoft.com/en-us/download/details.aspx?id=$Id"
     }
     elseif ($Url -match 'go\.microsoft\.com/fwlink') {
-        $NoRedirectUrl = if ($Url -match '&no_redirect=true') { $Url } else { "$Url&no_redirect=true" }
+        $FetchUrl = if ($Url -match '&no_redirect=true') { $Url } else { "$Url&no_redirect=true" }
     }
 
-    if (-not $NoRedirectUrl) {
-        Write-Host "  Warning: cannot construct no_redirect URL for '$Url'" -ForegroundColor Yellow
+    if (-not $FetchUrl) {
+        Write-Host "  Warning: cannot construct details URL for '$Url'" -ForegroundColor Yellow
         return $null
     }
 
     $SpaResponse = $null
     try {
-        [void]($SpaResponse = Invoke-WebRequest -Uri $NoRedirectUrl -UseBasicParsing -TimeoutSec 30)
+        $SpaRequestParams = @{ Uri = $FetchUrl; UseBasicParsing = $true; TimeoutSec = 30 }
+        if ($script:WebSession) { $SpaRequestParams['WebSession'] = $script:WebSession }
+        [void]($SpaResponse = Invoke-WebRequest @SpaRequestParams)
     }
     catch {
+        if ($_.Exception.Response -and $_.Exception.Response.StatusCode -eq [System.Net.HttpStatusCode]::NotFound) {
+            Write-Host "  Retired listing (404): Microsoft no longer hosts a download page for $Url" -ForegroundColor DarkGray
+            $script:LastResolveFailureWasRetired = $true
+            return $null
+        }
         Write-Host "  Warning: could not resolve download URL for '$Url' - $($_.Exception.Message)" -ForegroundColor Yellow
         return $null
     }
 
-    $SpaContent = $SpaResponse.Content -replace '\\/', '/'
-
-    $Candidates = @()
-
-    $UrlMatches = [regex]::Matches($SpaContent, $MsiPattern)
-    foreach ($m in $UrlMatches) {
-        $Candidates += $m.Value
+    # A redirect to the Microsoft account sign-in page means every remaining model will hit the same
+    # wall, this is a systemic auth gate, not a per-model regex miss, so the caller must be told apart
+    # from a plain no-URL result.
+    $FinalUri = $null
+    if ($SpaResponse.BaseResponse -and $SpaResponse.BaseResponse.ResponseUri) {
+        $FinalUri = $SpaResponse.BaseResponse.ResponseUri.AbsoluteUri
+    }
+    if ($FinalUri -and ($FinalUri -match 'login\.live\.com' -or $FinalUri -match 'oauth20_authorize')) {
+        throw "Microsoft redirected the download page to sign-in ($FinalUri) instead of returning the file link. Downloads cannot continue without an authenticated session."
     }
 
+    # Feed the raw, still-escaped JSON text to ConvertFrom-Json so it unescapes '\/' itself, rather
+    # than reusing the page-wide unescape meant for the raw-HTML fallback scan below.
+    $Dlc = $null
+    $DlcMatch = [regex]::Match($SpaResponse.Content, 'window\.__DLCDetails__=(\{[\s\S]+?\});\s*</script>', 'IgnoreCase')
+    if ($DlcMatch.Success) {
+        try {
+            $Dlc = ConvertFrom-Json -InputObject $DlcMatch.Groups[1].Value
+        }
+        catch {
+            $Dlc = $null
+        }
+    }
+
+    if (-not $Dlc) {
+        # No __DLCDetails__ blob, or it failed to parse. Fall back to scanning raw HTML for a direct msi link.
+        $SpaContent = $SpaResponse.Content -replace '\\/', '/'
+        $Candidates = @()
+        $UrlMatches = [regex]::Matches($SpaContent, $MsiPattern)
+        foreach ($m in $UrlMatches) {
+            $Candidates += $m.Value
+        }
+        if ($Candidates.Count -eq 0) {
+            Write-Host "  Warning: could not resolve download URL for '$Url' - no __DLCDetails__ JSON and no direct msi link found" -ForegroundColor Yellow
+            return $null
+        }
+        return Select-HighestVersionUrl -Urls $Candidates -VersionTag $VersionTag
+    }
+
+    $DlcError = $Dlc.dlcDetailsView.error
+    if ($DlcError) {
+        Write-Host "  No download available for '$Url' - $DlcError" -ForegroundColor DarkGray
+        $script:LastResolveFailureWasRetired = $true
+        return $null
+    }
+
+    $Candidates = @($Dlc.dlcDetailsView.downloadFile | ForEach-Object { $_.url })
     if ($Candidates.Count -eq 0) {
+        Write-Host "  No download available for '$Url'" -ForegroundColor DarkGray
+        $script:LastResolveFailureWasRetired = $true
         return $null
     }
 
@@ -373,6 +434,7 @@ Write-Host "Output: $OutputPath" -ForegroundColor DarkGray
 Write-Host ''
 
 $SummaryRows = New-Object System.Collections.Generic.List[object]
+$AuthGateHit = $false
 
 foreach ($ModelName in ($TargetModels | Sort-Object)) {
     if (-not $Quiet) {
@@ -386,14 +448,31 @@ foreach ($ModelName in ($TargetModels | Sort-Object)) {
         Write-Host "    Resolving $DriverUrl ..." -ForegroundColor DarkGray
     }
 
-    $MsiUrl = Resolve-MsiDownloadUrl -Url $DriverUrl -WindowsVersion $WindowsVersion
+    try {
+        $MsiUrl = Resolve-MsiDownloadUrl -Url $DriverUrl -WindowsVersion $WindowsVersion
+    }
+    catch {
+        Write-Host ''
+        Write-Host "Stopping: Microsoft's download pages are requiring sign-in to reach the driver link, so this run cannot continue. Sign in to https://www.microsoft.com/download in a browser first, then re-run. ($($_.Exception.Message))" -ForegroundColor Red
+        $AuthGateHit = $true
+        break
+    }
     if (-not $MsiUrl) {
-        Write-Host "  Warning: no download URL found for '$ModelName' ($DriverUrl)." -ForegroundColor Yellow
-        $SummaryRows.Add([pscustomobject]@{
-            Model  = $ModelName
-            Result = 'Failed - no URL'
-            Detail = $DriverUrl
-        })
+        if ($script:LastResolveFailureWasRetired) {
+            $SummaryRows.Add([pscustomobject]@{
+                Model  = $ModelName
+                Result = 'Unavailable'
+                Detail = $DriverUrl
+            })
+        }
+        else {
+            Write-Host "  Warning: no download URL found for '$ModelName' ($DriverUrl)." -ForegroundColor Yellow
+            $SummaryRows.Add([pscustomobject]@{
+                Model  = $ModelName
+                Result = 'Failed - no URL'
+                Detail = $DriverUrl
+            })
+        }
         continue
     }
 
@@ -435,10 +514,14 @@ foreach ($Row in $SummaryRows) {
     $RowColor = switch ($Row.Result) {
         'Downloaded'      { 'Green' }
         'Already present' { 'DarkGray' }
+        'Unavailable'     { 'DarkGray' }
         default           { 'Yellow' }
     }
     Write-Host ('{0,-40} {1,-16} {2}' -f $Row.Model, $Row.Result, $Row.Detail) -ForegroundColor $RowColor
 }
 
 Write-Host ''
+if ($AuthGateHit) {
+    exit 1
+}
 exit 0
