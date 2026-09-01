@@ -4,16 +4,19 @@
 		MANUALLY MODIFIED. Do not treat this as generator output.
 
 		This is the "ultimate" fully unattended deployment file: it wipes disk 0 and installs Windows,
-		then dispatches driver installation by manufacturer, with no operator interaction at any point
-		from boot to first logon. It is derived from autounattend-lab-admin.xml, sharing that file's
-		entire windowsPE installer, disk-0 wipe logic, OOBE suppression, built-in Administrator
-		AutoLogon, Specialize.ps1 and FirstLogon.ps1 skeleton, and it started as output from the
-		unattend generator at https://schneegans.de/windows/unattend-generator/ (the URL in the comment
-		below reproduces the options that were selected) before being hand edited. Regenerating from
-		that URL will silently discard every change listed here.
+		then dispatches driver installation by manufacturer, with no operator interaction from boot
+		through disk wipe and image apply. It is derived from autounattend-lab-admin.xml, sharing that
+		file's entire windowsPE installer, disk-0 wipe logic, Specialize.ps1 and FirstLogon.ps1 skeleton,
+		and it started as output from the unattend generator at
+		https://schneegans.de/windows/unattend-generator/ (the URL in the comment below reproduces the
+		options that were selected) before being hand edited. Regenerating from that URL will silently
+		discard every change listed here. Unlike autounattend-lab-admin.xml, this file deliberately stops
+		short of full OOBE bypass, so a device enrolled in Windows Autopilot still completes its normal
+		check-in, Entra ID join and profile application at first boot instead of being routed straight
+		past that phase by a pre-provisioned local account.
 
 		Everything below carries forward unchanged from autounattend-lab-admin.xml except where a
-		change is called out by name. The differences from that file are items 3, 4 and 6.
+		change is called out by name. The differences from that file are items 3, 4, 6, 7, 8 and 9.
 
 		Changes made after generation:
 
@@ -61,11 +64,10 @@
 		   abort. Use this file only on media you have already confirmed is disposable.
 
 		5. C:\Windows\Setup\Scripts\Specialize.ps1
-		   Three tweaks the generator does not offer were added: hibernation is turned off everywhere,
+		   Two tweaks the generator does not offer were added: hibernation is turned off everywhere, and
 		   virtual machines get a never-sleep high performance power plan while physical machines have the
 		   default schemes restored (so never-sleep timeouts baked in by a gold image build do not follow
-		   the image onto laptops), and the CloudContent policies that suppress suggested app installs are
-		   set on every machine.
+		   the image onto laptops).
 
 		6. C:\Windows\Setup\Scripts\Install-DellDrivers.ps1 and Install-SurfaceDrivers.ps1 (new files,
 		   replacing Install-ModelDrivers.ps1)
@@ -77,8 +79,36 @@
 		   repo, each of which downloads and applies its own vendor's current driver updates rather than
 		   reading from C:\Drivers\. The launch also now opens in a visible window (-WindowStyle Normal)
 		   instead of hidden, so driver install progress is visible at first logon rather than silent.
+
+		7. windowsPE pass, RunSynchronousCommand order 28
+		   8.3 short file name creation is now left enabled instead of disabled, and the fsutil commands that
+		   disabled it and stripped existing short names on W: were removed, along with the following block
+		   that set NtfsDisable8dot3NameCreation=1 in the offline SYSTEM hive. This makes this file diverge
+		   from autounattend-lab-admin.xml on this one point, since that file still disables 8.3 names. It
+		   matches the rationale already used in autounattend-gold-image.xml, where 8.3 names are also left
+		   enabled because some installers still resolve short paths.
+
+		8. C:\Windows\Setup\Scripts\Specialize.ps1
+		   This file no longer sets an unlimited password expiration for local accounts, and no longer applies
+		   the CloudContent policies that block suggested app installs. Both were removed for a more vanilla
+		   default Windows 11 result. This makes this file diverge from autounattend-lab-admin.xml on both
+		   points, since that file still runs net.exe accounts /maxpwage:UNLIMITED and still writes the
+		   CloudContent registry values.
+
+		9. oobeSystem pass, Microsoft-Windows-Shell-Setup component
+		   The <AutoLogon> element and the <UserAccounts><AdministratorPassword> block were removed, along
+		   with ProtectYourPC, HideEULAPage and HideWirelessSetupInOOBE from <OOBE>. Windows Setup no longer
+		   skips the OOBE account-creation and network-check-in phase, the phase where Windows Autopilot
+		   detects a registered device, downloads its deployment profile and joins Entra ID. For this file
+		   specifically, this also removes the well-known plaintext Administrator password and the automatic
+		   first sign-in that every other example and caution in this file's history warned about.
+
+		   CAUTION: on hardware that is NOT Autopilot-enrolled, a person now has to complete the normal OOBE
+		   account-creation screens by hand before FirstLogonCommands (driver dispatch, VMware Tools,
+		   Windows.old cleanup) can run, since there is no longer an automatic sign-in. This file is no
+		   longer zero-touch past the disk wipe and image apply on non-Autopilot hardware.
 	-->
-	<!--https://schneegans.de/windows/unattend-generator/?LanguageMode=Unattended&UILanguage=en-US&Locale=en-US&Keyboard=00000409&GeoLocation=244&PEMode=Generated&Disable8Dot3Names=true&PauseBeforeFormatting=true&InstallFromMode=Interactive&PartitionMode=Unattended&TargetDisk=0&PartitionLayout=Automatic&SystemSize=300&RecoveryMode=Partition&RecoverySize=1000&DiskAssertionMode=Generated&AssertMinSize=100&AssertMaxSize=4000&AssertNoPartitions=true&ProcessorArchitecture=amd64&BypassRequirementsCheck=true&ComputerNameMode=Random&TimeZoneMode=Implicit&UserAccountMode=Unattended&AutoLogonMode=Builtin&BuiltinAdministratorPassword=Password123&PasswordExpirationMode=Unlimited&LockoutMode=Default&HideFiles=Hidden&TaskbarSearch=Box&TaskbarIconsMode=Default&StartTilesMode=Default&StartPinsMode=Default&EnableLongPaths=true&EnableRemoteDesktop=true&AllowPowerShellScripts=true&DisableLastAccess=true&PreventDeviceEncryption=true&HideEdgeFre=true&DeleteWindowsOld=true&EffectsMode=Default&DesktopIconsMode=Default&StartFoldersMode=Default&CoreIsolationMode=Enabled&VMwareTools=true&WifiMode=Skip&ExpressSettings=EnableAll&LockKeysMode=Skip&StickyKeysMode=Default&ColorMode=Default&WallpaperMode=Default&LockScreenMode=Default&AppLockerMode=Skip-->
+	<!--https://schneegans.de/windows/unattend-generator/?LanguageMode=Unattended&UILanguage=en-US&Locale=en-US&Keyboard=00000409&GeoLocation=244&PEMode=Generated&PauseBeforeFormatting=true&InstallFromMode=Interactive&PartitionMode=Unattended&TargetDisk=0&PartitionLayout=Automatic&SystemSize=300&RecoveryMode=Partition&RecoverySize=1000&DiskAssertionMode=Generated&AssertMinSize=100&AssertMaxSize=4000&AssertNoPartitions=true&ProcessorArchitecture=amd64&BypassRequirementsCheck=true&ComputerNameMode=Random&TimeZoneMode=Implicit&UserAccountMode=Unattended&LockoutMode=Default&HideFiles=Hidden&TaskbarSearch=Box&TaskbarIconsMode=Default&StartTilesMode=Default&StartPinsMode=Default&EnableLongPaths=true&EnableRemoteDesktop=true&AllowPowerShellScripts=true&DisableLastAccess=true&PreventDeviceEncryption=true&HideEdgeFre=true&DeleteWindowsOld=true&EffectsMode=Default&DesktopIconsMode=Default&StartFoldersMode=Default&CoreIsolationMode=Enabled&VMwareTools=true&WifiMode=Skip&ExpressSettings=EnableAll&LockKeysMode=Skip&StickyKeysMode=Default&ColorMode=Default&WallpaperMode=Default&LockScreenMode=Default&AppLockerMode=Skip-->
 	<!-- offlineServicing: would apply packages/drivers to the image before it boots. Unused here. -->
 	<settings pass="offlineServicing"></settings>
 
@@ -236,33 +266,28 @@
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:copy ^%XML_FILE^% W:\Windows\Panther\unattend.xml&amp;echo:if defined PEDRIVERS_FOLDER (&amp;echo:call :print ^"Adding drivers from $WinPEDriver$ folder to new installation^")</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
-					<!-- Injects the $WinPEDriver$ drivers into the offline image, then disables 8.3 short file names on W: and strips the ones already there. -->
+					<!-- Injects the $WinPEDriver$ drivers into the offline image. -->
 					<Order>28</Order>
-					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:dism.exe /Add-Driver /Image:W:\ /Driver:^"^%PEDRIVERS_FOLDER^%^" /Recurse&amp;echo:^)&amp;echo:call :print ^"Disabling 8.3 file names^"&amp;echo:fsutil.exe 8dot3name set W: 1&amp;echo:fsutil.exe 8dot3name strip /s /f W:\)</Path>
-				</RunSynchronousCommand>
-				<RunSynchronousCommand wcm:action="add">
-					<!-- Loads the offline SYSTEM hive and sets NtfsDisable8dot3NameCreation=1 so the change sticks in the installed OS. -->
-					<Order>29</Order>
-					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:reg.exe LOAD HKLM\mount W:\Windows\System32\config\SYSTEM&amp;echo:reg.exe ADD HKLM\mount\ControlSet001\Control\FileSystem /v NtfsDisable8dot3NameCreation /t REG_DWORD /d 1 /f&amp;echo:reg.exe UNLOAD HKLM\mount)</Path>
+					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:dism.exe /Add-Driver /Image:W:\ /Driver:^"^%PEDRIVERS_FOLDER^%^" /Recurse&amp;echo:^))</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
 					<!-- Loads the offline SOFTWARE hive to set the device setup region. -->
-					<Order>30</Order>
+					<Order>29</Order>
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:call :print ^"Setting device setup region to United States (GeoID 244^)^"&amp;echo:reg.exe LOAD HKLM\mount W:\Windows\System32\config\SOFTWARE)</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
 					<!-- Writes DeviceRegion 244 (United States), unloads the hive, and announces the reboot. -->
-					<Order>31</Order>
+					<Order>30</Order>
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:reg.exe ADD ^"HKLM\mount\Microsoft\Windows\CurrentVersion\Control Panel\DeviceRegion^" /v DeviceRegion /t REG_DWORD /d 244 /f&amp;echo:reg.exe UNLOAD HKLM\mount&amp;echo:call :print ^"Computer will now reboot^")</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
 					<!-- Reboots into the freshly applied Windows, then defines the :fail (show error and stop) and :print (banner message) subroutines used above. -->
-					<Order>32</Order>
+					<Order>31</Order>
 					<Path>cmd.exe /c &gt;&gt;X:\pe.cmd (echo:wpeutil.exe reboot&amp;echo:goto :eof&amp;echo::fail&amp;echo:echo:&amp;echo:echo:Fatal error: ^%~1&amp;echo:echo:&amp;echo:pause&amp;echo:exit 1&amp;echo::print&amp;echo:echo:&amp;echo:echo:*** ^%~1 ***&amp;echo:echo:&amp;echo:goto :eof)</Path>
 				</RunSynchronousCommand>
 				<RunSynchronousCommand wcm:action="add">
 					<!-- pe.cmd is now complete: run it. Everything above only wrote the file, this line performs the installation. -->
-					<Order>33</Order>
+					<Order>32</Order>
 					<Path>cmd.exe /c "X:\pe.cmd"</Path>
 				</RunSynchronousCommand>
 			</RunSynchronous>
@@ -303,30 +328,8 @@
 			<UserLocale>en-US</UserLocale>
 		</component>
 		<component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
-			<UserAccounts>
-				<!-- SECURITY: the built in Administrator password is stored in clear text here and stays readable on the
-				     installed system until FirstLogon.ps1 deletes the answer file. Anyone who can read the ISO or the
-				     C:\Windows\Panther copy can recover it. Lab use only, so change it after install. -->
-				<AdministratorPassword>
-					<Value>Password123</Value>
-					<PlainText>true</PlainText>
-				</AdministratorPassword>
-			</UserAccounts>
-			<!-- Signs in as Administrator automatically exactly once, so FirstLogonCommands can run unattended. -->
-			<AutoLogon>
-				<Username>Administrator</Username>
-				<Enabled>true</Enabled>
-				<LogonCount>1</LogonCount>
-				<Password>
-					<Value>Password123</Value>
-					<PlainText>true</PlainText>
-				</Password>
-			</AutoLogon>
-			<!-- Skips the OOBE wizard pages: 1 = accept the express/recommended privacy settings, hide the EULA and Wi-Fi pages. -->
+			<!-- The rest of OOBE now runs normally, so Autopilot enrollment and network check-in are not skipped. -->
 			<OOBE>
-				<ProtectYourPC>1</ProtectYourPC>
-				<HideEULAPage>true</HideEULAPage>
-				<HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
 				<HideOnlineAccountScreens>false</HideOnlineAccountScreens>
 			</OOBE>
 			<!-- Runs at the first interactive logon, after specialize. See FirstLogon.ps1 near the bottom of this file. -->
@@ -443,10 +446,6 @@ $isVirtualMachine = "$($cs.Manufacturer) $($cs.Model)" -match 'virtual|vmware|vb
 
 $scripts = @(
 	{
-		# Passwords never expire.
-		net.exe accounts /maxpwage:UNLIMITED;
-	};
-	{
 		# Allow file paths longer than 260 characters.
 		reg.exe add "HKLM\SYSTEM\CurrentControlSet\Control\FileSystem" /v LongPathsEnabled /t REG_DWORD /d 1 /f
 	};
@@ -481,12 +480,6 @@ $scripts = @(
 			# install, where nothing has customized power yet, but it does reactivate Balanced.
 			powercfg.exe /restoredefaultschemes;
 		}
-	};
-	{
-		# Blocks the suggested app installs (games, trials) that otherwise arrive on first network connect.
-		# Must be set before OOBE completes, which is why it lives in specialize.
-		reg.exe add "HKLM\SOFTWARE\Policies\Microsoft\Windows\CloudContent" /v DisableWindowsConsumerFeatures /t REG_DWORD /d 1 /f;
-		reg.exe add "HKLM\SOFTWARE\Policies\Microsoft\Windows\CloudContent" /v DisableConsumerAccountStateContent /t REG_DWORD /d 1 /f;
 	};
 	{
 		# MODIFIED (change 2): VMs skip automatic BitLocker device encryption, because encrypted guests defeat
@@ -546,10 +539,6 @@ $scripts = @(
 		else {
 			'Manufacturer {0} matched neither Dell nor Microsoft/Surface; no driver script was launched.' -f $manufacturer;
 		}
-	};
-	{
-		# Turn autologon off now that setup is done, so the next boot asks for credentials.
-		Set-ItemProperty -LiteralPath 'Registry::HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name 'AutoLogonCount' -Type 'DWord' -Force -Value 0;
 	};
 	{
 		# Install VMware Tools from the mounted ISO or by download.
