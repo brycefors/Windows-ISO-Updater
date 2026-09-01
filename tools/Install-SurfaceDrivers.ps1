@@ -34,30 +34,28 @@
 .PARAMETER Quiet
     Suppress detail lines; show only headings and the final summary.
 
-.PARAMETER InstallLocal
-    Detects this device's Surface model, also considering the baseboard product for a closer match,
-    downloads only its driver package, and installs it immediately via msiexec. Requires an elevated
-    (Administrator) PowerShell session.
+.PARAMETER DownloadOnly
+    Download driver packages without installing anything, for staging into Examples/autounattend-driver-install.xml. Downloads every catalogued model, or only -Models if given, into -OutputPath.
 
 .EXAMPLE
-    .\tools\Get-SurfaceDrivers.ps1
-    Downloads Windows 11 driver packages for every catalogued model into .\Drivers\.
+    .\tools\Install-SurfaceDrivers.ps1
+    Detects this device's Surface model, downloads its driver package, and installs it via msiexec. Must be run elevated. This is the default behavior.
 
 .EXAMPLE
-    .\tools\Get-SurfaceDrivers.ps1 -Models 'Surface Pro 9', 'Surface Laptop 5' -OutputPath D:\DriverStaging
-    Downloads only the two named models to D:\DriverStaging.
+    .\tools\Install-SurfaceDrivers.ps1 -DownloadOnly
+    Downloads Windows 11 driver packages for every catalogued model into .\Drivers\, without installing anything.
 
 .EXAMPLE
-    .\tools\Get-SurfaceDrivers.ps1 -ListModels
+    .\tools\Install-SurfaceDrivers.ps1 -DownloadOnly -Models 'Surface Pro 9', 'Surface Laptop 5' -OutputPath D:\DriverStaging
+    Downloads only the two named models to D:\DriverStaging, without installing anything.
+
+.EXAMPLE
+    .\tools\Install-SurfaceDrivers.ps1 -ListModels
     Prints the catalog table and exits without downloading anything.
 
 .EXAMPLE
-    .\tools\Get-SurfaceDrivers.ps1 -WindowsVersion 10 -Quiet
+    .\tools\Install-SurfaceDrivers.ps1 -DownloadOnly -WindowsVersion 10 -Quiet
     Downloads Windows 10 packages for all supported models, showing only headings and the summary.
-
-.EXAMPLE
-    .\tools\Get-SurfaceDrivers.ps1 -InstallLocal
-    Detects this device's Surface model, downloads its driver package, and installs it via msiexec. Must be run elevated.
 
 .NOTES
     Folder names match the exact string returned by (Get-CimInstance Win32_ComputerSystem).Model on
@@ -86,8 +84,8 @@ param(
     [Parameter(HelpMessage = 'List available models in the catalog and exit without downloading anything.')]
     [switch]$ListModels,
 
-    [Parameter(HelpMessage = 'Detect this device''s Surface model, download only its driver package, and install it immediately via msiexec. Requires an elevated (Administrator) PowerShell session.')]
-    [switch]$InstallLocal,
+    [Parameter(HelpMessage = 'Download driver packages without installing anything, for staging into Examples/autounattend-driver-install.xml. Downloads every catalogued model, or only -Models if given, into -OutputPath.')]
+    [switch]$DownloadOnly,
 
     [Parameter(HelpMessage = 'Suppress detail lines; show only headings and the final summary.')]
     [switch]$Quiet
@@ -107,6 +105,9 @@ $script:WebSession = $null
 
 # Lets the per-model loop tell an unavailable catalog listing (404, JSON error, or no files) apart from a transient resolution failure.
 $script:LastResolveFailureWasRetired = $false
+
+# Tracks whether any installed package needs a reboot (msiexec exit 3010), so the script can surface that in its own exit code.
+$script:RebootRequired = $false
 
 function Get-CatalogFromSupportPage {
     param([string]$WindowsVersion)
@@ -502,13 +503,11 @@ if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
 }
 $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
 
-if ($InstallLocal -and $Models -and $Models.Count -gt 0) {
-    Write-Host '-InstallLocal auto-detects the model for this device and cannot be combined with -Models.' -ForegroundColor Red
-    exit 1
-}
+# Bulk parameters opt out of installing on this device, so local install is the default only when none of them are given.
+$DoLocalInstall = -not $DownloadOnly -and -not $ListModels -and -not ($Models -and $Models.Count -gt 0)
 
-if ($InstallLocal -and -not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
-    Write-Host '-InstallLocal runs msiexec against this device and requires an elevated (Administrator) PowerShell session. Re-run from an elevated prompt.' -ForegroundColor Red
+if ($DoLocalInstall -and -not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
+    Write-Host 'Installing on this device runs msiexec and requires an elevated (Administrator) PowerShell session. Re-run from an elevated prompt, or pass -DownloadOnly to just download the package.' -ForegroundColor Red
     exit 1
 }
 
@@ -538,7 +537,7 @@ if ($LiveCatalog.Count -eq 0) {
     exit 1
 }
 
-if ($InstallLocal) {
+if ($DoLocalInstall) {
     $LocalModel = (Get-CimInstance -ClassName Win32_ComputerSystem).Model
     $LocalBaseboard = (Get-CimInstance -ClassName Win32_BaseBoard).Product
     if (-not $Quiet) {
@@ -637,14 +636,21 @@ foreach ($ModelName in ($TargetModels | Sort-Object)) {
             Write-Host "    Downloaded: $FileName" -ForegroundColor Green
         }
 
-        if ($InstallLocal) {
+        if ($DoLocalInstall) {
             if (-not $Quiet) {
                 Write-Host "    Installing $FileName ..." -ForegroundColor DarkGray
             }
             $InstallProcess = Start-Process -FilePath 'msiexec.exe' -ArgumentList "/i `"$DestFile`" /quiet /norestart" -Wait -PassThru
-            if ($InstallProcess.ExitCode -eq 0) {
-                Write-Host "    Installed successfully" -ForegroundColor Green
-                $ResultLabel = 'Installed'
+            if ($InstallProcess.ExitCode -eq 0 -or $InstallProcess.ExitCode -eq 3010) {
+                if ($InstallProcess.ExitCode -eq 3010) {
+                    Write-Host '    Installed successfully (reboot required)' -ForegroundColor Green
+                    $script:RebootRequired = $true
+                    $ResultLabel = 'Installed (reboot required)'
+                }
+                else {
+                    Write-Host '    Installed successfully' -ForegroundColor Green
+                    $ResultLabel = 'Installed'
+                }
             }
             else {
                 Write-Host "    Install failed (exit $($InstallProcess.ExitCode))" -ForegroundColor Red
@@ -673,11 +679,12 @@ Write-Host ('-' * 80) -ForegroundColor DarkGray
 
 foreach ($Row in $SummaryRows) {
     $RowColor = switch ($Row.Result) {
-        'Downloaded'      { 'Green' }
-        'Installed'       { 'Green' }
-        'Already present' { 'DarkGray' }
-        'Unavailable'     { 'DarkGray' }
-        default           { 'Yellow' }
+        'Downloaded'                  { 'Green' }
+        'Installed'                   { 'Green' }
+        'Installed (reboot required)' { 'Yellow' }
+        'Already present'             { 'DarkGray' }
+        'Unavailable'                 { 'DarkGray' }
+        default                       { 'Yellow' }
     }
     Write-Host ('{0,-40} {1,-16} {2}' -f $Row.Model, $Row.Result, $Row.Detail) -ForegroundColor $RowColor
 }
@@ -685,5 +692,8 @@ foreach ($Row in $SummaryRows) {
 Write-Host ''
 if ($AuthGateHit) {
     exit 1
+}
+if ($script:RebootRequired) {
+    exit 3010
 }
 exit 0
