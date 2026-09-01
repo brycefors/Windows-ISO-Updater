@@ -17,7 +17,7 @@ The script validates that the file exists and is well-formed XML before starting
 > - **Edition selection.** By default this script drops the editions it is not keeping and renumbers `install.wim`, so an answer file that selects the edition with `/IMAGE/INDEX` will point at the wrong image. The default keeps the highest edition at index 1 (Enterprise, then Pro, then Home, in that order), so index 1 still means what it used to, but `/IMAGE/NAME` is the safer choice. Use it, or build with `-KeepAllEditions`. The script warns when it detects this combination.
 > - **Secrets.** Answer files store passwords in plain text or base64 and product keys in the clear. Anyone who can read the ISO can recover them, so treat the finished ISO as a secret and don't commit the answer file to source control.
 
-The two files in [`Examples/`](../Examples) are a matched pair: one deploys a ready-to-use machine, the other builds an image to deploy *from*. Both were produced with [schneegans.de/windows/unattend-generator](https://schneegans.de/windows/unattend-generator/) and then **hand edited**, and a comment at the top of each records exactly what was changed and why. The generator URL preserved alongside them reproduces the original options only, so regenerating from it discards the manual changes.
+Three of the files in [`Examples/`](../Examples) are built around this workflow. [`autounattend-lab-admin.xml`](../Examples/autounattend-lab-admin.xml) and [`autounattend-gold-image.xml`](../Examples/autounattend-gold-image.xml) are a matched pair: one deploys a ready-to-use machine, the other builds an image to deploy *from*. [`autounattend-ultimate.xml`](../Examples/autounattend-ultimate.xml) is a more automated variant of the lab machine file, with the disk-wipe confirmation removed and driver installation dispatched by manufacturer. All three were produced with [schneegans.de/windows/unattend-generator](https://schneegans.de/windows/unattend-generator/) and then **hand edited**, and a comment at the top of each records exactly what was changed and why. The generator URL preserved alongside them reproduces the original options only, so regenerating from it discards the manual changes.
 
 ## Example: lab machine with no OOBE
 
@@ -61,6 +61,26 @@ It drops a `SEAL-THIS-IMAGE.txt` checklist on the public desktop with the remain
 
 > [!CAUTION]
 > This example uses the same plain-text `Password123` build credential and automatic first sign-in as the lab example. `sysprep /oobe` disables the built-in Administrator, but its hash survives generalize, so anything that later re-enables the account without setting a new password inherits it. Change it before you build anything you intend to keep.
+
+## Example: fully unattended deployment
+
+[`Examples/autounattend-ultimate.xml`](../Examples/autounattend-ultimate.xml) is `autounattend-lab-admin.xml` with every remaining prompt removed, so nothing from boot to first logon needs an operator present. It carries forward that file's entire windowsPE installer, BitLocker/power/CloudContent handling, VMware Tools install, OOBE suppression, and built-in Administrator AutoLogon unchanged, including the same throwaway-VM caution: a well-known Administrator password stored in plain text, automatic first sign-in, and Remote Desktop reachable on all firewall profiles.
+
+```shell
+.\Run-Windows-ISO-Updater.bat -UnattendPath ".\Examples\autounattend-ultimate.xml"
+```
+
+Three things differ from the lab example:
+
+- **No disk-wipe confirmation, ever.** The lab file's WinPE installer stops and asks you to type `WIPE` before erasing a disk 0 that already holds partitions. This file removes that prompt entirely, so an already-partitioned disk 0 is wiped exactly like an empty one, with no keypress and no chance to abort.
+- **Hardcodes image index 1**, same as the lab example, so it carries the same precondition: the source ISO must have been built with this script's default edition-keep behavior, which drops every edition but the single highest ranked one (Enterprise, then Pro, then Home) and renumbers it to index 1. Pairing it with an ISO built using `-KeepAllEditions` or a narrowed `-KeepEditions`/`-Edition` selection can leave index 1 pointing at something other than the highest edition, and Setup applies whatever is there with no warning.
+- **Dispatches driver installation by manufacturer instead of a pre-staged `C:\Drivers\` folder.** At first logon it checks `Win32_ComputerSystem.Manufacturer` and launches `tools/Install-DellDrivers.ps1` on Dell hardware or `tools/Install-SurfaceDrivers.ps1` on Microsoft/Surface hardware, both embedded verbatim, or logs an informational line and launches neither script on any other manufacturer, including VMs. The launch opens in a visible PowerShell window instead of a hidden one, so driver installation progress is visible at first logon.
+
+> [!CAUTION]
+> **This example wipes disk 0 with no confirmation prompt at all**, even if the disk already holds partitions. That is strictly more dangerous than `autounattend-lab-admin.xml`, whose default behavior requires typing `WIPE` before an already-partitioned disk 0 is erased. There is no such safety net here. Point this file at the wrong machine and the disk is gone with no chance to abort. Use it only on hardware or VMs you have already confirmed are disposable.
+
+> [!WARNING]
+> Because it applies **index 1** with no prompt, this file must be paired with an ISO built using this script's default edition handling. Do not use it with `-KeepAllEditions` or a narrowed `-KeepEditions`/`-Edition` selection, either one can leave index 1 pointing at something other than the highest edition, with nothing to catch the mismatch before the disk is wiped.
 
 ## Model-based driver install
 
@@ -109,6 +129,10 @@ For hardware where only `.inf` files are available, place them and any supportin
 ### Gold image
 
 `autounattend-gold-image.xml` does not include this script. The gold image is sysprepped and captured before deployment, and model-specific drivers installed before capture would be baked into the image and applied to every machine deployed from it. This feature belongs only in the deployment answer file.
+
+### Fully unattended deployment
+
+`autounattend-ultimate.xml` does not include this script either. It dispatches on `Win32_ComputerSystem.Manufacturer` instead of a pre-staged `C:\Drivers\` folder, launching `tools/Install-DellDrivers.ps1` or `tools/Install-SurfaceDrivers.ps1` at first logon. See [Example: fully unattended deployment](#example-fully-unattended-deployment) above.
 
 ### Logging and cleanup
 

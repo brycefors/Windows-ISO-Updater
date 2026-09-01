@@ -33,7 +33,7 @@ pass your own:
 | [Usage](docs/usage.md) | Running the script, command-line examples, Windows Server media, slimming the ISO by removing editions, adding drivers and your own files, and building several Windows versions side by side. |
 | [Command-Line Parameters](docs/parameters.md) | Every parameter and what it does. |
 | [Scheduled Runs](docs/scheduled-runs.md) | Running this from a scheduled task: build stamps, skipping runs that would change nothing, and `-AutoClean` housekeeping. |
-| [Unattended Installs](docs/unattended-installs.md) | `-UnattendPath`, plus two worked answer files: a no-OOBE lab machine and a sysprep gold image. |
+| [Unattended Installs](docs/unattended-installs.md) | `-UnattendPath`, plus three worked answer files: a no-OOBE lab machine, a sysprep gold image, and a fully unattended variant with no disk-wipe confirmation. |
 | [Design Notes](docs/design-notes.md) | Why the ISO has to come from you, why the already-patched check works the way it does, why both `boot.wim` indexes are serviced, why you should not re-update an ISO this script built, why two builds are never the same size, and what Windows Update still offers afterwards. |
 | [Reference](docs/reference.md) | Step by step of a run, the build record written onto the finished ISO, how files are downloaded, disk space, output locations, and logging. |
 
