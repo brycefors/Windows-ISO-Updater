@@ -218,7 +218,7 @@ function Select-HighestVersionUrl {
         if ($VersionMatch.Success) {
             try {
                 $Ver = [Version]$VersionMatch.Groups[1].Value
-                if ($BestVersion -eq $null -or $Ver -gt $BestVersion) {
+                if ($null -eq $BestVersion -or $Ver -gt $BestVersion) {
                     $BestVersion = $Ver
                     $Best = $Candidate
                 }
