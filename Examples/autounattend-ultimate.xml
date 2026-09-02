@@ -383,7 +383,7 @@ foreach( $file in $Document.unattend.Extensions.File ) {
 }
 		</ExtractScript>
 		<!-- MODIFIED (change 1): installs VMware Tools from the mounted Tools ISO, or downloads it when none is attached. All output is appended to VMwareTools.log. Verbatim contents of tools/Install-VMwareTools.ps1 in this repo. -->
-		<File path="C:\Windows\Setup\Scripts\VMwareTools.ps1">
+		<File path="C:\Windows\Setup\Scripts\VMwareTools.ps1"># Installs VMware Tools during Windows specialize, from a mounted Tools ISO or by direct download if none is attached.
 &amp; {
 	# VMware's documented silent switches: /S for the bootstrapper, /v passes the rest to the MSI.
 	$silent = '/S /v"/qn REBOOT=R"';
@@ -446,8 +446,7 @@ foreach( $file in $Document.unattend.Extensions.File ) {
 	finally {
 		Remove-Item -LiteralPath $file -Force -ErrorAction 'SilentlyContinue';
 	}
-} *&gt;&amp;1 | Out-String -Width 1KB -Stream &gt;&gt; 'C:\Windows\Setup\Scripts\VMwareTools.log';
-		</File>
+} *&gt;&amp;1 | Out-String -Width 1KB -Stream &gt;&gt; 'C:\Windows\Setup\Scripts\VMwareTools.log';</File>
 		<!-- System wide tweaks applied during the specialize pass. Each scriptblock runs in order and is logged to Specialize.log. -->
 		<File path="C:\Windows\Setup\Scripts\Specialize.ps1">
 # Matched on SMBIOS identity rather than HypervisorPresent, which is also true on physical hosts running Hyper-V or VBS.

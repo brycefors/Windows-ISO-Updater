@@ -144,6 +144,7 @@ $Plans = foreach ($Payload in $Payloads) {
         ContentEnd    = $CloseIndex
         CurrentInner  = $CurrentInner
         NewInner      = $NewInner
+        SourceText    = $SourceText
         InSync        = ($CurrentInner.Trim() -eq $NewInner.Trim())
     }
 }
@@ -189,7 +190,8 @@ catch {
 $ParseErrors = @()
 foreach ($Plan in $OutOfSync) {
     $Errors = $null
-    [System.Management.Automation.Language.Parser]::ParseInput($Plan.NewInner, [ref]$null, [ref]$Errors) | Out-Null
+    # $Plan.NewInner is XML-escaped text, not PowerShell. Parse the real unescaped source instead.
+    [System.Management.Automation.Language.Parser]::ParseInput($Plan.SourceText, [ref]$null, [ref]$Errors) | Out-Null
     if ($Errors) {
         foreach ($ParseError in $Errors) {
             $ParseErrors += "$($Plan.Name): $($ParseError.Message)"
