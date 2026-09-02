@@ -110,11 +110,21 @@ $script:RebootRequired = $false
 function Get-DellDriverId {
     $KbUrl = 'https://www.dell.com/support/kbdoc/en-us/000177325/dell-command-update'
 
-    try {
-        $Response = Invoke-WebRequest -Uri $KbUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent
+    # Specialize can start before DHCP settles, so keep retrying for about three minutes.
+    $Response = $null
+    for ($Attempt = 1; $Attempt -le 18 -and -not $Response; $Attempt++) {
+        try {
+            $Response = Invoke-WebRequest -Uri $KbUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent
+        }
+        catch {
+            Write-Host "  Attempt $Attempt of 18 to fetch the Dell Command Update KB page failed - $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+        if (-not $Response) {
+            Start-Sleep -Seconds 10
+        }
     }
-    catch {
-        Write-Host "Failed to fetch the Dell Command Update KB page - $($_.Exception.Message)" -ForegroundColor Red
+    if (-not $Response) {
+        Write-Host 'Failed to fetch the Dell Command Update KB page after 18 attempts.' -ForegroundColor Red
         return $null
     }
 
@@ -158,11 +168,21 @@ function Resolve-DcuDownloadUrl {
 
     $DetailsUrl = "https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=$DriverId"
 
-    try {
-        $Response = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent
+    # Specialize can start before DHCP settles, so keep retrying for about three minutes.
+    $Response = $null
+    for ($Attempt = 1; $Attempt -le 18 -and -not $Response; $Attempt++) {
+        try {
+            $Response = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent
+        }
+        catch {
+            Write-Host "  Attempt $Attempt of 18 to fetch the Dell driver details page failed - $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+        if (-not $Response) {
+            Start-Sleep -Seconds 10
+        }
     }
-    catch {
-        Write-Host "Failed to fetch the Dell driver details page - $($_.Exception.Message)" -ForegroundColor Red
+    if (-not $Response) {
+        Write-Host 'Failed to fetch the Dell driver details page after 18 attempts.' -ForegroundColor Red
         return $null
     }
 

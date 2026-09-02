@@ -116,12 +116,22 @@ function Get-CatalogFromSupportPage {
     $FamilyBase = 'https://support.microsoft.com/en-us/surface/drivers-firmware/download-drivers-and-firmware-for-surface-'
     $Catalog = [ordered]@{}
 
-    try {
-        [void]($MainResponse = Invoke-WebRequest -Uri $MainUrl -UseBasicParsing -TimeoutSec 30 -SessionVariable NewWebSession -UserAgent $script:UserAgent)
-        $script:WebSession = $NewWebSession
+    # Specialize can start before DHCP settles, so keep retrying for about three minutes.
+    $MainResponse = $null
+    for ($Attempt = 1; $Attempt -le 18 -and -not $MainResponse; $Attempt++) {
+        try {
+            [void]($MainResponse = Invoke-WebRequest -Uri $MainUrl -UseBasicParsing -TimeoutSec 30 -SessionVariable NewWebSession -UserAgent $script:UserAgent)
+            $script:WebSession = $NewWebSession
+        }
+        catch {
+            Write-Host "  Attempt $Attempt of 18 to fetch Surface support page failed - $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+        if (-not $MainResponse) {
+            Start-Sleep -Seconds 10
+        }
     }
-    catch {
-        Write-Host "Failed to fetch Surface support page - $($_.Exception.Message)" -ForegroundColor Red
+    if (-not $MainResponse) {
+        Write-Host 'Failed to fetch Surface support page after 18 attempts.' -ForegroundColor Red
         return $Catalog
     }
 

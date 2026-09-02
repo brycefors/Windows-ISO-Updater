@@ -16,7 +16,7 @@
 		past that phase by a pre-provisioned local account.
 
 		Everything below carries forward unchanged from autounattend-lab-admin.xml except where a
-		change is called out by name. The differences from that file are items 3, 4, 6, 7, 8 and 9.
+		change is called out by name. The differences from that file are items 3, 4, 6, 7, 8, 9 and 10.
 
 		Changes made after generation:
 
@@ -103,10 +103,24 @@
 		   specifically, this also removes the well-known plaintext Administrator password and the automatic
 		   first sign-in that every other example and caution in this file's history warned about.
 
-		   CAUTION: on hardware that is NOT Autopilot-enrolled, a person now has to complete the normal OOBE
-		   account-creation screens by hand before FirstLogonCommands (driver dispatch, VMware Tools,
-		   Windows.old cleanup) can run, since there is no longer an automatic sign-in. This file is no
-		   longer zero-touch past the disk wipe and image apply on non-Autopilot hardware.
+		   CAUTION: this caution is superseded by item 10 below. Driver dispatch, VMware Tools and cleanup
+		   now run during specialize regardless of whether OOBE completes, so the only thing actually gated
+		   on completing OOBE by hand on non-Autopilot hardware is a person being able to sign in and use
+		   the machine, not the automation itself.
+
+		10. C:\Windows\Setup\Scripts\Specialize.ps1 (FirstLogon.ps1 removed)
+		    FirstLogon.ps1 was removed and its scriptblocks (driver dispatch, VMware Tools install,
+		    Windows.old cleanup, answer file deletion) were folded into Specialize.ps1, and
+		    FirstLogonCommands was removed from the oobeSystem pass since it had nothing left to run. Driver
+		    install, VMware Tools and cleanup now run unconditionally at first boot regardless of whether or
+		    when a person or Autopilot completes OOBE, restoring zero-touch automation for those tasks
+		    specifically, though signing in to actually use the machine still requires completing OOBE by
+		    hand on non-Autopilot hardware, per item 9. The driver dispatch scriptblock also now calls the
+		    driver scripts directly and synchronously instead of through an async visible Start-Process
+		    window, because specialize has no interactive desktop to show a window on. Install-DellDrivers.ps1
+		    and Install-SurfaceDrivers.ps1 also gained retry loops, about three minutes, matching the existing
+		    VMwareTools.ps1 pattern, on their initial catalog and details page fetches, since network may not
+		    have settled yet this early in boot.
 	-->
 	<!--https://schneegans.de/windows/unattend-generator/?LanguageMode=Unattended&UILanguage=en-US&Locale=en-US&Keyboard=00000409&GeoLocation=244&PEMode=Generated&PauseBeforeFormatting=true&InstallFromMode=Interactive&PartitionMode=Unattended&TargetDisk=0&PartitionLayout=Automatic&SystemSize=300&RecoveryMode=Partition&RecoverySize=1000&DiskAssertionMode=Generated&AssertMinSize=100&AssertMaxSize=4000&AssertNoPartitions=true&ProcessorArchitecture=amd64&BypassRequirementsCheck=true&ComputerNameMode=Random&TimeZoneMode=Implicit&UserAccountMode=Unattended&LockoutMode=Default&HideFiles=Hidden&TaskbarSearch=Box&TaskbarIconsMode=Default&StartTilesMode=Default&StartPinsMode=Default&EnableLongPaths=true&EnableRemoteDesktop=true&AllowPowerShellScripts=true&DisableLastAccess=true&PreventDeviceEncryption=true&HideEdgeFre=true&DeleteWindowsOld=true&EffectsMode=Default&DesktopIconsMode=Default&StartFoldersMode=Default&CoreIsolationMode=Enabled&VMwareTools=true&WifiMode=Skip&ExpressSettings=EnableAll&LockKeysMode=Skip&StickyKeysMode=Default&ColorMode=Default&WallpaperMode=Default&LockScreenMode=Default&AppLockerMode=Skip-->
 	<!-- offlineServicing: would apply packages/drivers to the image before it boots. Unused here. -->
@@ -300,7 +314,7 @@
 	<settings pass="specialize">
 		<component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
 			<RunSynchronous>
-				<!-- Reads the ExtractScript at the bottom of this file out of the copied unattend.xml and runs it, which writes every <File> payload below to disk (VMwareTools.ps1, Specialize.ps1, FirstLogon.ps1). -->
+				<!-- Reads the ExtractScript at the bottom of this file out of the copied unattend.xml and runs it, which writes every <File> payload below to disk (VMwareTools.ps1, Specialize.ps1). -->
 				<RunSynchronousCommand wcm:action="add">
 					<Order>1</Order>
 					<Path>powershell.exe -WindowStyle "Normal" -NoProfile -Command "$xml = [xml]::new(); $xml.Load('C:\Windows\Panther\unattend.xml'); $sb = [scriptblock]::Create( $xml.unattend.Extensions.ExtractScript ); Invoke-Command -ScriptBlock $sb -ArgumentList $xml;"</Path>
@@ -332,13 +346,6 @@
 			<OOBE>
 				<HideOnlineAccountScreens>false</HideOnlineAccountScreens>
 			</OOBE>
-			<!-- Runs at the first interactive logon, after specialize. See FirstLogon.ps1 near the bottom of this file. -->
-			<FirstLogonCommands>
-				<SynchronousCommand wcm:action="add">
-					<Order>1</Order>
-					<CommandLine>powershell.exe -WindowStyle "Normal" -ExecutionPolicy "Unrestricted" -NoProfile -File "C:\Windows\Setup\Scripts\FirstLogon.ps1"</CommandLine>
-				</SynchronousCommand>
-			</FirstLogonCommands>
 		</component>
 	</settings>
 	<!--
@@ -505,6 +512,36 @@ $scripts = @(
 		# Skip Microsoft Edge's first run / welcome experience.
 		reg.exe add "HKLM\Software\Policies\Microsoft\Edge" /v HideFirstRunExperience /t REG_DWORD /d 1 /f;
 	};
+	{
+		# MODIFIED (change 6): dispatch driver install by manufacturer. Runs during specialize, before any
+		# interactive session exists, so there is no desktop to show a window on and the calls are synchronous.
+		$manufacturer = ( Get-CimInstance -ClassName 'Win32_ComputerSystem' ).Manufacturer;
+		if( $manufacturer -match 'Dell' ) {
+			&amp; 'C:\Windows\Setup\Scripts\Install-DellDrivers.ps1';
+		}
+		elseif( $manufacturer -match 'Microsoft' ) {
+			&amp; 'C:\Windows\Setup\Scripts\Install-SurfaceDrivers.ps1';
+		}
+		else {
+			'Manufacturer {0} matched neither Dell nor Microsoft/Surface; no driver script was launched.' -f $manufacturer;
+		}
+	};
+	{
+		# Install VMware Tools from the mounted ISO or by download.
+		&amp; 'C:\Windows\Setup\Scripts\VMwareTools.ps1';
+	};
+	{
+		# Remove the leftover previous installation folder.
+		cmd.exe /c "rmdir C:\Windows.old";
+	};
+	{
+		# Delete the answer files, which contain no secrets now but should not linger on disk.
+		Remove-Item -LiteralPath @(
+		  'C:\Windows\Panther\unattend.xml';
+		  'C:\Windows\Panther\unattend-original.xml';
+		  'C:\Windows\Setup\Scripts\Wifi.xml';
+		) -Force -ErrorAction 'SilentlyContinue' -Verbose;
+	};
 );
 
 # Runner: shows a progress bar, executes each block in order, and appends timing plus all output streams to the log.
@@ -523,56 +560,6 @@ $scripts = @(
     $complete += $increment;
   }
 } *&gt;&amp;1 | Out-String -Width 1KB -Stream &gt;&gt; "C:\Windows\Setup\Scripts\Specialize.log";
-		</File>
-		<!-- Cleanup and finishing tasks, run once at the first logon and logged to FirstLogon.log. -->
-		<File path="C:\Windows\Setup\Scripts\FirstLogon.ps1">
-$scripts = @(
-	{
-		# MODIFIED (change 6): dispatch driver install by manufacturer, visible so first-logon progress is not hidden.
-		$manufacturer = ( Get-CimInstance -ClassName 'Win32_ComputerSystem' ).Manufacturer;
-		if( $manufacturer -match 'Dell' ) {
-			Start-Process -FilePath 'powershell.exe' -ArgumentList '-WindowStyle Normal -ExecutionPolicy Unrestricted -NoProfile -File "C:\Windows\Setup\Scripts\Install-DellDrivers.ps1"' -WindowStyle Normal;
-		}
-		elseif( $manufacturer -match 'Microsoft' ) {
-			Start-Process -FilePath 'powershell.exe' -ArgumentList '-WindowStyle Normal -ExecutionPolicy Unrestricted -NoProfile -File "C:\Windows\Setup\Scripts\Install-SurfaceDrivers.ps1"' -WindowStyle Normal;
-		}
-		else {
-			'Manufacturer {0} matched neither Dell nor Microsoft/Surface; no driver script was launched.' -f $manufacturer;
-		}
-	};
-	{
-		# Install VMware Tools from the mounted ISO or by download.
-		&amp; 'C:\Windows\Setup\Scripts\VMwareTools.ps1';
-	};
-	{
-		# Remove the leftover previous installation folder.
-		cmd.exe /c "rmdir C:\Windows.old";
-	};
-	{
-		# Delete the answer files, which contain the clear text Administrator password.
-		Remove-Item -LiteralPath @(
-		  'C:\Windows\Panther\unattend.xml';
-		  'C:\Windows\Panther\unattend-original.xml';
-		  'C:\Windows\Setup\Scripts\Wifi.xml';
-		) -Force -ErrorAction 'SilentlyContinue' -Verbose;
-	};
-);
-
-&amp; {
-  [float] $complete = 0;
-  [float] $increment = 100 / $scripts.Count;
-  foreach( $script in $scripts ) {
-    Write-Progress -Id 0 -Activity 'Running scripts to finalize your Windows installation. Do not close this window.' -PercentComplete $complete;
-    '*** Will now execute command &#xAB;{0}&#xBB;.' -f $(
-      $script.ToString().Trim() -replace '\s+', ' ' -replace '^(.{99})(.+)$', '$1&#x2026;';
-    );
-    $start = [datetime]::Now;
-    &amp; $script;
-    '*** Finished executing command after {0:0} ms.' -f [datetime]::Now.Subtract( $start ).TotalMilliseconds;
-    "`r`n" * 3;
-    $complete += $increment;
-  }
-} *&gt;&amp;1 | Out-String -Width 1KB -Stream &gt;&gt; "C:\Windows\Setup\Scripts\FirstLogon.log";
 		</File>
 		<!-- MODIFIED (change 6, new file, replaces Install-ModelDrivers.ps1): verbatim contents of tools/Install-DellDrivers.ps1. -->
 		<File path="C:\Windows\Setup\Scripts\Install-DellDrivers.ps1">
@@ -688,11 +675,21 @@ $script:RebootRequired = $false
 function Get-DellDriverId {
     $KbUrl = 'https://www.dell.com/support/kbdoc/en-us/000177325/dell-command-update'
 
-    try {
-        $Response = Invoke-WebRequest -Uri $KbUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent
+    # Specialize can start before DHCP settles, so keep retrying for about three minutes.
+    $Response = $null
+    for ($Attempt = 1; $Attempt -le 18 -and -not $Response; $Attempt++) {
+        try {
+            $Response = Invoke-WebRequest -Uri $KbUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent
+        }
+        catch {
+            Write-Host "  Attempt $Attempt of 18 to fetch the Dell Command Update KB page failed - $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+        if (-not $Response) {
+            Start-Sleep -Seconds 10
+        }
     }
-    catch {
-        Write-Host "Failed to fetch the Dell Command Update KB page - $($_.Exception.Message)" -ForegroundColor Red
+    if (-not $Response) {
+        Write-Host 'Failed to fetch the Dell Command Update KB page after 18 attempts.' -ForegroundColor Red
         return $null
     }
 
@@ -736,11 +733,21 @@ function Resolve-DcuDownloadUrl {
 
     $DetailsUrl = "https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=$DriverId"
 
-    try {
-        $Response = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent
+    # Specialize can start before DHCP settles, so keep retrying for about three minutes.
+    $Response = $null
+    for ($Attempt = 1; $Attempt -le 18 -and -not $Response; $Attempt++) {
+        try {
+            $Response = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent
+        }
+        catch {
+            Write-Host "  Attempt $Attempt of 18 to fetch the Dell driver details page failed - $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+        if (-not $Response) {
+            Start-Sleep -Seconds 10
+        }
     }
-    catch {
-        Write-Host "Failed to fetch the Dell driver details page - $($_.Exception.Message)" -ForegroundColor Red
+    if (-not $Response) {
+        Write-Host 'Failed to fetch the Dell driver details page after 18 attempts.' -ForegroundColor Red
         return $null
     }
 
@@ -1075,12 +1082,22 @@ function Get-CatalogFromSupportPage {
     $FamilyBase = 'https://support.microsoft.com/en-us/surface/drivers-firmware/download-drivers-and-firmware-for-surface-'
     $Catalog = [ordered]@{}
 
-    try {
-        [void]($MainResponse = Invoke-WebRequest -Uri $MainUrl -UseBasicParsing -TimeoutSec 30 -SessionVariable NewWebSession -UserAgent $script:UserAgent)
-        $script:WebSession = $NewWebSession
+    # Specialize can start before DHCP settles, so keep retrying for about three minutes.
+    $MainResponse = $null
+    for ($Attempt = 1; $Attempt -le 18 -and -not $MainResponse; $Attempt++) {
+        try {
+            [void]($MainResponse = Invoke-WebRequest -Uri $MainUrl -UseBasicParsing -TimeoutSec 30 -SessionVariable NewWebSession -UserAgent $script:UserAgent)
+            $script:WebSession = $NewWebSession
+        }
+        catch {
+            Write-Host "  Attempt $Attempt of 18 to fetch Surface support page failed - $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+        if (-not $MainResponse) {
+            Start-Sleep -Seconds 10
+        }
     }
-    catch {
-        Write-Host "Failed to fetch Surface support page - $($_.Exception.Message)" -ForegroundColor Red
+    if (-not $MainResponse) {
+        Write-Host 'Failed to fetch Surface support page after 18 attempts.' -ForegroundColor Red
         return $Catalog
     }
 
