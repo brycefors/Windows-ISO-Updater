@@ -3,21 +3,20 @@
 
 <#
 .SYNOPSIS
-    Keeps the two driver-install payloads embedded in Examples\autounattend-ultimate.xml in sync with
-    their real source files under tools\.
+    Keeps the three payloads embedded in Examples\autounattend-ultimate.xml in sync with their real
+    source files under tools\.
 
 .DESCRIPTION
-    Examples\autounattend-ultimate.xml embeds verbatim, XML-escaped copies of tools\Install-DellDrivers.ps1
-    and tools\Install-SurfaceDrivers.ps1 inside two <File> elements, so the answer file's ExtractScript
-    step can write them to disk during Windows specialize without reaching back into this repository.
-    Those copies are hand-kept-in-sync today, so an edit to either source file is easy to forget to
-    mirror into the XML.
+    Examples\autounattend-ultimate.xml embeds verbatim, XML-escaped copies of tools\Install-DellDrivers.ps1,
+    tools\Install-SurfaceDrivers.ps1, and tools\Install-VMwareTools.ps1 inside three <File> elements, so
+    the answer file's ExtractScript step can write them to disk during Windows specialize without
+    reaching back into this repository. Those copies are hand-kept-in-sync today, so an edit to any
+    source file is easy to forget to mirror into the XML.
 
-    This script finds each <File path="C:\Windows\Setup\Scripts\Install-*Drivers.ps1"> ... </File> block
-    by exact tag text (not by loading the XML into a DOM, which would re-serialize and disturb formatting
-    elsewhere in the file), XML-escapes the current source file content the same way the payload already
-    is, and compares the two. Out-of-sync blocks are rewritten in place, and every other line in the XML
-    file is left untouched.
+    This script finds each tracked <File path="..."> ... </File> block by exact tag text (not by loading
+    the XML into a DOM, which would re-serialize and disturb formatting elsewhere in the file),
+    XML-escapes the current source file content the same way the payload already is, and compares the
+    two. Out-of-sync blocks are rewritten in place, and every other line in the XML file is left untouched.
 
     Nothing in Examples\autounattend-ultimate.xml is ever executed. The rewritten payloads are only
     parsed, with [System.Management.Automation.Language.Parser]::ParseInput(), to confirm they are still
@@ -34,12 +33,12 @@
 
 .EXAMPLE
     .\tools\Sync-EmbeddedDriverScripts.ps1 -WhatIfOnly
-    Reports whether the Dell and Surface payloads currently match their source files.
+    Reports whether the Dell, Surface, and VMware Tools payloads currently match their source files.
 
 .EXAMPLE
     .\tools\Sync-EmbeddedDriverScripts.ps1
-    Rewrites whichever of the two payloads are out of sync, then validates the XML and both payloads
-    still parse.
+    Rewrites whichever of the three payloads are out of sync, then validates the XML and all rewritten
+    payloads still parse.
 #>
 [CmdletBinding()]
 param(
@@ -67,6 +66,12 @@ $Payloads = @(
         Name       = 'Surface'
         SourcePath = 'tools\Install-SurfaceDrivers.ps1'
         OpenTag    = '<File path="C:\Windows\Setup\Scripts\Install-SurfaceDrivers.ps1">'
+        CloseTag   = '</File>'
+    },
+    [pscustomobject]@{
+        Name       = 'VMware Tools'
+        SourcePath = 'tools\Install-VMwareTools.ps1'
+        OpenTag    = '<File path="C:\Windows\Setup\Scripts\VMwareTools.ps1">'
         CloseTag   = '</File>'
     }
 )

@@ -27,7 +27,10 @@
 		   also finds nothing on physical hardware and would otherwise install Tools there. It retries the
 		   listing for about three minutes (first logon regularly starts before DHCP settles) and refuses to
 		   run the download unless its Authenticode signature is valid and signed by VMware or Broadcom.
-		   Install arguments were also corrected to VMware's documented form: /S /v"/qn REBOOT=R".
+		   Install arguments were also corrected to VMware's documented form: /S /v"/qn REBOOT=R". Its source
+		   of truth is now tools/Install-VMwareTools.ps1 in this repo, embedded here verbatim and kept in sync
+		   by tools/Sync-EmbeddedDriverScripts.ps1, the same way item 6 does for the Dell and Surface driver
+		   scripts.
 
 		2. C:\Windows\Setup\Scripts\Specialize.ps1
 		   The generator writes PreventDeviceEncryption unconditionally. It is now gated on SMBIOS
@@ -379,7 +382,7 @@ foreach( $file in $Document.unattend.Extensions.File ) {
     [System.IO.File]::WriteAllBytes( $path, $bytes );
 }
 		</ExtractScript>
-		<!-- MODIFIED (change 1): installs VMware Tools from the mounted Tools ISO, or downloads it when none is attached. All output is appended to VMwareTools.log. -->
+		<!-- MODIFIED (change 1): installs VMware Tools from the mounted Tools ISO, or downloads it when none is attached. All output is appended to VMwareTools.log. Verbatim contents of tools/Install-VMwareTools.ps1 in this repo. -->
 		<File path="C:\Windows\Setup\Scripts\VMwareTools.ps1">
 &amp; {
 	# VMware's documented silent switches: /S for the bootstrapper, /v passes the rest to the MSI.
