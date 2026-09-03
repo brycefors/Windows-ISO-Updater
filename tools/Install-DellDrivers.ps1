@@ -48,6 +48,11 @@
 .PARAMETER Quiet
     Suppress detail lines; show only headings and the final summary.
 
+.PARAMETER ProxyUrl
+    Proxy server URL to route KB page scraping, installer downloads, and Dell Command Update's own
+    scan/apply traffic through, for example http://proxy.example.com:8080. Omit to use the machine's
+    default network configuration.
+
 .EXAMPLE
     .\tools\Install-DellDrivers.ps1
     Installs Dell Command Update if needed, scans, and applies driver updates without rebooting. Must
@@ -64,6 +69,11 @@
 .EXAMPLE
     .\tools\Install-DellDrivers.ps1 -UpdateType bios -AllowReboot
     Applies only BIOS updates and allows DCU to reboot the machine if one of them requires it.
+
+.EXAMPLE
+    .\tools\Install-DellDrivers.ps1 -ProxyUrl 'http://proxy.example.com:8080'
+    Runs the default behavior with all outbound traffic, including Dell Command Update's own
+    scan/apply calls, routed through the given proxy.
 
 .NOTES
     dcu-cli.exe installs to either Program Files or Program Files (x86) depending on the DCU version,
@@ -95,7 +105,17 @@ param(
     [switch]$AllowReboot,
 
     [Parameter(HelpMessage = 'Suppress detail lines; show only headings and the final summary.')]
-    [switch]$Quiet
+    [switch]$Quiet,
+
+    [Parameter(HelpMessage = "Proxy server URL to route KB page scraping, installer downloads, and Dell Command Update's own scan/apply traffic through, for example http://proxy.example.com:8080. Omit to use the machine's default network configuration.")]
+    [ValidateScript({
+        $ParsedUri = $null
+        if (-not [Uri]::TryCreate($_, [UriKind]::Absolute, [ref]$ParsedUri)) {
+            throw "The value '$_' is not a valid absolute URI."
+        }
+        $true
+    })]
+    [string]$ProxyUrl
 )
 
 $ErrorActionPreference = 'Stop'
@@ -103,6 +123,12 @@ $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 # Dell's support site rejects PowerShell's default User-Agent as bot traffic, same defensive pattern as the Surface script
 $script:UserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
+# Splatted onto every Invoke-WebRequest call so -ProxyUrl, when given, is the only place proxy routing is decided
+$script:WebRequestProxyArgs = @{}
+if ($ProxyUrl) {
+    $script:WebRequestProxyArgs['Proxy'] = $ProxyUrl
+}
 
 # Tracks whether DCU ever reported a reboot-required result, so the script can surface that in its own exit code
 $script:RebootRequired = $false
@@ -114,7 +140,7 @@ function Get-DellDriverId {
     $Response = $null
     for ($Attempt = 1; $Attempt -le 18 -and -not $Response; $Attempt++) {
         try {
-            $Response = Invoke-WebRequest -Uri $KbUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent
+            $Response = Invoke-WebRequest -Uri $KbUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent @script:WebRequestProxyArgs
         }
         catch {
             Write-Host "  Attempt $Attempt of 18 to fetch the Dell Command Update KB page failed - $($_.Exception.Message)" -ForegroundColor DarkGray
@@ -172,7 +198,7 @@ function Resolve-DcuDownloadUrl {
     $Response = $null
     for ($Attempt = 1; $Attempt -le 18 -and -not $Response; $Attempt++) {
         try {
-            $Response = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent
+            $Response = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent @script:WebRequestProxyArgs
         }
         catch {
             Write-Host "  Attempt $Attempt of 18 to fetch the Dell driver details page failed - $($_.Exception.Message)" -ForegroundColor DarkGray
@@ -220,15 +246,20 @@ function Get-DcuInstaller {
     try {
         if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
             try {
-                [void](Start-BitsTransfer -Source $Url -Destination $DestFile -DisplayName $FileName -ErrorAction Stop)
+                $BitsProxyArgs = @{}
+                if ($ProxyUrl) {
+                    $BitsProxyArgs['ProxyUsage'] = 'Override'
+                    $BitsProxyArgs['ProxyList'] = $ProxyUrl
+                }
+                [void](Start-BitsTransfer -Source $Url -Destination $DestFile -DisplayName $FileName -ErrorAction Stop @BitsProxyArgs)
             }
             catch {
                 Write-Host "  BITS failed, falling back to WebRequest - $($_.Exception.Message)" -ForegroundColor Yellow
-                [void](Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing -UserAgent $script:UserAgent)
+                [void](Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing -UserAgent $script:UserAgent @script:WebRequestProxyArgs)
             }
         }
         else {
-            [void](Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing -UserAgent $script:UserAgent)
+            [void](Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing -UserAgent $script:UserAgent @script:WebRequestProxyArgs)
         }
         Unblock-File -LiteralPath $DestFile -ErrorAction SilentlyContinue
         return $DestFile
@@ -340,6 +371,14 @@ else {
 
 # DCU CLI versions disagree on which code means reboot-required, so both documented values are treated the same
 $RebootCodes = @(1, 5)
+
+if ($ProxyUrl) {
+    # dcu-cli.exe does its own network calls for scan/apply, so the proxy has to be persisted into DCU's own configuration, not just this process
+    $ProxyUri = [Uri]$ProxyUrl
+    Write-Host "Configuring Dell Command Update to use proxy $($ProxyUri.Host):$($ProxyUri.Port)..." -ForegroundColor Cyan
+    $ConfigureOutput = & $DcuCliPath /configure -proxyType=HTTP "-proxyHostName=$($ProxyUri.Host)" "-proxyPortNumber=$($ProxyUri.Port)" 2>&1 | Out-String
+    Write-Host $ConfigureOutput.Trim()
+}
 
 Write-Host "Scanning for updates with $DcuCliPath ..." -ForegroundColor Cyan
 $ScanOutput = & $DcuCliPath /scan -silent 2>&1 | Out-String
