@@ -1,4 +1,23 @@
 # Installs VMware Tools during Windows specialize, from a mounted Tools ISO or by direct download if none is attached.
+[CmdletBinding()]
+param(
+    [Parameter(HelpMessage = "Proxy server URL to route the VMware Tools download listing and installer fetch through, for example http://proxy.example.com:8080. Omit to use the machine's default network configuration.")]
+    [ValidateScript({
+        $ParsedUri = $null
+        if (-not [Uri]::TryCreate($_, [UriKind]::Absolute, [ref]$ParsedUri)) {
+            throw "The value '$_' is not a valid absolute URI."
+        }
+        $true
+    })]
+    [string]$ProxyUrl
+)
+
+# Splatted onto every Invoke-WebRequest call so -ProxyUrl, when given, is the only place proxy routing is decided
+$script:WebRequestProxyArgs = @{}
+if ($ProxyUrl) {
+    $script:WebRequestProxyArgs['Proxy'] = $ProxyUrl
+}
+
 & {
 	# VMware's documented silent switches: /S for the bootstrapper, /v passes the rest to the MSI.
 	$silent = '/S /v"/qn REBOOT=R"';
@@ -28,7 +47,7 @@
 	$name = $null;
 	for( $i = 1; $i -le 18 -and -not $name; $i++ ) {
 		try {
-			$name = @( ( Invoke-WebRequest -Uri $base -UseBasicParsing -TimeoutSec 15 ).Links.href | Where-Object { $_ -like '*.exe' -and $_ -notmatch '[\\/:]' } )[0];
+			$name = @( ( Invoke-WebRequest -Uri $base -UseBasicParsing -TimeoutSec 15 @script:WebRequestProxyArgs ).Links.href | Where-Object { $_ -like '*.exe' -and $_ -notmatch '[\\/:]' } )[0];
 		}
 		catch {
 			'Attempt {0} to read {1} failed: {2}' -f $i, $base, $_.Exception.Message;
@@ -45,7 +64,7 @@
 	$file = Join-Path -Path $env:TEMP -ChildPath $name;
 	try {
 		'Downloading {0}.' -f $name;
-		Invoke-WebRequest -Uri ( $base + $name ) -OutFile $file -UseBasicParsing;
+		Invoke-WebRequest -Uri ( $base + $name ) -OutFile $file -UseBasicParsing @script:WebRequestProxyArgs;
 		# Never execute the download unless Authenticode says it is intact and signed by VMware/Broadcom.
 		$sig = Get-AuthenticodeSignature -LiteralPath $file;
 		if( $sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'VMware|Broadcom' ) {

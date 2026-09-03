@@ -37,6 +37,11 @@
 .PARAMETER DownloadOnly
     Download driver packages without installing anything, for staging into Examples/autounattend-driver-install.xml. Downloads every catalogued model, or only -Models if given, into -OutputPath.
 
+.PARAMETER ProxyUrl
+    Proxy server URL to route Surface support page scraping and driver package downloads, including
+    their BITS transfers, through, for example http://proxy.example.com:8080. Omit to use the
+    machine's default network configuration.
+
 .EXAMPLE
     .\tools\Install-SurfaceDrivers.ps1
     Detects this device's Surface model, downloads its driver package, and installs it via msiexec. Must be run elevated. This is the default behavior.
@@ -56,6 +61,11 @@
 .EXAMPLE
     .\tools\Install-SurfaceDrivers.ps1 -DownloadOnly -WindowsVersion 10 -Quiet
     Downloads Windows 10 packages for all supported models, showing only headings and the summary.
+
+.EXAMPLE
+    .\tools\Install-SurfaceDrivers.ps1 -ProxyUrl 'http://proxy.example.com:8080'
+    Runs the default behavior with all outbound traffic, including BITS transfers, routed through the
+    given proxy.
 
 .NOTES
     Folder names match the exact string returned by (Get-CimInstance Win32_ComputerSystem).Model on
@@ -88,7 +98,17 @@ param(
     [switch]$DownloadOnly,
 
     [Parameter(HelpMessage = 'Suppress detail lines; show only headings and the final summary.')]
-    [switch]$Quiet
+    [switch]$Quiet,
+
+    [Parameter(HelpMessage = "Proxy server URL to route Surface support page scraping and driver package downloads, including their BITS transfers, through, for example http://proxy.example.com:8080. Omit to use the machine's default network configuration.")]
+    [ValidateScript({
+        $ParsedUri = $null
+        if (-not [Uri]::TryCreate($_, [UriKind]::Absolute, [ref]$ParsedUri)) {
+            throw "The value '$_' is not a valid absolute URI."
+        }
+        $true
+    })]
+    [string]$ProxyUrl
 )
 
 $ErrorActionPreference = 'Stop'
@@ -102,6 +122,12 @@ $script:UserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 # Carries the anonymous session cookie the first support.microsoft.com request receives into every
 # later call, so details.aspx fetches aren't treated as sessionless and bounced to sign-in.
 $script:WebSession = $null
+
+# Splatted onto every Invoke-WebRequest call so -ProxyUrl, when given, is the only place proxy routing is decided
+$script:WebRequestProxyArgs = @{}
+if ($ProxyUrl) {
+    $script:WebRequestProxyArgs['Proxy'] = $ProxyUrl
+}
 
 # Lets the per-model loop tell an unavailable catalog listing (404, JSON error, or no files) apart from a transient resolution failure.
 $script:LastResolveFailureWasRetired = $false
@@ -120,7 +146,7 @@ function Get-CatalogFromSupportPage {
     $MainResponse = $null
     for ($Attempt = 1; $Attempt -le 18 -and -not $MainResponse; $Attempt++) {
         try {
-            [void]($MainResponse = Invoke-WebRequest -Uri $MainUrl -UseBasicParsing -TimeoutSec 30 -SessionVariable NewWebSession -UserAgent $script:UserAgent)
+            [void]($MainResponse = Invoke-WebRequest -Uri $MainUrl -UseBasicParsing -TimeoutSec 30 -SessionVariable NewWebSession -UserAgent $script:UserAgent @script:WebRequestProxyArgs)
             $script:WebSession = $NewWebSession
         }
         catch {
@@ -182,7 +208,7 @@ function Get-CatalogFromSupportPage {
 
     while ($CurrentLevel.Count -gt 0) {
         Write-Host "  Scanning level with $($CurrentLevel.Count) page(s)..." -ForegroundColor DarkGray
-        $LevelResults = Invoke-ParallelWebRequest -Uris $CurrentLevel -WebSession $script:WebSession -UserAgent $script:UserAgent
+        $LevelResults = Invoke-ParallelWebRequest -Uris $CurrentLevel -WebSession $script:WebSession -UserAgent $script:UserAgent -ProxyUrl $ProxyUrl
         $NextLevel = New-Object System.Collections.ArrayList
 
         foreach ($r in $LevelResults) {
@@ -228,18 +254,20 @@ function Invoke-ParallelWebRequest {
         [Microsoft.PowerShell.Commands.WebRequestSession]$WebSession,
         [int]$TimeoutSec = 30,
         [int]$MaxConcurrency = 8,
-        [string]$UserAgent = $script:UserAgent
+        [string]$UserAgent = $script:UserAgent,
+        [string]$ProxyUrl
     )
 
     $Pool = [runspacefactory]::CreateRunspacePool(1, $MaxConcurrency)
     $Pool.Open()
 
     $ScriptBlock = {
-        param($Uri, $WebSession, $TimeoutSec, $UserAgent)
+        param($Uri, $WebSession, $TimeoutSec, $UserAgent, $ProxyUrl)
 
         try {
             $RequestParams = @{ Uri = $Uri; UseBasicParsing = $true; TimeoutSec = $TimeoutSec; UserAgent = $UserAgent }
             if ($WebSession) { $RequestParams['WebSession'] = $WebSession }
+            if ($ProxyUrl) { $RequestParams['Proxy'] = $ProxyUrl }
             $Response = Invoke-WebRequest @RequestParams
             [pscustomobject]@{
                 Uri     = $Uri
@@ -262,7 +290,7 @@ function Invoke-ParallelWebRequest {
     foreach ($Uri in $Uris) {
         $Pipeline = [powershell]::Create()
         $Pipeline.RunspacePool = $Pool
-        [void]$Pipeline.AddScript($ScriptBlock).AddArgument($Uri).AddArgument($WebSession).AddArgument($TimeoutSec).AddArgument($UserAgent)
+        [void]$Pipeline.AddScript($ScriptBlock).AddArgument($Uri).AddArgument($WebSession).AddArgument($TimeoutSec).AddArgument($UserAgent).AddArgument($ProxyUrl)
         $AsyncResult = $Pipeline.BeginInvoke()
         [void]$Pipelines.Add(@{ Pipeline = $Pipeline; AsyncResult = $AsyncResult })
     }
@@ -353,6 +381,7 @@ function Resolve-MsiDownloadUrl {
     try {
         $SpaRequestParams = @{ Uri = $FetchUrl; UseBasicParsing = $true; TimeoutSec = 30; UserAgent = $script:UserAgent }
         if ($script:WebSession) { $SpaRequestParams['WebSession'] = $script:WebSession }
+        if ($ProxyUrl) { $SpaRequestParams['Proxy'] = $ProxyUrl }
         [void]($SpaResponse = Invoke-WebRequest @SpaRequestParams)
     }
     catch {
@@ -485,15 +514,20 @@ function Get-DriverPackage {
     try {
         if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
             try {
-                [void](Start-BitsTransfer -Source $Url -Destination $DestFile -DisplayName $FileName -ErrorAction Stop)
+                $BitsProxyArgs = @{}
+                if ($ProxyUrl) {
+                    $BitsProxyArgs['ProxyUsage'] = 'Override'
+                    $BitsProxyArgs['ProxyList'] = $ProxyUrl
+                }
+                [void](Start-BitsTransfer -Source $Url -Destination $DestFile -DisplayName $FileName -ErrorAction Stop @BitsProxyArgs)
             }
             catch {
                 Write-Host "    BITS failed, falling back to WebRequest - $($_.Exception.Message)" -ForegroundColor Yellow
-                [void](Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing -UserAgent $script:UserAgent)
+                [void](Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing -UserAgent $script:UserAgent @script:WebRequestProxyArgs)
             }
         }
         else {
-            [void](Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing -UserAgent $script:UserAgent)
+            [void](Invoke-WebRequest -Uri $Url -OutFile $DestFile -UseBasicParsing -UserAgent $script:UserAgent @script:WebRequestProxyArgs)
         }
         Unblock-File -LiteralPath $DestFile -ErrorAction SilentlyContinue
         return $true
