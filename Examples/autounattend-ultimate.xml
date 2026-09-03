@@ -718,16 +718,27 @@ if ($ProxyUrl) {
 # Tracks whether DCU ever reported a reboot-required result, so the script can surface that in its own exit code
 $script:RebootRequired = $false
 
+# Distinguishes a real 403 from the site from timeouts/DNS/other errors, which retrying can't fix so the retry loop stops early
+function Test-ForbiddenResponse {
+    param($ErrorRecord)
+    return [bool]($ErrorRecord.Exception.Response -and $ErrorRecord.Exception.Response.StatusCode -eq [System.Net.HttpStatusCode]::Forbidden)
+}
+
 function Get-DellDriverId {
     $KbUrl = 'https://www.dell.com/support/kbdoc/en-us/000177325/dell-command-update'
 
     # Specialize can start before DHCP settles, so keep retrying for about three minutes.
     $Response = $null
     for ($Attempt = 1; $Attempt -le 18 -and -not $Response; $Attempt++) {
+        Write-Host "  Requesting $KbUrl" -ForegroundColor DarkGray
         try {
             $Response = Invoke-WebRequest -Uri $KbUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent @script:WebRequestProxyArgs
         }
         catch {
+            if (Test-ForbiddenResponse $_) {
+                Write-Host "  Dell returned 403 Forbidden for $KbUrl, retrying will not help" -ForegroundColor Red
+                break
+            }
             Write-Host "  Attempt $Attempt of 18 to fetch the Dell Command Update KB page failed - $($_.Exception.Message)" -ForegroundColor DarkGray
         }
         if (-not $Response) {
@@ -782,10 +793,15 @@ function Resolve-DcuDownloadUrl {
     # Specialize can start before DHCP settles, so keep retrying for about three minutes.
     $Response = $null
     for ($Attempt = 1; $Attempt -le 18 -and -not $Response; $Attempt++) {
+        Write-Host "  Requesting $DetailsUrl" -ForegroundColor DarkGray
         try {
             $Response = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent @script:WebRequestProxyArgs
         }
         catch {
+            if (Test-ForbiddenResponse $_) {
+                Write-Host "  Dell returned 403 Forbidden for $DetailsUrl, retrying will not help" -ForegroundColor Red
+                break
+            }
             Write-Host "  Attempt $Attempt of 18 to fetch the Dell driver details page failed - $($_.Exception.Message)" -ForegroundColor DarkGray
         }
         if (-not $Response) {
@@ -828,6 +844,7 @@ function Get-DcuInstaller {
         return $DestFile
     }
 
+    Write-Host "  Requesting $Url" -ForegroundColor DarkGray
     try {
         if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
             try {
@@ -850,7 +867,12 @@ function Get-DcuInstaller {
         return $DestFile
     }
     catch {
-        Write-Host "  Download failed - $($_.Exception.Message)" -ForegroundColor Red
+        if (Test-ForbiddenResponse $_) {
+            Write-Host "  Dell returned 403 Forbidden for $Url" -ForegroundColor Red
+        }
+        else {
+            Write-Host "  Download failed for $Url - $($_.Exception.Message)" -ForegroundColor Red
+        }
         if (Test-Path -LiteralPath $DestFile) {
             Remove-Item -LiteralPath $DestFile -Force -ErrorAction SilentlyContinue
         }
