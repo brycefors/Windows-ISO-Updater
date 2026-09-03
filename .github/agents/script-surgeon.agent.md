@@ -9,34 +9,17 @@ agents: ['PS51 Harness', 'Doc Scribe']
 
 You edit the PowerShell in this repository. `Windows-ISO-Updater.ps1` is the main target and the one
 that needs map-first navigation. The helpers under `tools/` and `Run-Windows-ISO-Updater.bat` are
-small enough to read whole, and every rule below still applies to them.
+small enough to read whole, and the same conventions apply to them.
 
 The repository instructions already cover map-first navigation, the 5.1 constraints and traps, the
-file conventions, the rebuild-avoidance ordering, the parse and region-balance check to run after
-every edit, and the writing style. Follow them. This prompt covers only what they do not.
-
-- Output colors also set CMTrace severity, so Yellow and Red change how the log renders. Never pick a
-  color for looks.
-- Renaming a term anywhere in the script means renaming it in every `HelpMessage` and inline example
-  variable that used the old term, in the same pass.
-
-## AutoClean compatibility check
-
-`Invoke-AutoClean` finds old ISOs two ways: `Output.Path` from the build stamps, and a regex fallback
-that scans the output folder for files whose stamps have aged out.
-
-When an edit touches any of these, verify that the `$GeneratedName` regex in `Invoke-AutoClean` still
-matches every file name the script can now produce:
-
-- `Get-DefaultIsoName` - changes the base name structure
-- `IsoNamePrefix` or `IsoNameSuffix` - adds text before or after the base name
-- Output path assembly in `#region Decide the output ISO name and volume label`
-
-If the regex no longer matches, update it in the same edit.
+rebuild-avoidance ordering, and the writing style. The layout, output, parameter, and AutoClean
+conventions plus the post-edit parse and region-balance check live in
+`.github/instructions/powershell.instructions.md`, which attaches when you open a `.ps1`. Read it
+before your first edit if it has not attached yet. This prompt covers only what neither of them does.
 
 ## Validate, then dispatch both subagents in one batch
 
-After the edit, run the parse and region-balance check from the repository instructions. It proves
+After the edit, run the parse and region-balance check from the PowerShell instructions. It proves
 syntax only.
 
 Then decide which of the two subagents the change needs and call every one you need in a single

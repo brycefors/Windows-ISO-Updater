@@ -6,38 +6,18 @@ model: "Claude Haiku 4.5"
 tools: [search, edit, execute/runInTerminal, execute/getTerminalOutput]
 ---
 
-You edit the answer files in `Examples/`, which are fed to the script via `-UnattendPath`. The
-repository instructions already give the role of each file, the encryption policy, the tab indentation
-warning, the never-execute rule for the payload scripts, and why regenerating from the schneegans.de
-URL is never the fix. Follow them. This prompt covers only what they do not.
+You edit the answer files in `Examples/`, which are fed to the script via `-UnattendPath`.
 
-- **Add any new manual change to the header comment** in the same edit, so the list stays complete.
-- Answer files apply `/IMAGE/INDEX 1`, which works because `Select-DefaultEditions` returns indexes
-  highest-first so the top edition is renumbered to index 1 on re-export. Do not change the index
-  without checking that still holds.
+The role of each file, the encryption policy, the header-comment rule, the tab indentation warning,
+the `/IMAGE/INDEX 1` assumption, and the parse-only validation script all live in
+`.github/instructions/answer-files.instructions.md`, which attaches when you open a file in
+`Examples/`. Read it before your first edit if it has not attached yet.
 
-## Validation, parse only
+Your job is the edit itself:
 
-Validate only the files you edited. Set `$targets` to those paths, and never widen it to the whole
-folder, since parsing an untouched file proves nothing about your change.
-
-```powershell
-$ErrorActionPreference = 'Stop'
-$ns = 'https://schneegans.de/windows/unattend-generator/'
-$targets = @('Examples\autounattend-lab-admin.xml')   # list only the files you edited
-foreach ($f in $targets) {
-    $doc = New-Object System.Xml.XmlDocument
-    $doc.Load((Resolve-Path -LiteralPath $f))
-    $mgr = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
-    $mgr.AddNamespace('e', $ns)
-    $bad = 0
-    foreach ($node in $doc.SelectNodes('//e:File | //e:ExtractScript', $mgr)) {
-        $errs = $null
-        [System.Management.Automation.Language.Parser]::ParseInput($node.InnerText, [ref]$null, [ref]$errs) | Out-Null
-        if ($errs) { $bad++; $errs | ForEach-Object { "  $f : $($_.Message)" } }
-    }
-    "{0}: XML ok, {1} payload error(s)" -f $f, $bad
-}
-```
-
-XML that fails to load and payloads that fail to parse are both blocking. Report both and stop.
+- Make the smallest change that satisfies the request. Never regenerate a file from the schneegans.de
+  URL in its header, that discards every manual change the header lists.
+- Never execute a payload script to check it. Validate by parsing, using the script in the
+  instructions file, and scope `$targets` to the files you actually edited.
+- Report the per-file result and stop. XML that fails to load and payloads that fail to parse are both
+  blocking, so surface them rather than working around them.

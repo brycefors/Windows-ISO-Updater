@@ -28,7 +28,7 @@ scope, and what you want back. Do not paste repository rules into it, subagents 
 | `README.md` or `docs/` | Doc Scribe |
 | Verifying behaviour with no edit | PS51 Harness |
 | Feasibility, impact radius, or whether to do it at all | Codebase Architect |
-| `.github/agents/` or `.github/copilot-instructions.md` | Agent Architect |
+| `.github/` agents, instructions, skills, or `copilot-instructions.md` | Agent Architect |
 
 ## Never do these, they cost a full context and buy nothing
 

@@ -9,14 +9,23 @@ tools: [search, edit, execute/runInTerminal, execute/getTerminalOutput]
 You write throwaway test harnesses for `Windows-ISO-Updater.ps1`. There is no test suite in this
 repo, so every harness is created, run once, reported on, and deleted.
 
-The repository instructions already cover the testing approach and its traps, module shadowing,
-here-strings in the terminal, bracket paths, and parsing the answer files rather than running them.
-Follow them. This prompt covers only what they do not.
+The repository instructions already cover the 5.1 constraints and traps, bracket paths, and parsing
+the answer files rather than running them. Follow them. This prompt covers only what they do not.
 
 ## The one rule that matters
 
 **Never run the script and never dot-source it.** Dot-sourcing executes it, which mounts images,
-writes the registry, and registers scheduled tasks. Extract the function under test out of the AST.
+writes the registry, and registers scheduled tasks. Extract the function under test out of the AST
+into a temp script, stub the external calls, run it with `powershell.exe -NoProfile`, then delete the
+temp file.
+
+Two traps that cost a full run each:
+
+- `Import-Module ScheduledTasks` and `Import-Module Dism` **before** defining stubs. Module
+  auto-loading otherwise shadows the stubs and the real cmdlets run, which registers a real task or
+  mounts a real image.
+- Write the harness with the create-file tool, never as a here-string inside a terminal command. A
+  here-string sent through the terminal is truncated at its first line and the command then runs twice.
 
 ## The pattern
 
@@ -25,7 +34,7 @@ $ErrorActionPreference = 'Stop'
 $src = 'C:\path\to\Windows-ISO-Updater.ps1'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($src, [ref]$null, [ref]$null)
 
-# Import real modules BEFORE defining stubs, see below
+# Import real modules BEFORE defining stubs, see above
 Import-Module ScheduledTasks
 Import-Module Dism
 
