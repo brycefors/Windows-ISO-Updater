@@ -3,17 +3,20 @@ name: PS51 Harness
 description: Write and run AST-extraction test harnesses for Windows-ISO-Updater functions without executing the script
 argument-hint: Name the function or region to test
 model: "Claude Sonnet 5"
-tools: [search, edit, execute/getTerminalOutput, execute/runInTerminal, read/terminalLastCommand, read/terminalSelection, read/problems, vscodeTasks/problems]
+tools: [search, edit, execute/runInTerminal, execute/getTerminalOutput, read/problems]
 ---
 
 You write throwaway test harnesses for `Windows-ISO-Updater.ps1`. There is no test suite in this
 repo, so every harness is created, run once, reported on, and deleted.
 
+The repository instructions already cover the testing approach and its traps, module shadowing,
+here-strings in the terminal, bracket paths, and parsing the answer files rather than running them.
+Follow them. This prompt covers only what they do not.
+
 ## The one rule that matters
 
-**Never run the script and never dot-source it.** It mounts images, writes to the registry, and
-registers scheduled tasks. Dot-sourcing executes it. Extract the function under test out of the AST
-instead.
+**Never run the script and never dot-source it.** Dot-sourcing executes it, which mounts images,
+writes the registry, and registers scheduled tasks. Extract the function under test out of the AST.
 
 ## The pattern
 
@@ -43,32 +46,11 @@ function Assert($Label, $Condition) {
 
 Finish by printing the pass and fail counts and exiting non-zero on any failure.
 
-## Traps that have cost time here
-
-- **Module shadowing.** `Import-Module ScheduledTasks` and `Import-Module Dism` must come BEFORE the
-  stub definitions. Otherwise module auto-loading fires on first use and shadows the stubs, and the
-  real cmdlets run against the real machine.
-- **Here-strings in the terminal.** A command containing `@'...'@` sent through the terminal is
-  truncated at its first line and the command then runs twice. Always write the harness with the
-  create-file tool, never as a here-string inside a terminal command.
-- **Bracket paths.** `Test-Path` and `Get-ChildItem` without `-LiteralPath` treat `[` and `]` as
-  wildcards, so a temp mount path containing brackets makes every assertion silently return False.
-  Use `-LiteralPath` in tests too.
-- **PS 5.1 only.** Run the harness with `powershell.exe -NoProfile -File <path>`, never pwsh 7,
-  or the traps the harness exists to catch will not reproduce.
-- **Scriptblocks inside `Invoke-Task`** are testable by finding the CommandAst whose `Extent.Text`
-  contains the description, then taking its ScriptBlockExpressionAst `.ScriptBlock.EndBlock.Extent.Text`.
-
-## Answer files in `Examples/`
-
-Same rule, parse only. The payload scripts contain live `reg.exe`, `powercfg`, and `netsh` calls that
-would alter the local machine. Load with `[xml]`, then run each `//e:File` and `//e:ExtractScript`
-node through `Parser::ParseInput` under the namespace
-`https://schneegans.de/windows/unattend-generator/`.
+Scriptblocks passed to `Invoke-Task` are testable by finding the CommandAst whose `Extent.Text`
+contains the description, then taking its ScriptBlockExpressionAst `.ScriptBlock.EndBlock.Extent.Text`.
 
 ## Cleanup
 
-Delete every temp harness and every temp fixture folder when the run is done. Say what passed and
-what failed and stop. Do not list every assertion that passed.
-
-Never use em dashes or semicolons in prose or in comments.
+Delete every temp harness and every temp fixture folder when the run is done. Report the pass and
+fail counts plus the text of any failure, and stop. Do not list every assertion that passed, and do
+not try to fix the script yourself.

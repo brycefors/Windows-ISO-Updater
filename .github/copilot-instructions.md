@@ -57,9 +57,14 @@ taken, a trap avoided, or a root cause worth remembering.
 
 - **Windows PowerShell 5.1 is the target.** No ternary `? :`, no `??`, no `?.`, no `-Parallel`, no
   classes, no `Clean` blocks. Test edits with `powershell.exe -NoProfile`, not pwsh 7.
-- **5.1 overload traps already hit in this repo.** `[enum]::TryParse($type, $str, $bool, [ref]$out)` and
-  the `string[]` overload of `[datetime]::TryParseExact` both fail to bind. Use `[enum]::Parse` inside
-  try/catch, and regex-parse `HH:mm` by hand.
+- **5.1 traps already hit in this repo.**
+  - `[enum]::TryParse($type, $str, $bool, [ref]$out)` fails to bind. Use `[enum]::Parse` in try/catch.
+  - The `string[]` overload of `[datetime]::TryParseExact` fails to bind. Regex-parse `HH:mm` by hand.
+  - `@($list)` on a `System.Collections.Generic.List[object]` throws "Argument types do not match".
+    Use `.ToArray()`. `List[string]` and ArrayList are fine.
+  - `[Parameter(Mandatory)][object[]]` rejects `@()`. Use `[AllowEmptyCollection()]` and drop Mandatory.
+  - `Test-Path` and `Get-ChildItem` without `-LiteralPath` treat `[` and `]` as wildcards, so a path
+    containing brackets silently matches nothing.
 - **`Register-ScheduledTask -Trigger` rejects client-only monthly CIM triggers** with 0x80070057 no
   matter which properties are set. Monthly schedules must register a placeholder weekly trigger, then
   `Export-ScheduledTask`, swap `<ScheduleByWeek>` for `<ScheduleByMonth>` or
