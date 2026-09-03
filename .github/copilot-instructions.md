@@ -5,9 +5,10 @@
 A single-purpose Windows automation repo. `Windows-ISO-Updater.ps1` downloads a Windows 10 or 11 ISO,
 services the images inside it offline with DISM (LCU, .NET, Setup Dynamic Update, optional WinRE), and
 recompiles a bootable ISO with `oscdimg.exe`. `Run-Windows-ISO-Updater.bat` is the double-click entry
-point, `docs/` is the manual, `Examples/` holds two answer files, `tools/Update-Version.ps1` stamps
-versions from a git hook, and `tools/Test-Dependencies.ps1` checks that the external things the script
-pins (oscdimg hash, Fido, the MCT and ADK fwlinks, the Update Catalog HTML) are still valid.
+point, `docs/` is the manual, `Examples/` holds four answer files, `tools/Update-Version.ps1` stamps
+versions from a git hook, `tools/Sync-EmbeddedDriverScripts.ps1` re-mirrors the driver payloads into
+`Examples/autounattend-ultimate.xml`, and `tools/Test-Dependencies.ps1` checks that the external things
+the script pins (oscdimg hash, Fido, the MCT and ADK fwlinks, the Update Catalog HTML) are still valid.
 
 There is no build, no test suite, and no package manifest. The script is the product.
 
@@ -167,13 +168,20 @@ Unbalanced regions mean an edit landed inside the wrong block, which parses fine
 
 ## Answer files in `Examples/`
 
-Both are hand-edited output from the schneegans.de generator, and the header comment lists every manual
-change. Regenerating from the embedded URL discards them.
+All four are hand-edited. The lab-admin, gold-image, and ultimate files started as schneegans.de
+generator output and their header comments list every manual change, so regenerating from the embedded
+URL discards them.
 
 - `autounattend-lab-admin.xml` is the deployment file. It branches on hardware using `$isVirtualMachine`
   from SMBIOS and is authoritative for BitLocker policy.
 - `autounattend-gold-image.xml` builds a reference image and must stay hardware-neutral, because
   `specialize` runs once on the reference machine and is baked into the capture.
+- `autounattend-ultimate.xml` derives from the lab-admin file and adds driver installation dispatched by
+  manufacturer. It stops short of full OOBE bypass on purpose, so an Autopilot device still checks in.
+  It embeds verbatim copies of the three `tools/Install-*.ps1` scripts, which go stale the moment a
+  source script is edited.
+- `autounattend-driver-install.xml` is minimal and only installs model-matched packages from
+  `C:\Drivers\` during `specialize`.
 - Policy is to encrypt physical machines and not VMs, since encrypted guests defeat SAN block dedup.
   The gold image sets `PreventDeviceEncryption=1` as a build-only setting and `SEAL-THIS-IMAGE.txt`
   step 5 deletes it before sysprep.

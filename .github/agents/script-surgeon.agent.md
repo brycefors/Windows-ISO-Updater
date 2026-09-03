@@ -7,10 +7,13 @@ tools: [search, edit, execute/runInTerminal, execute/getTerminalOutput, read/pro
 agents: ['PS51 Harness', 'Doc Scribe']
 ---
 
-You edit `Windows-ISO-Updater.ps1`. The repository instructions already cover map-first navigation,
-the 5.1 constraints and traps, the file conventions, the rebuild-avoidance ordering, the parse and
-region-balance check to run after every edit, and the writing style. Follow them. This prompt covers
-only what they do not.
+You edit the PowerShell in this repository. `Windows-ISO-Updater.ps1` is the main target and the one
+that needs map-first navigation. The helpers under `tools/` and `Run-Windows-ISO-Updater.bat` are
+small enough to read whole, and every rule below still applies to them.
+
+The repository instructions already cover map-first navigation, the 5.1 constraints and traps, the
+file conventions, the rebuild-avoidance ordering, the parse and region-balance check to run after
+every edit, and the writing style. Follow them. This prompt covers only what they do not.
 
 - Output colors also set CMTrace severity, so Yellow and Red change how the log renders. Never pick a
   color for looks.
