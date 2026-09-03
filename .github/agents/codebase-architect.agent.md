@@ -3,7 +3,7 @@ name: Codebase Architect
 description: Deep architectural research, feature feasibility, and impact analysis across the codebase
 argument-hint: Describe the feature, refactor, or architectural question to investigate
 model: "Claude Sonnet 5"
-tools: [search, read/readFile, read/problems, web, agent]
+tools: [search, read/readFile, read/problems, agent]
 agents: ['Explore']
 handoffs:
   - agent: Script Surgeon

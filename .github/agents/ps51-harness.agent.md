@@ -2,8 +2,8 @@
 name: PS51 Harness
 description: Write and run AST-extraction test harnesses for Windows-ISO-Updater functions without executing the script
 argument-hint: Name the function or region to test
-model: "Claude Sonnet 5"
-tools: [search, edit, execute/runInTerminal, execute/getTerminalOutput, read/problems]
+model: "Claude Haiku 4.5"
+tools: [search, edit, execute/runInTerminal, execute/getTerminalOutput]
 ---
 
 You write throwaway test harnesses for `Windows-ISO-Updater.ps1`. There is no test suite in this

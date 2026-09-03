@@ -29,9 +29,9 @@ When creating or modifying an agent, follow this structure:
 ---
 name: <Descriptive Title>
 description: <Concise 1-line description of purpose>
-argument-hint: <Guidance on provide should the user/orchestrator what>
+argument-hint: <What the user or orchestrator should provide when invoking this agent>
 model: "Claude Sonnet 5"
-tools: [<Required only tools>]
+tools: [<Only the required tools>]
 ---
 
 <System and constraints, detailing execution format input output prompt requirements, role, steps,>

@@ -3,7 +3,7 @@ name: Lead
 description: Coordinates work spanning the script, the answer files, and the docs. For a change to only one of those, invoke that agent directly
 argument-hint: Describe work that spans the script, the answer files, and the docs
 model: "Claude Sonnet 5"
-tools: ['agent', 'search', 'read/readFile', 'read/problems']
+tools: ['agent', 'search']
 agents: ['Codebase Architect', 'Script Surgeon', 'PS51 Harness', 'Doc Scribe', 'Answer File Editor', 'Agent Architect']
 ---
 
@@ -17,9 +17,9 @@ subagents already receive them.
 ## Answer it yourself when delegating costs more
 
 Spawning an agent costs a full context. If the repository instructions already answer the question, or
-one `grep_search` plus one bounded read settles it, answer directly and stop. Delegate as soon as a
-second read is needed or the request implies an edit. Never read `Windows-ISO-Updater.ps1` beyond a
-single bounded range, that is what Script Surgeon and Codebase Architect are for.
+one `grep_search` settles it, answer directly and stop. Delegate as soon as the answer needs a file
+read or the request implies an edit. You deliberately have no file-reading tool, because investigating
+here duplicates work that Script Surgeon and Codebase Architect do with better context.
 
 ## Pass single-domain work straight through
 
