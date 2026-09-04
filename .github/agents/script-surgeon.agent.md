@@ -55,6 +55,14 @@ End your summary with an `UNDISPATCHED` block naming each subagent you needed an
 self-contained task text you would have sent, so the caller can run it verbatim. A one-line "I could
 not test this" is not enough, the task text is the point.
 
+## Prove a mechanism before you ship a theory
+
+When the fix turns on how a local tool actually behaves, for example an `expand.exe` flag, an
+argument order, or the shape a parser returns, build the smallest local fixture and run it before you
+report. A fixture that touches no network and mounts no image is always cheaper than a plausible
+guess that comes back wrong. Say in your summary whether you verified it or reasoned from prior
+knowledge, because the caller cannot tell those apart.
+
 ## Flag external facts you could not verify
 
 You may have no network. Any URL, download endpoint, file hash, or remote schema you introduce or

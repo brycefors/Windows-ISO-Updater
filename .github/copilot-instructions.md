@@ -77,6 +77,12 @@ taken, a trap avoided, or a root cause worth remembering.
 - **Never hand-edit a version line.** `tools/Update-Version.ps1` owns `# Version:`, `:: Version:`, and
   `$ScriptVersion = '...'`, and the `.git/hooks/pre-commit` hook re-stamps and re-stages them on every
   commit. Versions are CalVer, `yyyy.MM.dd.<rev>`.
+- **Never scrape a vendor support page for a driver download.** `www.dell.com/support` sits behind
+  Akamai Bot Manager, which blocks Windows PowerShell 5.1 no matter what User-Agent, `Referer`, or
+  warmed cookie session is sent, because the block is a TLS and HTTP client fingerprint. Use the
+  catalog feed, `https://downloads.dell.com/catalog/CatalogPC.cab`, and expand it with
+  `expand.exe -R`, since without `-R` the entry is written out under the cabinet's own name and the
+  extracted file is never found.
 - Do not commit, push, or register a real scheduled task without being asked.
 
 ## Rebuild-avoidance model
