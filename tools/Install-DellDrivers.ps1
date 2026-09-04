@@ -4,30 +4,23 @@
     Dell machine.
 
 .DESCRIPTION
-    The script discovers the current Dell Command Update (DCU) driver listing by scraping the Dell
-    support KB page for Dell Command Update, then resolves that listing to a direct installer
-    download URL. It downloads the installer to -OutputPath, installs DCU silently if not already
+    The script discovers the current Dell Command Update (DCU) installer by parsing Dell's public
+    driver-catalog feed, then downloads it to -OutputPath, installs DCU silently if not already
     present, then drives dcu-cli.exe through a scan and, unless -ScanOnly is given, an apply pass
     scoped to -UpdateType.
 
-    Discovery is two hops because Dell's dl.dell.com path segment and the version/build in the
-    installer filename change over time, so neither can be hardcoded.
-
-        1. https://www.dell.com/support/kbdoc/en-us/000177325/dell-command-update is scraped for a
-           driversdetails?driverid= link, giving the current driver ID.
-        2. https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=<id> is scraped
-           for a direct dl.dell.com .EXE link.
-
-    If the first hop fails for any reason, -DriverId supplies a fallback ID.
+    Discovery downloads https://downloads.dell.com/catalog/CatalogPC.cab, a cabinet file containing
+    CatalogPC.xml, which lists every BIOS, firmware, driver and application update Dell publishes for
+    its client systems, including Dell Command Update itself as an application entry. The CAB is
+    expanded with expand.exe, the XML is searched for the Dell Command Update entry, and the
+    highest-versioned match's path is turned into a download URL. This replaced scraping the
+    interactive https://www.dell.com/support/... pages, which sit behind Akamai Bot Manager and
+    rejected every request no matter what headers or cookies were replayed. The catalog is a static
+    file download and is not gated the same way.
 
 .PARAMETER OutputPath
     Folder the DCU installer .exe is downloaded to. Defaults to .\Drivers\DellCommandUpdate in the
     current directory.
-
-.PARAMETER DriverId
-    Fallback Dell driver ID for the DCU Windows Universal Application listing, used only if the KB
-    page scrape fails to find one. Defaults to 'P0P70', the ID as of today. Dell can reassign IDs, so
-    refresh this default if the fallback stops resolving.
 
 .PARAMETER DownloadOnly
     Download the DCU installer only. Does not install it, does not run its CLI, and does not require
@@ -49,7 +42,7 @@
     Suppress detail lines; show only headings and the final summary.
 
 .PARAMETER ProxyUrl
-    Proxy server URL to route KB page scraping, installer downloads, and Dell Command Update's own
+    Proxy server URL to route the catalog download, installer download, and Dell Command Update's own
     scan/apply traffic through, for example http://proxy.example.com:8080. Omit to use the machine's
     default network configuration.
 
@@ -79,17 +72,15 @@
     dcu-cli.exe installs to either Program Files or Program Files (x86) depending on the DCU version,
     both locations are checked.
 
-    Driver ID and download link are discovered at runtime from
-    https://www.dell.com/support/kbdoc/en-us/000177325/dell-command-update so no hardcoded installer
-    URL needs updating.
+    Driver ID and download link are discovered at runtime from Dell's CatalogPC.cab feed so no
+    hardcoded installer URL needs updating. There is no local fallback if Dell changes the catalog's
+    schema or file name, since any fallback would have to be a hardcoded installer URL that goes stale
+    the same way the old scraped IDs did.
 #>
 [CmdletBinding()]
 param(
     [Parameter(HelpMessage = 'Folder the DCU installer .exe is downloaded to. Defaults to .\Drivers\DellCommandUpdate in the current directory.')]
     [string]$OutputPath = '.\Drivers\DellCommandUpdate',
-
-    [Parameter(HelpMessage = "Fallback Dell driver ID for the DCU Windows Universal Application listing, used only if the KB page scrape fails to find one. Defaults to 'P0P70', the ID as of today. Dell can reassign IDs, so refresh this default if the fallback stops resolving.")]
-    [string]$DriverId = 'P0P70',
 
     [Parameter(HelpMessage = 'Download the DCU installer only. Does not install it, does not run its CLI, and does not require elevation.')]
     [switch]$DownloadOnly,
@@ -107,7 +98,7 @@ param(
     [Parameter(HelpMessage = 'Suppress detail lines; show only headings and the final summary.')]
     [switch]$Quiet,
 
-    [Parameter(HelpMessage = "Proxy server URL to route KB page scraping, installer downloads, and Dell Command Update's own scan/apply traffic through, for example http://proxy.example.com:8080. Omit to use the machine's default network configuration.")]
+    [Parameter(HelpMessage = "Proxy server URL to route the catalog download, installer download, and Dell Command Update's own scan/apply traffic through, for example http://proxy.example.com:8080. Omit to use the machine's default network configuration.")]
     [ValidateScript({
         $ParsedUri = $null
         if (-not [Uri]::TryCreate($_, [UriKind]::Absolute, [ref]$ParsedUri)) {
@@ -121,8 +112,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-# Dell's support site rejects PowerShell's default User-Agent as bot traffic, same defensive pattern as the Surface script
+# Still spoofed for the installer download itself; downloads.dell.com is a plain file server but this costs nothing to keep
 $script:UserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+# A static file feed, not the interactive support pages, so it is not behind the Akamai Bot Manager challenge that blocked scraping
+$script:DellCatalogUrl = 'https://downloads.dell.com/catalog/CatalogPC.cab'
 
 # Splatted onto every Invoke-WebRequest call so -ProxyUrl, when given, is the only place proxy routing is decided
 $script:WebRequestProxyArgs = @{}
@@ -139,107 +132,174 @@ function Test-ForbiddenResponse {
     return [bool]($ErrorRecord.Exception.Response -and $ErrorRecord.Exception.Response.StatusCode -eq [System.Net.HttpStatusCode]::Forbidden)
 }
 
-function Get-DellDriverId {
-    $KbUrl = 'https://www.dell.com/support/kbdoc/en-us/000177325/dell-command-update'
+function Get-DellCatalogCab {
+    param([string]$DestinationFolder)
 
-    # Specialize can start before DHCP settles, so keep retrying for about three minutes.
-    $Response = $null
-    for ($Attempt = 1; $Attempt -le 18 -and -not $Response; $Attempt++) {
-        Write-Host "  Requesting $KbUrl" -ForegroundColor DarkGray
+    New-Item -ItemType Directory -Force -Path $DestinationFolder | Out-Null
+    $CabPath = Join-Path -Path $DestinationFolder -ChildPath 'CatalogPC.cab'
+
+    # Specialize can start before DHCP settles, so keep retrying for about three minutes, same cadence the old scrape used.
+    $Downloaded = $false
+    for ($Attempt = 1; $Attempt -le 18 -and -not $Downloaded; $Attempt++) {
+        Write-Host "  Requesting $($script:DellCatalogUrl)" -ForegroundColor DarkGray
         try {
-            $Response = Invoke-WebRequest -Uri $KbUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent @script:WebRequestProxyArgs
+            Invoke-WebRequest -Uri $script:DellCatalogUrl -OutFile $CabPath -UseBasicParsing -TimeoutSec 120 -UserAgent $script:UserAgent @script:WebRequestProxyArgs
+            $Downloaded = $true
         }
         catch {
+            if (Test-Path -LiteralPath $CabPath) {
+                Remove-Item -LiteralPath $CabPath -Force -ErrorAction SilentlyContinue
+            }
             if (Test-ForbiddenResponse $_) {
-                Write-Host "  Dell returned 403 Forbidden for $KbUrl, retrying will not help" -ForegroundColor Red
+                Write-Host "  Dell returned 403 Forbidden for $($script:DellCatalogUrl), retrying will not help" -ForegroundColor Red
                 break
             }
-            Write-Host "  Attempt $Attempt of 18 to fetch the Dell Command Update KB page failed - $($_.Exception.Message)" -ForegroundColor DarkGray
+            Write-Host "  Attempt $Attempt of 18 to download the Dell driver catalog failed - $($_.Exception.Message)" -ForegroundColor DarkGray
         }
-        if (-not $Response) {
+        if (-not $Downloaded) {
             Start-Sleep -Seconds 10
         }
     }
-    if (-not $Response) {
-        Write-Host 'Failed to fetch the Dell Command Update KB page after 18 attempts.' -ForegroundColor Red
+    if (-not $Downloaded) {
+        Write-Host 'Failed to download the Dell driver catalog after 18 attempts.' -ForegroundColor Red
+        return $null
+    }
+    return $CabPath
+}
+
+function Expand-DellCatalogCab {
+    param(
+        [string]$CabPath,
+        [string]$DestinationFolder
+    )
+
+    New-Item -ItemType Directory -Force -Path $DestinationFolder | Out-Null
+    # PS 5.1 has no native CAB cmdlet; expand.exe is the same tool Windows-ISO-Updater.ps1 uses for LCU/SSU cabs
+    & "$env:SystemRoot\System32\expand.exe" "$CabPath" '-F:*' "$DestinationFolder" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  expand.exe returned $LASTEXITCODE while extracting the Dell driver catalog" -ForegroundColor Red
         return $null
     }
 
-    $IdMatch = [regex]::Match($Response.Content, 'driversdetails\?driverid=([A-Za-z0-9]+)')
-    if ($IdMatch.Success) {
-        return $IdMatch.Groups[1].Value
+    $XmlFile = Get-ChildItem -LiteralPath $DestinationFolder -Filter '*.xml' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $XmlFile) {
+        Write-Host '  Warning: no XML file found inside the Dell driver catalog CAB.' -ForegroundColor Yellow
+        return $null
     }
-
-    Write-Host '  Warning: no driver ID link found on the Dell Command Update KB page.' -ForegroundColor Yellow
-    return $null
+    return $XmlFile.FullName
 }
 
-function Select-HighestVersionUrl {
-    param([string[]]$Urls)
+# Catalog <Display> text collapses to a plain string for one language but becomes an array of elements when the
+# catalog carries several, so both shapes have to be handled to read the English name back out
+function Get-DellCatalogDisplayText {
+    param($Node)
 
-    $Best = $null
-    $BestVersion = $null
-    foreach ($Candidate in $Urls) {
-        $FileName = $Candidate.Split('/')[-1]
-        $VersionMatch = [regex]::Match($FileName, '(\d+\.\d+\.\d+)')
-        if ($VersionMatch.Success) {
-            try {
-                $Ver = [Version]$VersionMatch.Groups[1].Value
-                if ($null -eq $BestVersion -or $Ver -gt $BestVersion) {
-                    $BestVersion = $Ver
-                    $Best = $Candidate
-                }
-            }
-            catch { }
+    if ($null -eq $Node) {
+        return $null
+    }
+    if ($Node -is [string]) {
+        return $Node
+    }
+    if ($Node -is [System.Array]) {
+        $English = $Node | Where-Object { $_.lang -eq 'en' } | Select-Object -First 1
+        if ($English) {
+            return $English.'#text'
         }
+        return $Node[0].'#text'
     }
+    if ($Node.PSObject.Properties['#text']) {
+        return $Node.'#text'
+    }
+    return $Node.InnerText
+}
 
-    if ($Best) {
-        return $Best
+# Selects //SoftwareComponent regardless of whether the catalog declares a default XML namespace, matching the
+# namespace-manager pattern the answer-file validation already uses rather than assuming the namespace away
+function Select-DellCatalogComponents {
+    param([xml]$Catalog)
+
+    $Root = $Catalog.DocumentElement
+    if ($Root.NamespaceURI) {
+        $Mgr = New-Object System.Xml.XmlNamespaceManager($Catalog.NameTable)
+        $Mgr.AddNamespace('d', $Root.NamespaceURI)
+        return $Catalog.SelectNodes('//d:SoftwareComponent', $Mgr)
     }
-    return $Urls[0]
+    return $Catalog.SelectNodes('//SoftwareComponent')
 }
 
 function Resolve-DcuDownloadUrl {
-    param([string]$DriverId)
+    param([string]$WorkFolder)
 
-    $DetailsUrl = "https://www.dell.com/support/home/en-us/drivers/driversdetails?driverid=$DriverId"
+    $CabPath = Get-DellCatalogCab -DestinationFolder $WorkFolder
+    if (-not $CabPath) {
+        return $null
+    }
 
-    # Specialize can start before DHCP settles, so keep retrying for about three minutes.
-    $Response = $null
-    for ($Attempt = 1; $Attempt -le 18 -and -not $Response; $Attempt++) {
-        Write-Host "  Requesting $DetailsUrl" -ForegroundColor DarkGray
+    $ExtractFolder = Join-Path -Path $WorkFolder -ChildPath 'Extracted'
+    $XmlPath = Expand-DellCatalogCab -CabPath $CabPath -DestinationFolder $ExtractFolder
+    if (-not $XmlPath) {
+        return $null
+    }
+
+    Write-Host '  Parsing the Dell driver catalog...' -ForegroundColor DarkGray
+    [xml]$Catalog = Get-Content -LiteralPath $XmlPath -Raw
+    $Root = $Catalog.DocumentElement
+
+    # Both attributes are documented on the catalog's root Manifest element; downloads.dell.com/https is the
+    # long-standing default if a future catalog omits them rather than treating that as a hard failure
+    $BaseLocation = $Root.baseLocation
+    if (-not $BaseLocation) {
+        $BaseLocation = 'downloads.dell.com'
+    }
+    $BaseProtocol = $Root.baseLocationAccessProtocol
+    if (-not $BaseProtocol) {
+        $BaseProtocol = 'https'
+    }
+
+    $Candidates = New-Object System.Collections.Generic.List[object]
+    foreach ($Component in (Select-DellCatalogComponents -Catalog $Catalog)) {
+        $Name = Get-DellCatalogDisplayText -Node $Component.Name.Display
+        if ($Name -match 'Dell\s+Command.*Update') {
+            $Candidates.Add($Component)
+        }
+    }
+
+    if ($Candidates.Count -eq 0) {
+        Write-Host "  Warning: no 'Dell Command | Update' entry found in the Dell driver catalog. Dell may have changed the catalog's schema or file name." -ForegroundColor Yellow
+        return $null
+    }
+
+    $Best = $null
+    $BestVersion = $null
+    foreach ($Component in $Candidates) {
+        $VersionText = $Component.dellVersion
+        if (-not $VersionText) {
+            $VersionText = $Component.vendorVersion
+        }
         try {
-            $Response = Invoke-WebRequest -Uri $DetailsUrl -UseBasicParsing -TimeoutSec 30 -UserAgent $script:UserAgent @script:WebRequestProxyArgs
+            $Ver = [Version]$VersionText
         }
         catch {
-            if (Test-ForbiddenResponse $_) {
-                Write-Host "  Dell returned 403 Forbidden for $DetailsUrl, retrying will not help" -ForegroundColor Red
-                break
-            }
-            Write-Host "  Attempt $Attempt of 18 to fetch the Dell driver details page failed - $($_.Exception.Message)" -ForegroundColor DarkGray
+            continue
         }
-        if (-not $Response) {
-            Start-Sleep -Seconds 10
+        if ($null -eq $BestVersion -or $Ver -gt $BestVersion) {
+            $BestVersion = $Ver
+            $Best = $Component
         }
     }
-    if (-not $Response) {
-        Write-Host 'Failed to fetch the Dell driver details page after 18 attempts.' -ForegroundColor Red
+    if (-not $Best) {
+        $Best = $Candidates[0]
+    }
+
+    $Path = $Best.path
+    if (-not $Path) {
+        Write-Host '  Warning: the matched catalog entry has no download path.' -ForegroundColor Yellow
         return $null
     }
-
-    $UrlMatches = [regex]::Matches($Response.Content, 'https://dl\.dell\.com/[^"''\s]+\.EXE', 'IgnoreCase')
-    if ($UrlMatches.Count -eq 0) {
-        Write-Host "  Warning: no download link found on the driver details page for driver ID '$DriverId'." -ForegroundColor Yellow
-        return $null
+    if ($Path -match '^https?://') {
+        return $Path
     }
-
-    $Candidates = @($UrlMatches | ForEach-Object { $_.Value } | Select-Object -Unique)
-    if ($Candidates.Count -eq 1) {
-        return $Candidates[0]
-    }
-
-    return Select-HighestVersionUrl -Urls $Candidates
+    return "$($BaseProtocol)://$($BaseLocation)/$($Path.TrimStart('/'))"
 }
 
 function Get-DcuInstaller {
@@ -326,20 +386,19 @@ if (-not $DownloadOnly) {
     }
 }
 
-Write-Host 'Discovering the current Dell Command Update driver ID...' -ForegroundColor Cyan
-$ResolvedDriverId = Get-DellDriverId
-if (-not $ResolvedDriverId) {
-    Write-Host "  Falling back to driver ID '$DriverId'" -ForegroundColor Yellow
-    $ResolvedDriverId = $DriverId
+Write-Host 'Resolving the Dell Command Update download URL from the Dell driver catalog...' -ForegroundColor Cyan
+$CatalogWorkFolder = Join-Path -Path $OutputPath -ChildPath 'DellCatalog'
+try {
+    $DownloadUrl = Resolve-DcuDownloadUrl -WorkFolder $CatalogWorkFolder
 }
-if (-not $Quiet) {
-    Write-Host "  Driver ID: $ResolvedDriverId" -ForegroundColor DarkGray
+finally {
+    # The catalog CAB and its expanded XML are working files only, not something worth keeping around next to the installer
+    if (Test-Path -LiteralPath $CatalogWorkFolder) {
+        Remove-Item -LiteralPath $CatalogWorkFolder -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
-
-Write-Host 'Resolving the Dell Command Update download URL...' -ForegroundColor Cyan
-$DownloadUrl = Resolve-DcuDownloadUrl -DriverId $ResolvedDriverId
 if (-not $DownloadUrl) {
-    Write-Host 'Could not resolve a Dell Command Update download URL. Check network access and try again.' -ForegroundColor Red
+    Write-Host 'Could not resolve a Dell Command Update download URL from the Dell driver catalog. Check network access and try again.' -ForegroundColor Red
     exit 1
 }
 if (-not $Quiet) {
