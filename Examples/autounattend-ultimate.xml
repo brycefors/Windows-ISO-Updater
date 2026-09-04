@@ -603,6 +603,13 @@ $scripts = @(
     Manager and rejected every request no matter what headers or cookies were replayed. The catalog
     is a static file download and is not gated the same way.
 
+    Recent DCU releases require the .NET 8 Desktop Runtime (x64) to already be on the machine, or the
+    DCU installer fails or refuses to run. Before installing DCU, this script checks the registered
+    uninstall entries (and, as a secondary check, `dotnet --list-runtimes` if dotnet.exe is on PATH)
+    for a Microsoft Windows Desktop Runtime 8.x (x64) entry, and if none is found, downloads it from
+    Microsoft's own https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe permanent redirector
+    and installs it silently first. -SkipDotNetRuntime opts out of this step.
+
     Dell publishes Dell Command Update as two distinct catalog entries: the classic Win32 desktop
     installer (named "...Application_..." or "...for-Win32_...") and the Windows Universal
     Application (named "...Windows-Universal-Application_..."), a differently packaged UWP-based app.
@@ -646,6 +653,12 @@ $scripts = @(
     scan/apply traffic through, for example http://proxy.example.com:8080. Omit to use the machine's
     default network configuration.
 
+.PARAMETER SkipDotNetRuntime
+    Skip checking for and installing the .NET 8 Desktop Runtime (x64) that newer Dell Command Update
+    installers require. Defaults to not skipping, since DCU needs it present to install or upgrade.
+    Only useful if the runtime is already provisioned some other way, or -DownloadOnly/-ScanOnly is
+    being used and the runtime check itself is undesirable.
+
 .EXAMPLE
     .\tools\Install-DellDrivers.ps1
     Installs Dell Command Update if needed, scans, and applies driver updates without rebooting. Must
@@ -673,6 +686,10 @@ $scripts = @(
     Downloads the Windows Universal Application installer instead of the classic Win32 one, without
     installing or running its CLI. Unverified by this script beyond the download step.
 
+.EXAMPLE
+    .\tools\Install-DellDrivers.ps1 -SkipDotNetRuntime
+    Runs the default behavior but skips the .NET 8 Desktop Runtime (x64) presence check and install.
+
 .NOTES
     dcu-cli.exe installs to either Program Files or Program Files (x86) depending on the DCU version,
     both locations are checked. This is only confirmed for the Win32 variant; whether the Universal
@@ -682,6 +699,13 @@ $scripts = @(
     hardcoded installer URL needs updating. There is no local fallback if Dell changes the catalog's
     schema or file name, since any fallback would have to be a hardcoded installer URL that goes stale
     the same way the old scraped IDs did.
+
+    The .NET 8 Desktop Runtime URL, https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe, is
+    Microsoft's own aka.ms redirector for the latest servicing release of the channel, the same kind
+    of permanent link this script's sibling Windows-ISO-Updater.ps1 already relies on for the Media
+    Creation Tool's go.microsoft.com/fwlink links, so it does not need to be updated as .NET 8 receives
+    further patches. It is unverified against a live network by this edit; confirm it still resolves
+    and consider adding it to tools/Test-Dependencies.ps1.
 #&gt;
 [CmdletBinding()]
 param(
@@ -716,7 +740,10 @@ param(
         }
         $true
     })]
-    [string]$ProxyUrl
+    [string]$ProxyUrl,
+
+    [Parameter(HelpMessage = 'Skip checking for and installing the .NET 8 Desktop Runtime (x64) that newer Dell Command Update installers require. Defaults to not skipping, since DCU needs it present to install or upgrade.')]
+    [switch]$SkipDotNetRuntime
 )
 
 $ErrorActionPreference = 'Stop'
@@ -726,6 +753,9 @@ $ProgressPreference = 'SilentlyContinue'
 $script:UserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 # A static file feed, not the interactive support pages, so it is not behind the Akamai Bot Manager challenge that blocked scraping
 $script:DellCatalogUrl = 'https://downloads.dell.com/catalog/CatalogPC.cab'
+# Microsoft's own permanent redirector for the latest servicing release of a channel, the same kind of
+# aka.ms/go.microsoft.com fwlink this repo already trusts for Fido and the Media Creation Tool
+$script:DotNetRuntimeUrl = 'https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe'
 
 # Splatted onto every Invoke-WebRequest call so -ProxyUrl, when given, is the only place proxy routing is decided
 $script:WebRequestProxyArgs = @{}
@@ -1065,6 +1095,106 @@ function Find-DcuCliPath {
     return $null
 }
 
+# Checks the registered uninstall entries first, that's authoritative for what Windows itself thinks is
+# installed. Both the native and WOW6432Node hives are checked since a 32-bit PowerShell host would only
+# see the 32-bit view even though the runtime itself is x64. `dotnet --list-runtimes` is a secondary check
+# for a host where the runtime arrived bundled with something else and the standalone uninstall entry name
+# looked different than expected.
+function Test-DotNet8DesktopRuntimeInstalled {
+    $UninstallKeyPaths = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )
+    foreach ($KeyPath in $UninstallKeyPaths) {
+        $Match = Get-ItemProperty -Path $KeyPath -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -match '(?i)Microsoft Windows Desktop Runtime\s*-\s*8\..*\(x64\)' } |
+            Select-Object -First 1
+        if ($Match) {
+            return $true
+        }
+    }
+
+    $DotNetCommand = Get-Command -Name 'dotnet.exe' -ErrorAction SilentlyContinue
+    if ($DotNetCommand) {
+        try {
+            $Runtimes = &amp; $DotNetCommand.Source '--list-runtimes' 2&gt;&amp;1
+            if ($LASTEXITCODE -eq 0 -and ($Runtimes -match 'Microsoft\.WindowsDesktop\.App 8\.')) {
+                return $true
+            }
+        }
+        catch {
+        }
+    }
+    return $false
+}
+
+# Downloads and silently installs the .NET 8 Desktop Runtime (x64) that newer DCU installers require.
+# Mirrors Get-DcuInstaller's BITS-with-WebRequest-fallback download, then validates the Authenticode
+# signature the same way Windows-ISO-Updater.ps1 validates the Media Creation Tool, since aka.ms is a
+# redirector, not a guarantee of what's on the other end of it.
+function Install-DotNet8DesktopRuntime {
+    param([string]$DestinationFolder)
+
+    $WorkFolder = Join-Path -Path $DestinationFolder -ChildPath 'DotNetRuntime'
+    New-Item -ItemType Directory -Force -Path $WorkFolder | Out-Null
+    $FileName = $script:DotNetRuntimeUrl.Split('/')[-1]
+    $InstallerFile = Join-Path -Path $WorkFolder -ChildPath $FileName
+
+    Write-Host "  Requesting $($script:DotNetRuntimeUrl)" -ForegroundColor DarkGray
+    try {
+        if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
+            try {
+                $BitsProxyArgs = @{}
+                if ($ProxyUrl) {
+                    $BitsProxyArgs['ProxyUsage'] = 'Override'
+                    $BitsProxyArgs['ProxyList'] = $ProxyUrl
+                }
+                [void](Start-BitsTransfer -Source $script:DotNetRuntimeUrl -Destination $InstallerFile -DisplayName $FileName -ErrorAction Stop @BitsProxyArgs)
+            }
+            catch {
+                Write-Host "  BITS failed, falling back to WebRequest - $($_.Exception.Message)" -ForegroundColor Yellow
+                [void](Invoke-WebRequest -Uri $script:DotNetRuntimeUrl -OutFile $InstallerFile -UseBasicParsing -UserAgent $script:UserAgent @script:WebRequestProxyArgs)
+            }
+        }
+        else {
+            [void](Invoke-WebRequest -Uri $script:DotNetRuntimeUrl -OutFile $InstallerFile -UseBasicParsing -UserAgent $script:UserAgent @script:WebRequestProxyArgs)
+        }
+        Unblock-File -LiteralPath $InstallerFile -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-Host "  Download failed for $($script:DotNetRuntimeUrl) - $($_.Exception.Message)" -ForegroundColor Red
+        if (Test-Path -LiteralPath $InstallerFile) {
+            Remove-Item -LiteralPath $InstallerFile -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath $WorkFolder -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+
+    $Signature = Get-AuthenticodeSignature -LiteralPath $InstallerFile -ErrorAction SilentlyContinue
+    if ($Signature.Status -ne 'Valid' -or $Signature.SignerCertificate.Subject -notmatch '(?i)O=Microsoft Corporation') {
+        Write-Host "  The downloaded .NET Desktop Runtime installer is not validly signed by Microsoft (status: $($Signature.Status)). Discarding it." -ForegroundColor Red
+        Remove-Item -LiteralPath $WorkFolder -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+    Write-Host "  Verified the .NET Desktop Runtime installer's Microsoft signature." -ForegroundColor Green
+
+    Write-Host '  Installing the .NET 8 Desktop Runtime (x64)...' -ForegroundColor Cyan
+    $InstallProcess = Start-Process -FilePath $InstallerFile -ArgumentList '/install', '/quiet', '/norestart' -Wait -PassThru
+    Remove-Item -LiteralPath $WorkFolder -Recurse -Force -ErrorAction SilentlyContinue
+
+    if ($InstallProcess.ExitCode -eq 0) {
+        Write-Host '  Installed successfully' -ForegroundColor Green
+        return $true
+    }
+    if ($InstallProcess.ExitCode -eq 3010) {
+        Write-Host '  Installed successfully (reboot required)' -ForegroundColor Yellow
+        $script:RebootRequired = $true
+        return $true
+    }
+    Write-Host "  Install failed (exit $($InstallProcess.ExitCode)), look up the code in Microsoft's .NET installer documentation" -ForegroundColor Red
+    return $false
+}
+
 # Resolve to an absolute path before any path operations.
 if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
     $OutputPath = Join-Path -Path (Get-Location).Path -ChildPath $OutputPath
@@ -1080,6 +1210,22 @@ if (-not $DownloadOnly) {
     $Manufacturer = (Get-CimInstance -ClassName Win32_ComputerSystem).Manufacturer
     if ($Manufacturer -notmatch 'Dell') {
         Write-Host "Warning: this does not look like a Dell system (Manufacturer reported as '$Manufacturer'). Continuing anyway, since Dell Command Update decides applicability for itself." -ForegroundColor Yellow
+    }
+}
+
+if (-not $DownloadOnly -and -not $SkipDotNetRuntime) {
+    Write-Host 'Checking for the .NET 8 Desktop Runtime (x64), required by newer Dell Command Update installers...' -ForegroundColor Cyan
+    if (Test-DotNet8DesktopRuntimeInstalled) {
+        if (-not $Quiet) {
+            Write-Host '  Already installed' -ForegroundColor DarkGray
+        }
+    }
+    else {
+        Write-Host '  Not found, installing it before Dell Command Update' -ForegroundColor Yellow
+        if (-not (Install-DotNet8DesktopRuntime -DestinationFolder $OutputPath)) {
+            Write-Host "Failed to install the .NET 8 Desktop Runtime (x64). Dell Command Update's installer may refuse to run without it." -ForegroundColor Red
+            exit 1
+        }
     }
 }
 
