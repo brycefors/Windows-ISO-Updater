@@ -633,9 +633,9 @@ $scripts = @(
 
 .PARAMETER DcuVariant
     Which Dell Command Update catalog entry to resolve: Win32 for the classic desktop installer, or
-    Universal for the Windows Universal Application. Defaults to Win32, the variant this script's
-    silent-install switch and dcu-cli.exe discovery have been verified against; the Universal
-    variant's install and CLI behavior are unverified by this script.
+    Universal for the Windows Universal Application. Defaults to Win32. The silent-install switch is
+    confirmed identical for both variants; dcu-cli.exe discovery and CLI behavior after installation
+    have only been verified against Win32, and remain unverified for the Universal variant.
 
 .PARAMETER UpdateType
     Update category passed to dcu-cli.exe's -updateType= argument when applying updates. One of
@@ -684,7 +684,8 @@ $scripts = @(
 .EXAMPLE
     .\tools\Install-DellDrivers.ps1 -DcuVariant Universal -DownloadOnly
     Downloads the Windows Universal Application installer instead of the classic Win32 one, without
-    installing or running its CLI. Unverified by this script beyond the download step.
+    installing or running its CLI. The silent-install switch is confirmed identical to Win32's, but
+    dcu-cli.exe discovery for this variant is unverified by this script beyond the download step.
 
 .EXAMPLE
     .\tools\Install-DellDrivers.ps1 -SkipDotNetRuntime
@@ -718,7 +719,7 @@ param(
     [Parameter(HelpMessage = 'Install DCU if not already present and run dcu-cli.exe /scan to report what is available, but do not apply anything.')]
     [switch]$ScanOnly,
 
-    [Parameter(HelpMessage = "Which Dell Command Update catalog entry to resolve: Win32 for the classic desktop installer, or Universal for the Windows Universal Application. Defaults to Win32, the variant this script's silent-install switch and dcu-cli.exe discovery have been verified against.")]
+    [Parameter(HelpMessage = "Which Dell Command Update catalog entry to resolve: Win32 for the classic desktop installer, or Universal for the Windows Universal Application. Defaults to Win32; the silent-install switch is confirmed identical for both variants, but dcu-cli.exe discovery has only been verified against Win32.")]
     [ValidateSet('Win32', 'Universal')]
     [string]$DcuVariant = 'Universal',
 
@@ -1231,7 +1232,7 @@ if (-not $DownloadOnly -and -not $SkipDotNetRuntime) {
 
 Write-Host 'Resolving the Dell Command Update download URL from the Dell driver catalog...' -ForegroundColor Cyan
 if ($DcuVariant -eq 'Universal') {
-    Write-Host "  Requested variant: Windows Universal Application. This script's silent-install switch and dcu-cli.exe discovery are only verified against the Win32 variant, confirm the installer and CLI behave as expected before relying on this unattended." -ForegroundColor Yellow
+    Write-Host "  Requested variant: Windows Universal Application. The silent-install switch is confirmed identical to the Win32 variant, but dcu-cli.exe discovery is only verified against Win32, confirm the CLI behaves as expected before relying on this unattended." -ForegroundColor Yellow
 }
 $CatalogWorkFolder = Join-Path -Path $OutputPath -ChildPath 'DellCatalog'
 try {
@@ -1280,7 +1281,7 @@ else {
     if ($InstallProcess.ExitCode -eq 0) {
         Write-Host '  Installed successfully' -ForegroundColor Green
     }
-    elseif ($InstallProcess.ExitCode -eq 3010) {
+    elseif ($InstallProcess.ExitCode -in @(2, 3010)) {
         Write-Host '  Installed successfully (reboot required)' -ForegroundColor Yellow
         $script:RebootRequired = $true
     }
