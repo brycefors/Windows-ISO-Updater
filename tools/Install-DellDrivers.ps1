@@ -646,9 +646,6 @@ if (-not $DownloadOnly -and -not $SkipDotNetRuntime) {
 }
 
 Write-Host 'Resolving the Dell Command Update download URL from the Dell driver catalog...' -ForegroundColor Cyan
-if ($DcuVariant -eq 'Universal') {
-    Write-Host "  Requested variant: Windows Universal Application. The silent-install switch is confirmed identical to the Win32 variant, but dcu-cli.exe discovery is only verified against Win32, confirm the CLI behaves as expected before relying on this unattended." -ForegroundColor Yellow
-}
 $CatalogWorkFolder = Join-Path -Path $OutputPath -ChildPath 'DellCatalog'
 try {
     $DownloadUrl = Resolve-DcuDownloadUrl -WorkFolder $CatalogWorkFolder -Variant $DcuVariant
