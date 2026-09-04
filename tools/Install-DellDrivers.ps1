@@ -22,7 +22,10 @@
     installer (named "...Application_..." or "...for-Win32_...") and the Windows Universal
     Application (named "...Windows-Universal-Application_..."), a differently packaged UWP-based app.
     Both names satisfy a loose "Dell Command Update" match, so -DcuVariant decides which one is kept,
-    the other is excluded rather than left to whichever has the higher version number.
+    the other is excluded rather than left to whichever has the higher version number. If the catalog
+    also carries an ARM64/WinARM-specific build, tagged in its name or its SupportedOperatingSystems
+    metadata, that entry is excluded regardless of -DcuVariant unless the host is itself running
+    Windows on ARM64.
 
 .PARAMETER OutputPath
     Folder the DCU installer .exe is downloaded to. Defaults to .\Drivers\DellCommandUpdate in the
@@ -294,6 +297,21 @@ function Get-DellCatalogComponentVersion {
     return $null
 }
 
+# Windows on ARM reports OSArchitecture as "ARM 64-bit Processor"; PROCESSOR_ARCHITECTURE is the
+# environment-variable fallback for the rare case CIM is unavailable
+function Test-HostIsArm64 {
+    $OSArchitecture = $null
+    try {
+        $OSArchitecture = (Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).OSArchitecture
+    }
+    catch {
+    }
+    if ($OSArchitecture -match 'ARM') {
+        return $true
+    }
+    return $env:PROCESSOR_ARCHITECTURE -match 'ARM'
+}
+
 function Resolve-DcuDownloadUrl {
     param(
         [string]$WorkFolder,
@@ -327,6 +345,7 @@ function Resolve-DcuDownloadUrl {
         $BaseProtocol = 'https'
     }
 
+    $HostIsArm64 = Test-HostIsArm64
     $Candidates = New-Object System.Collections.Generic.List[object]
     foreach ($Component in (Select-DellCatalogComponents -Catalog $Catalog)) {
         $Name = Get-DellCatalogDisplayText -Node $Component.Name.Display
@@ -345,6 +364,17 @@ function Resolve-DcuDownloadUrl {
             }
         }
         elseif ($IsUniversal) {
+            continue
+        }
+        # An ARM64/WinARM build, if the catalog ever publishes one, would otherwise win "highest
+        # version wins" against the correct x64/x86 build on a non-ARM host; the name is checked first
+        # since it's the documented tag, SupportedOperatingSystems is a defensive fallback for a
+        # catalog schema this script hasn't observed
+        $IsArmComponent = $Name -match 'ARM64|WinARM'
+        if (-not $IsArmComponent -and $Component.SupportedOperatingSystems) {
+            $IsArmComponent = $Component.SupportedOperatingSystems.InnerXml -match 'ARM64|WinARM'
+        }
+        if ($IsArmComponent -and -not $HostIsArm64) {
             continue
         }
         $Candidates.Add($Component)
