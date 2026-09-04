@@ -45,3 +45,20 @@ Skip Doc Scribe for a pure internal refactor that changes no user-visible behavi
 output, or file layout.
 
 When both are skipped, you are done after the parse check.
+
+## When you cannot dispatch
+
+Nested dispatch is not always available, for example when you were invoked as a subagent yourself. Do
+not silently drop the follow-up and do not substitute an inline test run.
+
+End your summary with an `UNDISPATCHED` block naming each subagent you needed and the full
+self-contained task text you would have sent, so the caller can run it verbatim. A one-line "I could
+not test this" is not enough, the task text is the point.
+
+## Flag external facts you could not verify
+
+You may have no network. Any URL, download endpoint, file hash, or remote schema you introduce or
+change from prior knowledge is unverified, so say so in your summary and name the thing plus how it
+should be checked. Parse remote data defensively, warn and continue on a shape you did not expect
+rather than throwing. Anything pinned this way belongs in `tools/Test-Dependencies.ps1`, so add the
+assertion in the same edit or name it as open work.

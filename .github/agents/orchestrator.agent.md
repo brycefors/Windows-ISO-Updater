@@ -33,7 +33,9 @@ scope, and what you want back. Do not paste repository rules into it, subagents 
 ## Never do these, they cost a full context and buy nothing
 
 - **Do not call PS51 Harness or Doc Scribe alongside a Script Surgeon task.** Script Surgeon decides
-  and dispatches both itself, in parallel, and it has the diff you do not.
+  and dispatches both itself, in parallel, and it has the diff you do not. The one exception is an
+  `UNDISPATCHED` block in its summary, which means nesting was unavailable to it. Send each task in
+  that block on verbatim, in one parallel batch, before you report.
 - **Do not call Codebase Architect for a change whose files are already obvious.** It spawns Explore
   agents and returns a plan, so it is the slowest path in the system. Use it only when "which
   functions does this touch" is genuinely unknown, or the change is high-risk.
@@ -71,4 +73,5 @@ No single-domain agent can see these, so they are yours.
    Codebase Architect first only when the gate above says it earns its turn.
 3. **Report the outcome,** since the user sees your summary and not the transcripts. Name the files
    changed, the pass and fail counts from any harness run, and anything still open. Surface a
-   subagent failure you could not resolve rather than smoothing it over.
+   subagent failure you could not resolve rather than smoothing it over. Carry forward any external
+   fact a subagent reported as unverified, naming what still needs a live check.

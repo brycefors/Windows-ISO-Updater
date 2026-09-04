@@ -597,11 +597,17 @@ $scripts = @(
     Discovery downloads https://downloads.dell.com/catalog/CatalogPC.cab, a cabinet file containing
     CatalogPC.xml, which lists every BIOS, firmware, driver and application update Dell publishes for
     its client systems, including Dell Command Update itself as an application entry. The CAB is
-    expanded with expand.exe, the XML is searched for the Dell Command Update entry, and the
-    highest-versioned match's path is turned into a download URL. This replaced scraping the
-    interactive https://www.dell.com/support/... pages, which sit behind Akamai Bot Manager and
-    rejected every request no matter what headers or cookies were replayed. The catalog is a static
-    file download and is not gated the same way.
+    expanded with expand.exe, the XML is searched for the Dell Command Update entry matching
+    -DcuVariant, and the highest-versioned match's path is turned into a download URL. This replaced
+    scraping the interactive https://www.dell.com/support/... pages, which sit behind Akamai Bot
+    Manager and rejected every request no matter what headers or cookies were replayed. The catalog
+    is a static file download and is not gated the same way.
+
+    Dell publishes Dell Command Update as two distinct catalog entries: the classic Win32 desktop
+    installer (named "...Application_..." or "...for-Win32_...") and the Windows Universal
+    Application (named "...Windows-Universal-Application_..."), a differently packaged UWP-based app.
+    Both names satisfy a loose "Dell Command Update" match, so -DcuVariant decides which one is kept,
+    the other is excluded rather than left to whichever has the higher version number.
 
 .PARAMETER OutputPath
     Folder the DCU installer .exe is downloaded to. Defaults to .\Drivers\DellCommandUpdate in the
@@ -614,6 +620,12 @@ $scripts = @(
 .PARAMETER ScanOnly
     Install DCU if not already present and run dcu-cli.exe /scan to report what is available, but do
     not apply anything.
+
+.PARAMETER DcuVariant
+    Which Dell Command Update catalog entry to resolve: Win32 for the classic desktop installer, or
+    Universal for the Windows Universal Application. Defaults to Win32, the variant this script's
+    silent-install switch and dcu-cli.exe discovery have been verified against; the Universal
+    variant's install and CLI behavior are unverified by this script.
 
 .PARAMETER UpdateType
     Update category passed to dcu-cli.exe's -updateType= argument when applying updates. One of
@@ -653,9 +665,15 @@ $scripts = @(
     Runs the default behavior with all outbound traffic, including Dell Command Update's own
     scan/apply calls, routed through the given proxy.
 
+.EXAMPLE
+    .\tools\Install-DellDrivers.ps1 -DcuVariant Universal -DownloadOnly
+    Downloads the Windows Universal Application installer instead of the classic Win32 one, without
+    installing or running its CLI. Unverified by this script beyond the download step.
+
 .NOTES
     dcu-cli.exe installs to either Program Files or Program Files (x86) depending on the DCU version,
-    both locations are checked.
+    both locations are checked. This is only confirmed for the Win32 variant; whether the Universal
+    variant installs a compatible dcu-cli.exe at all is unverified.
 
     Driver ID and download link are discovered at runtime from Dell's CatalogPC.cab feed so no
     hardcoded installer URL needs updating. There is no local fallback if Dell changes the catalog's
@@ -672,6 +690,10 @@ param(
 
     [Parameter(HelpMessage = 'Install DCU if not already present and run dcu-cli.exe /scan to report what is available, but do not apply anything.')]
     [switch]$ScanOnly,
+
+    [Parameter(HelpMessage = "Which Dell Command Update catalog entry to resolve: Win32 for the classic desktop installer, or Universal for the Windows Universal Application. Defaults to Win32, the variant this script's silent-install switch and dcu-cli.exe discovery have been verified against.")]
+    [ValidateSet('Win32', 'Universal')]
+    [string]$DcuVariant = 'Win32',
 
     [Parameter(HelpMessage = "Update category passed to dcu-cli.exe's -updateType= argument when applying updates. Defaults to driver.")]
     [ValidateSet('bios', 'firmware', 'driver', 'application', 'others')]
@@ -759,16 +781,27 @@ function Expand-DellCatalogCab {
     )
 
     New-Item -ItemType Directory -Force -Path $DestinationFolder | Out-Null
-    # PS 5.1 has no native CAB cmdlet; expand.exe is the same tool Windows-ISO-Updater.ps1 uses for LCU/SSU cabs
-    &amp; "$env:SystemRoot\System32\expand.exe" "$CabPath" '-F:*' "$DestinationFolder" | Out-Null
+    Write-Verbose "Expanding $CabPath into $DestinationFolder"
+    # PS 5.1 has no native CAB cmdlet; expand.exe is the same tool Windows-ISO-Updater.ps1 uses for LCU/SSU cabs.
+    # Without -R, expand.exe silently writes the extracted content under the SOURCE cab's own name (e.g.
+    # catalogpc.cab) instead of the file's real stored name (CatalogPC.xml), so extraction exits 0 but the
+    # later *.xml search finds nothing. -R restores the stored name. Confirmed locally with makecab.exe: the
+    # -F:*.* wildcard shape tried previously was never the problem, only the missing -R was.
+    $ExpandOutput = &amp; "$env:SystemRoot\System32\expand.exe" '-R' "$CabPath" '-F:*.*' "$DestinationFolder" 2&gt;&amp;1
+    $ExpandOutputText = $ExpandOutput | Out-String
+    Write-Verbose $ExpandOutputText
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  expand.exe returned $LASTEXITCODE while extracting the Dell driver catalog" -ForegroundColor Red
+        Write-Warning "expand.exe output: $ExpandOutputText"
         return $null
     }
 
     $XmlFile = Get-ChildItem -LiteralPath $DestinationFolder -Filter '*.xml' -File -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $XmlFile) {
+        $ExtractedNames = (Get-ChildItem -LiteralPath $DestinationFolder -File -ErrorAction SilentlyContinue).Name -join ', '
         Write-Host '  Warning: no XML file found inside the Dell driver catalog CAB.' -ForegroundColor Yellow
+        Write-Warning "expand.exe output: $ExpandOutputText"
+        Write-Warning "Files present in $DestinationFolder after expand: $ExtractedNames"
         return $null
     }
     return $XmlFile.FullName
@@ -812,8 +845,46 @@ function Select-DellCatalogComponents {
     return $Catalog.SelectNodes('//SoftwareComponent')
 }
 
+# dellVersion/vendorVersion are normally a plain three- or four-part version, but a renamed or
+# re-released catalog entry that carries something non-numeric there (or omits both) should still
+# resolve from the release filename in &lt;path&gt;, which Dell's naming convention always sandwiches
+# between the product code and the A-release suffix
+function Get-DellCatalogComponentVersion {
+    param($Component)
+
+    foreach ($VersionText in @($Component.dellVersion, $Component.vendorVersion)) {
+        if (-not $VersionText) {
+            continue
+        }
+        try {
+            return [Version]$VersionText
+        }
+        catch {
+            if ($VersionText -match '(\d+(?:\.\d+){1,3})') {
+                try {
+                    return [Version]$Matches[1]
+                }
+                catch {
+                }
+            }
+        }
+    }
+    if ($Component.path -match '_(\d+\.\d+\.\d+)_') {
+        try {
+            return [Version]$Matches[1]
+        }
+        catch {
+        }
+    }
+    return $null
+}
+
 function Resolve-DcuDownloadUrl {
-    param([string]$WorkFolder)
+    param(
+        [string]$WorkFolder,
+        [ValidateSet('Win32', 'Universal')]
+        [string]$Variant = 'Win32'
+    )
 
     $CabPath = Get-DellCatalogCab -DestinationFolder $WorkFolder
     if (-not $CabPath) {
@@ -844,27 +915,38 @@ function Resolve-DcuDownloadUrl {
     $Candidates = New-Object System.Collections.Generic.List[object]
     foreach ($Component in (Select-DellCatalogComponents -Catalog $Catalog)) {
         $Name = Get-DellCatalogDisplayText -Node $Component.Name.Display
-        if ($Name -match 'Dell\s+Command.*Update') {
-            $Candidates.Add($Component)
+        # Dell has renamed this entry before (Application -&gt; for-Win32); match the stable "Dell Command
+        # Update" phrase loosely so a naming variant that swaps spaces for hyphens still matches
+        if ($Name -notmatch 'Dell[\s-]+Command.*Update') {
+            continue
         }
+        # The family regex above also matches the Windows Universal Application entry, a differently
+        # packaged product, not a rename of the Win32 installer, so it has to be explicitly included or
+        # excluded here rather than left to whichever entry happens to have the higher version number
+        $IsUniversal = $Name -match 'Universal'
+        if ($Variant -eq 'Universal') {
+            if (-not $IsUniversal) {
+                continue
+            }
+        }
+        elseif ($IsUniversal) {
+            continue
+        }
+        $Candidates.Add($Component)
     }
 
     if ($Candidates.Count -eq 0) {
-        Write-Host "  Warning: no 'Dell Command | Update' entry found in the Dell driver catalog. Dell may have changed the catalog's schema or file name." -ForegroundColor Yellow
+        Write-Host "  Warning: no 'Dell Command | Update' ($Variant) entry found in the Dell driver catalog. Dell may have changed the catalog's schema or file name, or no longer publishes the $Variant variant." -ForegroundColor Yellow
         return $null
     }
 
     $Best = $null
     $BestVersion = $null
     foreach ($Component in $Candidates) {
-        $VersionText = $Component.dellVersion
-        if (-not $VersionText) {
-            $VersionText = $Component.vendorVersion
-        }
-        try {
-            $Ver = [Version]$VersionText
-        }
-        catch {
+        $Ver = Get-DellCatalogComponentVersion -Component $Component
+        if ($null -eq $Ver) {
+            $ComponentName = Get-DellCatalogDisplayText -Node $Component.Name.Display
+            Write-Host "  Warning: could not read a version from catalog entry '$ComponentName', skipping it for version comparison." -ForegroundColor Yellow
             continue
         }
         if ($null -eq $BestVersion -or $Ver -gt $BestVersion) {
@@ -972,9 +1054,12 @@ if (-not $DownloadOnly) {
 }
 
 Write-Host 'Resolving the Dell Command Update download URL from the Dell driver catalog...' -ForegroundColor Cyan
+if ($DcuVariant -eq 'Universal') {
+    Write-Host "  Requested variant: Windows Universal Application. This script's silent-install switch and dcu-cli.exe discovery are only verified against the Win32 variant, confirm the installer and CLI behave as expected before relying on this unattended." -ForegroundColor Yellow
+}
 $CatalogWorkFolder = Join-Path -Path $OutputPath -ChildPath 'DellCatalog'
 try {
-    $DownloadUrl = Resolve-DcuDownloadUrl -WorkFolder $CatalogWorkFolder
+    $DownloadUrl = Resolve-DcuDownloadUrl -WorkFolder $CatalogWorkFolder -Variant $DcuVariant
 }
 finally {
     # The catalog CAB and its expanded XML are working files only, not something worth keeping around next to the installer
