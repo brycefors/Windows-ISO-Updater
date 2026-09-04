@@ -750,7 +750,8 @@ if ($ScanOnly) {
 
 $RebootArg = if ($AllowReboot) { '-reboot=enable' } else { '-reboot=disable' }
 Write-Host "Applying updates ($UpdateType, $RebootArg)..." -ForegroundColor Cyan
-$ApplyOutput = & $DcuCliPath /applyUpdates -silent "-updateType=$UpdateType" $RebootArg 2>&1 | Out-String
+# BIOS/firmware updates trip BitLocker recovery on reboot unless DCU suspends protection first
+$ApplyOutput = & $DcuCliPath /applyUpdates -silent "-updateType=$UpdateType" $RebootArg '-autoSuspendBitLocker=enable' 2>&1 | Out-String
 $ApplyExitCode = $LASTEXITCODE
 Write-Host $ApplyOutput.Trim()
 
