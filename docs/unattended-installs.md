@@ -1,4 +1,4 @@
-[← Back to the README](../README.md)
+[← Back to README](../README.md)
 
 # Unattended Installs
 
@@ -18,6 +18,9 @@ The script validates that the file exists and is well-formed XML before starting
 > - **Secrets.** Answer files store passwords in plain text or base64 and product keys in the clear. Anyone who can read the ISO can recover them, so treat the finished ISO as a secret and don't commit the answer file to source control.
 
 Three of the files in [`Examples/`](../Examples) are built around this workflow. [`autounattend-lab-admin.xml`](../Examples/autounattend-lab-admin.xml) and [`autounattend-gold-image.xml`](../Examples/autounattend-gold-image.xml) are a matched pair: one deploys a ready-to-use machine, the other builds an image to deploy *from*. [`autounattend-ultimate.xml`](../Examples/autounattend-ultimate.xml) is a more automated variant of the lab machine file, with the disk-wipe confirmation removed and driver installation dispatched by manufacturer. All three were produced with [schneegans.de/windows/unattend-generator](https://schneegans.de/windows/unattend-generator/) and then **hand edited**, and a comment at the top of each records exactly what was changed and why. The generator URL preserved alongside them reproduces the original options only, so regenerating from it discards the manual changes.
+
+> [!WARNING]
+> These example answer files are experimental and may not work on every Windows release or hardware configuration. Test them on disposable machines before using them elsewhere.
 
 ## Example: lab machine with no OOBE
 
@@ -149,4 +152,4 @@ The log is at `C:\Windows\Setup\Scripts\Install-ModelDrivers.log`. `C:\Drivers\`
 
 The `$OEM$` folder lives in the ISO file structure outside the WIM. Adding or updating model folders does not affect any WIM content, so you can re-populate `$OEM$` and rebuild the ISO without re-servicing the images. The rebuild-avoidance stamp is not affected.
 
-[← Back to the README](../README.md)
+[← Back to README](../README.md)
