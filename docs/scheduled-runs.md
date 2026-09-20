@@ -131,3 +131,66 @@ makes them compete for the same slots.
 :: Keep the last five generated ISOs instead of three
 .\Run-Windows-ISO-Updater.bat -Scheduled -AutoClean -KeepIsoCount 5
 ```
+
+## Injecting Drivers on a Schedule
+
+If you already have a fully patched ISO on disk and want to refresh drivers on a schedule without
+re-downloading and re-integrating Windows updates every time, combine `-SkipUpdates` and `-DriverPath`
+in your scheduled task registration. The Microsoft Update Catalog check is skipped entirely, so the run
+completes in a few minutes instead of an hour.
+
+**How the stamp handles drivers**
+
+The entire contents of the `-DriverPath` folder (every `.inf` file and supporting files, searched
+recursively) are hashed and included in the build stamp. If you download and extract a newer driver
+package into the folder, the content hash changes, and the next scheduled run detects this and rebuilds,
+even though the source ISO and Windows updates are unchanged. This means once you register the task, you
+only need to refresh the driver files in the folder, and the schedule takes care of the rest.
+
+**Example: VMware Tools drivers, injected monthly**
+
+Register a task that injects VMware Tools drivers into an already-patched Windows 11 ISO:
+
+```shell
+.\Run-Windows-ISO-Updater.bat -RegisterScheduledTask ^
+  -IsoPath "C:\ISOs\Win11_25H2_x64.iso" ^
+  -SkipUpdates ^
+  -DriverPath "D:\Drivers\VMware-Tools" ^
+  -Schedule Monthly ^
+  -ScheduleDay 1 ^
+  -ScheduleTime 02:00 ^
+  -AutoClean
+```
+
+The task runs on the 1st of each month at 02:00. Each time it runs:
+
+* If the driver folder contents have not changed since the last build, the stamp matches and the run exits
+  in 1-2 minutes with no rebuild.
+* If you have downloaded and extracted a newer VMware Tools driver package into `D:\Drivers\VMware-Tools`
+  between runs, the content hash differs and a rebuild is triggered.
+* If the source ISO is replaced with a newer one at the same path, that too is detected and triggers a rebuild.
+
+**The role of `-SkipUpdates`**
+
+`-SkipUpdates` tells the script to skip checking the Microsoft Update Catalog and downloading/integrating
+any updates. Without it, the task would check for new cumulative updates every run, which is fine if you
+want the ISO to stay current with both updates and drivers, but wastes time if the ISO is already at the
+patch level you want and you only care about drivers. With `-SkipUpdates` in effect, the only rebuild
+trigger is a change to the driver folder, the source ISO, or a parameter you explicitly alter.
+
+**Adding `-AllowUnsignedDrivers` for self-signed drivers**
+
+If your driver package includes unsigned or self-signed drivers that DISM would normally reject, add
+`-AllowUnsignedDrivers` to the registration command. Keep in mind that 64-bit Windows itself still refuses
+to load an unsigned kernel driver at boot unless test signing is enabled on the target machine, so this
+flag only affects what DISM accepts during the build. See [Adding Drivers](usage.md#adding-drivers) for
+more detail on driver extraction and requirements.
+
+**A gotcha with very old media**
+
+On media older than Windows 10 (build 10240) and Windows Server 2016, DISM cannot mount or service the
+images. If you try to use `-DriverPath` against such media, even with `-SkipUpdates`, the task still fails
+because driver injection requires the images to be mounted. For pre-Windows 10 media, `-SkipUpdates` alone
+(without `-DriverPath`) repacks the ISO unchanged.
+
+[← Back to README](../README.md)
