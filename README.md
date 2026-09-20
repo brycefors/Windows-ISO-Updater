@@ -72,3 +72,7 @@ This is a **disk- and time-intensive** operation, and with the default parameter
 - An internet connection (unless you supply both the ISO with `-IsoPath` and updates with `-UpdatePath`).
 - **`oscdimg.exe`**, downloaded automatically from Microsoft if it is not already present (or installed with the ADK via `-InstallAdk`).
 - Plenty of free disk space on a **local** working drive, as covered in [Disk Space Requirements](docs/reference.md#disk-space-requirements).
+
+## License
+
+Released under the [MIT License](LICENSE). Nothing third-party is redistributed here: `oscdimg.exe`, Fido and the Microsoft updates are all fetched from their own sources at run time and keep their own licenses, and the Windows media itself stays subject to your Microsoft license terms.
