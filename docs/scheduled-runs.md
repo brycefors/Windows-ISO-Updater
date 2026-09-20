@@ -13,7 +13,7 @@ That makes it safe to schedule the script as often as you like. Hourly is fine.
 
 ```shell
 :: Monthly, on the 15th at 03:00 - the default
-.\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -AutoClean -IsoPath "C:\ISOs\Win11_24H2.iso"
+.\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -AutoClean -IsoPath "C:\ISOs\Win11_25H2.iso"
 
 :: Second Tuesday of every month, half an hour after Microsoft publishes - i.e. Patch Tuesday itself
 .\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -Schedule PatchTuesday -AutoClean
@@ -74,7 +74,7 @@ Each stamp holds:
 | Section | Contents |
 |---|---|
 | `Source` | The source ISO's path, size, write time and **SHA-256**. |
-| `Image` | The build, UBR, feature update (e.g. `24H2`) and architecture read out of the image. |
+| `Image` | The build, UBR, feature update (e.g. `25H2`) and architecture read out of the image. |
 | `Updates.Catalog` | What the Microsoft Update Catalog was offering at build time, as `Role=KB@date` (e.g. `LCU=KB5065426@2026-08-12`). |
 | `Updates.Files` | Every package that was integrated: file name, KB, size and SHA-256. |
 | `Output` | The finished ISO's path, size, editions and SHA-256. |

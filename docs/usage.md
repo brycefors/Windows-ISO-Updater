@@ -45,7 +45,7 @@ Licensing Service Center, or a Visual Studio subscription first.
 A few differences worth knowing:
 
 - The release is read from the image, so there is no `-Release` to set. Server 2022 and newer are listed
-  in the Microsoft Update Catalog as *"Microsoft server operating system version 21H2/23H2/24H2"* rather
+  in the Microsoft Update Catalog as *"Microsoft server operating system version 21H2/23H2/25H2"* rather
   than by year, and the script builds the right query for you.
 - Server media keeps a **single** edition by default, not the up to three tiers that client media keeps, and
   the pick is **Standard (Desktop Experience)**, not Datacenter. An installed Standard server can be upgraded
@@ -93,7 +93,7 @@ two versions share it:
 
 | Folder | Effect of sharing it |
 |---|---|
-| `Downloads` | **The worst one.** With no `-IsoPath`, the script reuses the largest `.iso` over 3 GB it finds here, and it does **not** check which Windows version that ISO is. A Windows 10 ISO left in the folder is picked up by a Windows 11 run. Split it with `-DownloadPath`, or always pass `-IsoPath`. |
+| `Downloads` | **The worst one.** With no `-IsoPath`, the script reuses the most recently modified `.iso` over 3 GB it finds here (or the largest with `-UseLargestIso`), and it does **not** check which Windows version that ISO is. A Windows 10 ISO left in the folder is picked up by a Windows 11 run. Split it with `-DownloadPath`, or always pass `-IsoPath`. |
 | `Stamps` | There is one `last-build.json` per stamp folder. Alternating versions overwrite each other's record, so every run decides it must rebuild and `-CheckOnly` always reports a rebuild is needed. Split it with `-StampPath`. |
 | `Downloads` (update packages) | `-AutoClean` deletes the `.msu`/`.cab` files recorded in stamp history that the newest build no longer uses, so it deletes the other version's cumulative update. Splitting `-DownloadPath` and `-StampPath` fixes this too. |
 | `Output` | Safe. Finished ISO names carry the version (`Win11_`, `Win10_`, `Server2025_`), so they coexist. Note that `-AutoClean` keeps the newest `-KeepIsoCount` (default 3) across **all** versions combined, not per version. |
@@ -113,11 +113,11 @@ times far enough apart that a build cannot still be going, or an hour or two apa
 ### A shared ISO library
 
 If you keep source ISOs in one place, point `-IsoPath` at the specific file rather than sharing a download
-folder. `-IsoPath` also accepts a folder, but it picks the largest ISO inside it, which is the same trap as
-a shared `Downloads` folder.
+folder. `-IsoPath` also accepts a folder, but it picks the most recently modified ISO inside it by default
+(or the largest with `-UseLargestIso`), which is the same trap as a shared `Downloads` folder.
 
 ```shell
-.\Run-Windows-ISO-Updater.bat -IsoPath "\\nas\isos\Win11_24H2.iso" -WorkPath "D:\WISO\Win11"
+.\Run-Windows-ISO-Updater.bat -IsoPath "\\nas\isos\Win11_25H2.iso" -WorkPath "D:\WISO\Win11"
 ```
 
 A source ISO on a network share or a cloud-synced folder is copied into the download folder first, so the

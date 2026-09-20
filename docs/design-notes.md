@@ -47,7 +47,7 @@ Making the download opt-in also keeps third-party code out of a default run. Fid
 **Download the ISO once, keep it, and point every build at it.** Get it from [microsoft.com/software-download](https://www.microsoft.com/software-download), the Media Creation Tool, the Microsoft Evaluation Center, your Volume Licensing Service Center or a Visual Studio subscription:
 
 ```shell
-.\Run-Windows-ISO-Updater.bat -IsoPath "D:\ISOs\Win11_24H2_original.iso"
+.\Run-Windows-ISO-Updater.bat -IsoPath "D:\ISOs\Win11_25H2_original.iso"
 ```
 
 That is faster on every run after the first, it does not depend on Microsoft's mood, and it is the only option for Windows Server media, which neither Fido nor MCT serves at all.
@@ -72,7 +72,7 @@ So the worst case is a few wasted minutes on a confirmation mount, and the updat
 
 ## How a New Windows Release Is Recognised
 
-Every Update Catalog query the script makes is built around a release name, for example `Cumulative Update for Windows 11 Version 24H2 for x64-based Systems`. Nothing in the WIM header carries that name, only a build number, so the two have to be connected somehow.
+Every Update Catalog query the script makes is built around a release name, for example `Cumulative Update for Windows 11 Version 25H2 for x64-based Systems`. Nothing in the WIM header carries that name, only a build number, so the two have to be connected somehow.
 
 A lookup table covers the builds that existed when the script was last touched. That is fast and works offline, but on its own it would rot: when 26H2 or 27H2 ships, its build is not in the table, the version token drops out of the query, and the search widens to every Windows 11 release at once. Since several releases are serviced in parallel and their updates all publish on the same Patch Tuesday, the "newest" result is then effectively arbitrary. The update would download, DISM would reject it as not applicable, and the run would finish with a bootable but unpatched ISO.
 
@@ -135,7 +135,7 @@ The intended setup is a pristine ISO kept somewhere permanent, with its own work
 
 ```shell
 .\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -Schedule PatchTuesday -AutoClean ^
-  -IsoPath "D:\ISOs\Win11_24H2_original.iso" -WorkPath "D:\WISO\Win11"
+  -IsoPath "D:\ISOs\Win11_25H2_original.iso" -WorkPath "D:\WISO\Win11"
 ```
 
 `-AutoClean` prunes old outputs and superseded update packages on its own, and because it only deletes files a stamp recorded, the source ISO is never touched.
@@ -177,7 +177,7 @@ None of those came out of a prompt. They came out of having been bitten before, 
 
 ## Offline Servicing and Hot-Patch Eligibility
 
-Windows 11 24H2 Enterprise supports hot-patching through Intune or Azure Arc on a quarterly cadence. Months 1 and 4 of each quarter require a full cumulative update baseline. Months 2 and 3 receive lightweight in-memory hot patches that do not rewrite image files on disk.
+Windows 11 25H2 Enterprise supports hot-patching through Intune or Azure Arc on a quarterly cadence. Months 1 and 4 of each quarter require a full cumulative update baseline. Months 2 and 3 receive lightweight in-memory hot patches that do not rewrite image files on disk.
 
 Hotpatch updates cannot be applied offline via DISM at all. A regular cumulative update replaces binaries on disk, which is exactly what DISM's offline package injection does. A hotpatch instead modifies already-loaded code in the running kernel's address space and has no files to swap into a WIM image, so there is nothing for DISM to inject. The intended workflow is to offline-service the ISO with the baseline CU using `-BaselineOnly`, deploy the image, enroll the device in Intune or Azure Arc hotpatch policy, and let Windows Update deliver the in-quarter hotpatches to the live system at runtime.
 

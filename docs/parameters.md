@@ -7,10 +7,11 @@ The script supports the following optional parameters:
 | Parameter | Description |
 |---|---|
 | `-Unattended` | Runs the script without any confirmation prompts. |
-| `-IsoPath` | Path to an existing Windows ISO to update instead of downloading one from Microsoft. May also be a **folder**, in which case the largest `.iso` over 3 GB directly inside it is used. That search is **not recursive**, so an ISO in a subfolder is not found. Omit the parameter entirely and the same rule is applied to the download folder. An ISO on a cloud-synced or network path is copied to the download folder first. |
+| `-IsoPath` | Path to an existing Windows ISO to update instead of downloading one from Microsoft. May also be a **folder**, in which case the most recently modified `.iso` over 3 GB directly inside it is used by default. That search is **not recursive**, so an ISO in a subfolder is not found. Omit the parameter entirely and the same rule is applied to the download folder. An ISO on a cloud-synced or network path is copied to the download folder first. |
+| `-UseLargestIso` | When `-IsoPath` (or the download folder) is a directory holding more than one `.iso`, pick the largest one instead of the most recently modified one. |
 | `-WindowsVersion` | Windows version to download/update: `10` or `11`. Defaults to `11`. |
 | `-Server` | Service **Windows Server** media (2016 through 2025) instead of a client ISO. Server ISOs cannot be downloaded automatically, so supply one with `-IsoPath` or drop it into the download folder. `-WindowsVersion`, `-Release` and `-Language` are then ignored, and the catalog is searched for the Server cumulative update instead of the client one. A mismatch is fatal both ways round: passing this against client media, or omitting it against Server media, stops the run. |
-| `-Release` | Fido release to request (e.g. `24H2`, `23H2`) or `Latest`. Defaults to `Latest`. |
+| `-Release` | Fido release to request (e.g. `25H2`, `24H2`) or `Latest`. Defaults to `Latest`. |
 | `-Language` | ISO language as named by Microsoft/Fido (e.g. `English`, `"English International"`). Defaults to `English`. |
 | `-Edition` | Which edition inside `install.wim` to service: `All` (default) or an edition name like `"Windows 11 Pro"`. |
 | `-KeepEditions` | Editions to **keep** in the final ISO, removing the rest to slim it down. Accepts edition names (partial matches allowed) or index numbers, comma-separated. Overrides the default of keeping Enterprise, Pro and Home. |
@@ -20,7 +21,7 @@ The script supports the following optional parameters:
 | `-SkipDotNet` | Skip the **.NET cumulative update**. The .NET update is downloaded and integrated **by default**, so use this switch to leave it out. |
 | `-SkipSetupDU` | Skip the **Setup Dynamic Update**, which refreshes the loose Windows Setup files in the media's `sources` folder. It is applied **by default**. Without it the Windows 11 24H2+ Setup engine can fail with *"Windows 11 installation has failed"*. |
 | `-ServiceWinRE` | Also service the recovery image (`winre.wim`). Off by default. The Safe OS Dynamic Update is used when available. |
-| `-BaselineOnly` | Skips the cumulative update in hotpatch non-baseline months (February, March, May, June, August, September, November, December). In baseline months (January, April, July, October) the cumulative update is integrated normally. Use only for Windows 11 Enterprise 24H2 media enrolled in Intune or Azure Arc hotpatch - on Home or Pro media this would leave the ISO underpatched in non-baseline months. |
+| `-BaselineOnly` | Skips the cumulative update in hotpatch non-baseline months (February, March, May, June, August, September, November, December). In baseline months (January, April, July, October) the cumulative update is integrated normally. Use only for Windows 11 Enterprise 25H2 media enrolled in Intune or Azure Arc hotpatch - on Home or Pro media this would leave the ISO underpatched in non-baseline months. |
 | `-SkipUpdates` | Skip update integration entirely and just extract and recompile the ISO. |
 | `-SkipServicing` | Extracts the ISO and recompiles it without applying any updates, drivers, or WIM servicing. Off by default. Combine with `-UnattendPath` or `-ExtraFilesPath` to inject files into the extracted layout before the ISO is repacked. |
 | `-CompressEsd` | Export the finished image as `install.esd` (LZMS "recovery" compression) instead of `install.wim`. Typically **25-40% smaller**, which can bring the image under the 4 GB FAT32 limit for UEFI USB sticks, but the export is slow and the finished media cannot be serviced again without converting it back. |
@@ -77,3 +78,5 @@ See [Scheduled Runs](scheduled-runs.md) for how these fit together.
 | `-TaskName` | Name of the scheduled task to create or delete. Defaults to `Windows ISO Updater`. |
 | `-TaskUsername` | Username of the account to run the scheduled task as (e.g. `DOMAIN\SvcAccount`). Defaults to `SYSTEM` when omitted. |
 | `-TaskPassword` | Password for the `-TaskUsername` account. Not stored in the task action arguments or written to logs. When the script self-elevates via UAC, the elevated process prompts for the password interactively rather than reading it from the command line. For non-interactive use with `-TaskUsername`, start the script already elevated so no re-elevation occurs. |
+
+[← Back to README](../README.md)

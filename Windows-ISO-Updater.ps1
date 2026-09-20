@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.08.31.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.19.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -22,7 +22,7 @@
 #      yourself. Either way there is no automatic download for -Server, because neither source serves
 #      Windows Server media.
 #   2. Extracts the ISO to a writable working folder.
-#   3. Detects the Windows feature-update (e.g. 24H2) and architecture from the image, then downloads the
+#   3. Detects the Windows feature-update (e.g. 25H2) and architecture from the image, then downloads the
 #      latest combined Servicing Stack + Cumulative Update (LCU) - and the .NET cumulative update
 #      (on by default, disable with -SkipDotNet) - from the Microsoft Update Catalog. You may
 #      instead point at your own .msu/.cab files with -UpdatePath.
@@ -71,8 +71,11 @@ param(
     [Parameter(HelpMessage = 'Runs the script without any confirmation prompts')]
     [switch]$Unattended,
 
-    [Parameter(HelpMessage = 'Path to an existing Windows ISO to update instead of downloading one from Microsoft. May also be a folder, in which case the largest .iso over 3 GB directly inside it is used (the search is not recursive)')]
+    [Parameter(HelpMessage = 'Path to an existing Windows ISO to update instead of downloading one from Microsoft. May also be a folder, in which case the most recently modified .iso over 3 GB directly inside it is used by default (the search is not recursive); see -UseLargestIso to pick by size instead')]
     [string]$IsoPath,
+
+    [Parameter(HelpMessage = 'When -IsoPath (or the download folder) is a directory holding more than one .iso, pick the largest .iso over 3 GB instead of the most recently modified one')]
+    [switch]$UseLargestIso,
 
     [Parameter(HelpMessage = 'Windows version to download/update: 10 or 11. Defaults to 11')]
     [ValidateSet('10', '11')]
@@ -81,7 +84,7 @@ param(
     [Parameter(HelpMessage = 'Service Windows Server media (2016 through 2025) instead of a client ISO. Server ISOs cannot be downloaded automatically, so supply one with -IsoPath or drop it into the download folder. -WindowsVersion, -Release and -Language are then ignored')]
     [switch]$Server,
 
-    [Parameter(HelpMessage = 'Fido release to request (e.g. 24H2, 23H2) or "Latest". Defaults to Latest')]
+    [Parameter(HelpMessage = 'Fido release to request (e.g. 25H2, 24H2) or "Latest". Defaults to Latest')]
     [string]$Release = 'Latest',
 
     [Parameter(HelpMessage = 'ISO language as named by Microsoft/Fido (e.g. English, "English International"). Defaults to English')]
@@ -111,7 +114,7 @@ param(
     [Parameter(HelpMessage = 'Also service the recovery image (winre.wim). Off by default. The correct component for WinRE is the Safe OS Dynamic Update, which is fetched when available')]
     [switch]$ServiceWinRE,
 
-    [Parameter(HelpMessage = 'Skip the cumulative update in hotpatch non-baseline months (February, March, May, June, August, September, November, December). Use only for Windows 11 Enterprise 24H2 media enrolled in Intune or Azure Arc hotpatch. In baseline months (January, April, July, October) the cumulative update is integrated normally.')]
+    [Parameter(HelpMessage = 'Skip the cumulative update in hotpatch non-baseline months (February, March, May, June, August, September, November, December). Use only for Windows 11 Enterprise 25H2 media enrolled in Intune or Azure Arc hotpatch. In baseline months (January, April, July, October) the cumulative update is integrated normally.')]
     [switch]$BaselineOnly,
 
     [Parameter(HelpMessage = 'Skip integrating updates entirely and simply extract and recompile the ISO (useful for testing the build pipeline)')]
@@ -276,7 +279,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.08.31.1'
+$ScriptVersion = '2026.09.19.1'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -861,7 +864,7 @@ function Test-FidoScript {
 function Get-WindowsIsoUrl {
     param(
         [Parameter(Mandatory)][string]$Version,       # 10 or 11
-        [Parameter(Mandatory)][string]$Release,        # e.g. Latest, 24H2
+        [Parameter(Mandatory)][string]$Release,        # e.g. Latest, 25H2
         [Parameter(Mandatory)][string]$Language,       # e.g. English
         [Parameter(Mandatory)][string]$Architecture    # x64 / arm64 / x86
     )
@@ -1115,15 +1118,23 @@ function Get-IsoViaMct {
     return $null
 }
 
-# Picks the Windows ISO out of a folder: the largest .iso over 3 GB, so driver discs and other small images
-# sharing the folder are skipped. Not recursive, because an ISO library is usually one folder deep and
-# walking a whole drive to guess would be worse than being told.
-function Find-LargestIso {
-    param([Parameter(Mandatory)][string]$Directory)
-    return (Get-ChildItem -LiteralPath $Directory -Filter '*.iso' -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Length -gt 3GB } |
-            Sort-Object -Property Length -Descending |
-            Select-Object -First 1)
+# Picks the Windows ISO out of a folder: by default the most recently modified .iso over 3 GB, so a fresh
+# drop-in wins over an older one sitting next to it; -Largest instead picks by size, e.g. to prefer a full
+# retail image over a smaller trial ISO with a newer timestamp. Anything under 3 GB is skipped so driver
+# discs and other small images sharing the folder are ignored. Not recursive, because an ISO library is
+# usually one folder deep and walking a whole drive to guess would be worse than being told.
+function Find-SourceIso {
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [Parameter(HelpMessage = 'Pick the largest .iso instead of the most recently modified one')]
+        [switch]$Largest
+    )
+    $Candidates = Get-ChildItem -LiteralPath $Directory -Filter '*.iso' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Length -gt 3GB }
+    if ($Largest) {
+        return ($Candidates | Sort-Object -Property Length -Descending | Select-Object -First 1)
+    }
+    return ($Candidates | Sort-Object -Property LastWriteTime -Descending | Select-Object -First 1)
 }
 #endregion
 
@@ -1175,7 +1186,7 @@ function Resolve-FeatureUpdateName {
     return $null
 }
 
-# The product wording the Microsoft Update Catalog uses in update titles, e.g. "Windows 11 Version 24H2".
+# The product wording the Microsoft Update Catalog uses in update titles, e.g. "Windows 11 Version 25H2".
 # Microsoft stopped naming Server media after its year with Server 2022, so anything newer than Server
 # 2019 is listed as "Microsoft server operating system version <feature update>" instead.
 function Get-CatalogProductQuery {
@@ -3504,10 +3515,10 @@ foreach ($Dir in @($WorkRoot, $DlDir)) {
 # decides the architecture and release, not the host or the parameters.
 $LocalIsoAvailable = if ($IsoPath) {
     [bool]((Test-Path -LiteralPath $IsoPath -PathType Leaf) -or
-        ((Test-Path -LiteralPath $IsoPath -PathType Container) -and (Find-LargestIso -Directory $IsoPath)))
+        ((Test-Path -LiteralPath $IsoPath -PathType Container) -and (Find-SourceIso -Directory $IsoPath -Largest:$UseLargestIso)))
 }
 else {
-    [bool](Find-LargestIso -Directory $DlDir)
+    [bool](Find-SourceIso -Directory $DlDir -Largest:$UseLargestIso)
 }
 if (-not $LocalIsoAvailable) {
     Write-HostTimestamp "Architecture   : $($WinInfo.Architecture)"
@@ -3927,14 +3938,15 @@ if (-not $ListEditions -and -not $CheckOnly) {
 $ResolvedIso = $null
 if ($IsoPath) {
     if (Test-Path -LiteralPath $IsoPath -PathType Container) {
-        $FolderIso = Find-LargestIso -Directory $IsoPath
+        $FolderIso = Find-SourceIso -Directory $IsoPath -Largest:$UseLargestIso
         if (-not $FolderIso) {
             Write-HostTimestamp "-IsoPath '$IsoPath' is a folder, but it holds no .iso larger than 3 GB. The search is not recursive, so an ISO in a subfolder is not found. Cannot continue." -ForegroundColor Red
             Stop-Transcript | Out-Null
             exit 1
         }
         $ResolvedIso = $FolderIso.FullName
-        Write-HostTimestamp "Using the largest ISO in '$IsoPath': $ResolvedIso ($([math]::Round($FolderIso.Length / 1GB, 2)) GB)" -ForegroundColor Green
+        $PickedBy = if ($UseLargestIso) { 'largest' } else { 'most recently modified' }
+        Write-HostTimestamp "Using the $PickedBy ISO in '$IsoPath': $ResolvedIso ($([math]::Round($FolderIso.Length / 1GB, 2)) GB)" -ForegroundColor Green
     }
     elseif (Test-Path -LiteralPath $IsoPath -PathType Leaf) {
         $ResolvedIso = (Resolve-Path -LiteralPath $IsoPath).Path
@@ -3977,7 +3989,7 @@ if ($IsoPath) {
 }
 else {
     # Reuse an already-downloaded ISO in the download folder if present, otherwise resolve + download one.
-    $ExistingIso = Find-LargestIso -Directory $DlDir
+    $ExistingIso = Find-SourceIso -Directory $DlDir -Largest:$UseLargestIso
     if ($ExistingIso) {
         $ResolvedIso = $ExistingIso.FullName
         Write-HostTimestamp "An ISO is already downloaded - reusing it: $ResolvedIso ($([math]::Round($ExistingIso.Length / 1GB, 2)) GB)" -ForegroundColor Green
@@ -4432,7 +4444,7 @@ else {
     }
 
     Invoke-Task -Description 'Downloading the latest cumulative update from the Microsoft Update Catalog...' -ScriptBlock {
-        # The monthly LCU is titled e.g. "2026-07 Cumulative Update for Windows 11 Version 24H2 for
+        # The monthly LCU is titled e.g. "2026-07 Cumulative Update for Windows 11 Version 25H2 for
         # x64-based Systems (KB...)" and classified as a Security Update. Restrict the match to real
         # cumulative updates and exclude the .NET / Dynamic Update entries the same query returns.
         $Query = "Cumulative Update for $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) for $CatalogArch-based Systems"
