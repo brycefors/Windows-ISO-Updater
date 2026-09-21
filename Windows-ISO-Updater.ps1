@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.21.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.21.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -279,7 +279,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.21.1'
+$ScriptVersion = '2026.09.21.2'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -2039,8 +2039,9 @@ function Invoke-AutoClean {
         $Item = Get-Item -LiteralPath "$($Stamp.Output.Path)" -ErrorAction SilentlyContinue
         if ($Item -and -not $Item.PSIsContainer) { $Candidates[$Item.FullName.ToLowerInvariant()] = $Item }
     }
-    # Must track every tag Get-DefaultIsoName can emit, including the Server release names.
-    $GeneratedName = '(Win10|Win11|Windows|Server[A-Za-z0-9]*)_[A-Za-z0-9]+_[A-Za-z0-9]+(_[\d.]+)?_\d{8}-\d{4}.*\.iso$'
+    # Must track every tag Get-DefaultIsoName can emit, including the Server release names and the
+    # optional locale tag between architecture and build.
+    $GeneratedName = '(Win10|Win11|Windows|Server[A-Za-z0-9]*)_[A-Za-z0-9]+_[A-Za-z0-9]+(_[A-Za-z0-9]+)?(_[\d.]+)?_\d{8}-\d{4}.*\.iso$'
     # When the output is a remote file path, $FinishedIsoDir is still the default local folder and any ISOs
     # there are orphans from earlier runs, not candidates for this remote-output run.
     if (-not $OutputIsRemote) {
@@ -2617,6 +2618,10 @@ function Get-EditionShortName {
     if ($n -match 'datacenter|standard') {
         if ($n -match 'datacenter') { return 'DC' } else { return 'Std' }
     }
+    # LTSC names all contain "enterprise" too, so this has to run before the plain Enterprise match below.
+    if ($n -match 'ltsc') {
+        if ($n -match 'iot') { return 'IoTLTSC' } else { return 'LTSC' }
+    }
     if ($n -match 'enterprise') { return 'Ent' }
     if ($n -match 'education') { return 'Edu' }
     if ($n -match 'pro') { return 'Pro' }
@@ -2625,8 +2630,8 @@ function Get-EditionShortName {
     if ($Short) { return $Short } else { return 'Windows' }
 }
 
-# Builds the default output ISO name, e.g. Win11_Pro_x64_26100.4061_20260815-1332.iso. The build/UBR comes
-# from the serviced image when available (that is the only place the post-update revision is known),
+# Builds the default output ISO name, e.g. Win11_Pro_x64_enGB_26100.4061_20260815-1332.iso. The build/UBR
+# comes from the serviced image when available (that is the only place the post-update revision is known),
 # otherwise from the source image's version. Multiple kept editions are joined into a compound tag such as EntPro or StdDC.
 function Get-DefaultIsoName {
     param(
@@ -2634,7 +2639,8 @@ function Get-DefaultIsoName {
         [int[]]$Indexes,
         [string]$BuildString,
         [string]$FallbackVersion,
-        [string]$Architecture
+        [string]$Architecture,
+        [string]$Locale
     )
 
     $Kept = @($Images | Where-Object { $Indexes -contains [int]$_.ImageIndex })
@@ -2654,6 +2660,7 @@ function Get-DefaultIsoName {
 
     $Parts = @($WindowsTag, $EditionTag)
     if ($Architecture) { $Parts += ($Architecture -replace '[^A-Za-z0-9]', '') }
+    if ($Locale) { $Parts += ($Locale -replace '[^A-Za-z0-9]', '') }
     if ($BuildUbr) { $Parts += $BuildUbr }
     $Parts += (Get-Date -Format 'yyyyMMdd-HHmm')
     return (($Parts -join '_') + '.iso')
@@ -2663,17 +2670,24 @@ function Get-DefaultIsoName {
 # the file does. oscdimg writes no label unless -l is passed, and unlabelled media turns up as a generic
 # "DVD_ROM" in File Explorer and in the Rufus volume label box.
 function Get-IsoVolumeLabel {
-    param([Parameter(Mandatory)][string]$IsoFileName)
+    param(
+        [Parameter(Mandatory)][string]$IsoFileName,
+        [string]$Locale
+    )
 
     # Windows shows 32 characters, and only A-Z, 0-9 and underscore survive every reader, so the build
     # timestamp is dropped (the label describes contents, not when it was made) and the rest is folded.
     $MaxLength = 32
     $Base = [System.IO.Path]::GetFileNameWithoutExtension($IsoFileName) -replace '_\d{8}-\d{4}$', ''
     $Label = ($Base.ToUpperInvariant() -replace '[^A-Z0-9]', '_') -replace '_+', '_'
+    # A free-form locale tag (unlike the fixed architecture set) can't be matched by pattern, so the exact
+    # value that went into the file name is passed in here to find and drop it.
+    $LocaleTag = if ($Locale) { ($Locale -replace '[^A-Za-z0-9]', '').ToUpperInvariant() } else { $null }
 
-    # Too long drops the architecture first, then shortens the edition, so the Windows release and the
-    # build number (the two things worth reading off a USB stick) always survive intact.
+    # Too long drops the architecture tag, then the locale tag (neither changes the release or the build,
+    # the two things worth reading off a USB stick), then shortens the edition, so those two always survive.
     if ($Label.Length -gt $MaxLength) { $Label = $Label -replace '_(X64|X86|ARM64|AMD64)_', '_' }
+    if ($Label.Length -gt $MaxLength -and $LocaleTag) { $Label = $Label -replace "_$([regex]::Escape($LocaleTag))_", '_' }
     if ($Label.Length -gt $MaxLength -and $Label -match '^([A-Z0-9]+)_([A-Z0-9]+)_(.+)$') {
         $Room = $MaxLength - ($Matches[1].Length + $Matches[3].Length + 2)
         if ($Room -ge 3) {
@@ -5097,16 +5111,17 @@ if ($ResolvedExtraFiles) {
 #endregion
 
 #region Decide the output ISO name and volume label
-# The name describes what the ISO actually contains: Win11_Pro_x64_26100.4061_20260815-1332.iso. It is
+# The name describes what the ISO actually contains: Win11_Pro_x64_enGB_26100.4061_20260815-1332.iso. It is
 # built even when -OutputIsoPath overrides the path, because the volume label is derived from it.
-$DefaultIsoName = Get-DefaultIsoName -Images $InstallImages -Indexes $KeepIndexes -BuildString $script:FinalBuildString -FallbackVersion $ImageInfo.Version -Architecture $ImageArch
+$IsoLocale = if ($script:FinalImageLocale) { $script:FinalImageLocale } else { "$($ImageInfo.DefaultLanguage)" }
+$DefaultIsoName = Get-DefaultIsoName -Images $InstallImages -Indexes $KeepIndexes -BuildString $script:FinalBuildString -FallbackVersion $ImageInfo.Version -Architecture $ImageArch -Locale $IsoLocale
 if ($IsoNamePrefix -or $IsoNameSuffix) {
     $DefaultIsoName = "$IsoNamePrefix$([System.IO.Path]::GetFileNameWithoutExtension($DefaultIsoName))$IsoNameSuffix.iso"
 }
 if (-not $OutputIsoPath) {
     $OutputIsoPath = Join-Path -Path $FinishedIsoDir -ChildPath $DefaultIsoName
 }
-$IsoVolumeLabel = if ($VolumeLabel) { $VolumeLabel } else { Get-IsoVolumeLabel -IsoFileName $DefaultIsoName }
+$IsoVolumeLabel = if ($VolumeLabel) { $VolumeLabel } else { Get-IsoVolumeLabel -IsoFileName $DefaultIsoName -Locale $IsoLocale }
 # Make sure the destination folder exists before oscdimg writes the ISO into it.
 try {
     $OutDir = Split-Path -Path $OutputIsoPath -Parent
