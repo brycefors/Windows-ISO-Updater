@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.20.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.20.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -279,7 +279,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.20.2'
+$ScriptVersion = '2026.09.20.3'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -470,6 +470,23 @@ $script:SourceLocalCopy = $null
 #region Output and timing helpers
 function Get-TimeStamp {
     return (Get-Date -Format '[MM/dd/yyyy|HH:mm:ss]')
+}
+
+function Get-FriendlyDate {
+    param([datetime]$Date = (Get-Date))
+    # Ordinal suffixes are English-only, so the month name is forced to invariant culture rather than
+    # the thread culture the Locale line above already reports.
+    $Day = $Date.Day
+    $Suffix = if ($Day -in 11, 12, 13) { 'th' }
+    else {
+        switch ($Day % 10) {
+            1 { 'st' }
+            2 { 'nd' }
+            3 { 'rd' }
+            default { 'th' }
+        }
+    }
+    return '{0} {1}{2} {3}' -f $Date.ToString('MMMM', [System.Globalization.CultureInfo]::InvariantCulture), $Day, $Suffix, $Date.Year
 }
 
 function Format-Duration {
@@ -1406,7 +1423,7 @@ function Get-LatestCatalogPackage {
         return $null
     }
 
-    Write-HostTimestamp "  Selected: $($Selected.Title)$(if ($Selected.LastUpdated) { " (released $($Selected.LastUpdated.ToString('yyyy-MM-dd')))" })" -ForegroundColor Green
+    Write-HostTimestamp "  Selected: $($Selected.Title)$(if ($Selected.LastUpdated) { " (released $(Get-FriendlyDate -Date $Selected.LastUpdated))" })" -ForegroundColor Green
 
     if ($BaselineOnly -and $Selected.LastUpdated -and (Test-IsHotpatchMonth -AllResults $Results -ReferenceDate ([datetime]$Selected.LastUpdated))) {
         Write-HostTimestamp "  -BaselineOnly: $($Selected.LastUpdated.ToString('yyyy-MM')) is a hotpatch non-baseline month - skipping this cumulative update." -ForegroundColor Yellow
@@ -3498,6 +3515,7 @@ function Write-BuildTattoo {
 #region Run header
 Write-Host $LineBreak
 Write-HostTimestamp "Windows ISO Updater v$ScriptVersion (slipstream latest updates into a new ISO) on $($env:ComputerName)" -ForegroundColor Cyan
+Write-HostTimestamp "Run date       : $(Get-FriendlyDate)"
 # Recorded because culture-sensitive parsing (e.g. the catalog's "Last Updated" column) breaks only on
 # non-en-US machines, so the log needs to say what locale actually ran without asking the reporter to check.
 $CurrentCulture   = [System.Globalization.CultureInfo]::CurrentCulture
