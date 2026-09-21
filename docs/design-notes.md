@@ -50,7 +50,7 @@ Making the download opt-in also keeps third-party code out of a default run. Fid
 .\Run-Windows-ISO-Updater.bat -IsoPath "D:\ISOs\Win11_25H2_original.iso"
 ```
 
-That is faster on every run after the first, it does not depend on Microsoft's mood, and it is the only option for Windows Server media, which neither Fido nor MCT serves at all.
+That is faster on every run after the first, it does not depend on Microsoft's mood, and it is the only option for Windows Server media and Windows 11 LTSC/IoT Enterprise LTSC, which neither Fido nor MCT serves at all. LTSC media comes from the Volume Licensing Service Center, the Evaluation Center, or a Visual Studio or Visual Studio subscription.
 
 It matters most for scheduled tasks. A blocked link request in an unattended run has nothing to fall back on, since the Media Creation Tool cannot run headless, so a task that depends on the automatic download eventually fails for reasons outside your control. A pristine source ISO kept on disk makes the run deterministic, and every build then re-reads the same source, which is exactly what the [rebuild-avoidance model](scheduled-runs.md#when-a-run-decides-to-rebuild) expects.
 
