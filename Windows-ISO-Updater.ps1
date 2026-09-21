@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.20.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.20.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -279,7 +279,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.20.1'
+$ScriptVersion = '2026.09.20.2'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1273,7 +1273,12 @@ function Search-UpdateCatalog {
 
         $LastUpdated = $null
         if ($DateText -and $DateText -match '(\d{1,2}/\d{1,2}/\d{4})') {
-            try { $LastUpdated = [datetime]::Parse($Matches[1]) } catch { }
+            # The catalog always renders this column as US M/d/yyyy, so parsing it under the caller's
+            # culture (e.g. en-GB reads d/M/yyyy) silently swaps day and month for two-digit days.
+            $Parsed = [datetime]::MinValue
+            if ([datetime]::TryParseExact($Matches[1], 'M/d/yyyy', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$Parsed)) {
+                $LastUpdated = $Parsed
+            }
         }
 
         $SizeMB = $null
@@ -3493,6 +3498,12 @@ function Write-BuildTattoo {
 #region Run header
 Write-Host $LineBreak
 Write-HostTimestamp "Windows ISO Updater v$ScriptVersion (slipstream latest updates into a new ISO) on $($env:ComputerName)" -ForegroundColor Cyan
+# Recorded because culture-sensitive parsing (e.g. the catalog's "Last Updated" column) breaks only on
+# non-en-US machines, so the log needs to say what locale actually ran without asking the reporter to check.
+$CurrentCulture   = [System.Globalization.CultureInfo]::CurrentCulture
+$CurrentUICulture = [System.Globalization.CultureInfo]::CurrentUICulture
+$SystemLocale     = try { (Get-WinSystemLocale -ErrorAction Stop).Name } catch { 'unknown' }
+Write-HostTimestamp "Locale         : Thread culture $($CurrentCulture.Name), UI culture $($CurrentUICulture.Name), system locale $SystemLocale"
 Write-Host $LineBreak
 
 #endregion

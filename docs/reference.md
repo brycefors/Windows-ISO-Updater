@@ -160,6 +160,8 @@ Each run writes two files to `<WorkPath>\Logs` (or `-LogPath`), both stamped wit
 
 Open the `.log` in CMTrace or OneTrace and you get the usual columns. Severity comes from the colour the script already prints in, so anything red is logged as an error and anything yellow as a warning, which makes CMTrace's error and warning highlighting match what you would have seen on screen. The component column is the name of the step that was running, for example `Mounting the install image`, so filtering by component narrows a long build down to one phase. Each entry also records the line of the script that wrote it.
 
+The first lines in each log record the startup banner, including the thread culture, UI culture, and system locale. This is logged because culture-sensitive parsing (for example, the date format in the Microsoft Update Catalog search results) breaks only on non-English machines, so if a catalog query fails or a date is parsed incorrectly, the log says what locale actually ran without having to ask the user.
+
 The `_console.txt` beside it is the plain transcript. It is worth opening when a run has died in a way the script did not expect, because it also holds the confirmation prompts, the plan the script printed before starting, and any raw error text that never made it to a log call.
 
 [← Back to README](../README.md)
