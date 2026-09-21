@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.20.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.21.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -279,7 +279,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.20.3'
+$ScriptVersion = '2026.09.21.1'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -443,6 +443,8 @@ $script:ScriptStartTime = Get-Date
 $script:StepTimings = [System.Collections.Generic.List[psobject]]::new()
 # Captured from the serviced image while it is still mounted, so the final report does not have to mount it again.
 $script:FinalBuildString = $null
+# Same idea as FinalBuildString, but the shipped display language, read from the offline SYSTEM hive.
+$script:FinalImageLocale = $null
 # Filled in as servicing happens, because by the time the tattoo is written the images are already
 # dismounted and DISM's own log is the only other record of which package landed on which image.
 $script:TattooServicing   = New-Object System.Collections.Generic.List[object]
@@ -3315,6 +3317,25 @@ function Remove-ImageResidue {
 #endregion
 
 #region Image inspection and final report
+# Unloads a hive `reg.exe load`-ed by Get-MountedImageBuild/Get-MountedImageLocale, retrying once because
+# the handle release can be delayed rather than permanent. Warns loudly instead of failing silently,
+# because a hive left loaded under the host's HKLM at commit time ships an orphaned GUID key in the ISO.
+function Dismount-RegistryHive {
+    param([Parameter(Mandatory)][string]$Hive)
+
+    [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+    & reg.exe unload $Hive *> $null
+    if ($LASTEXITCODE -eq 0) { return }
+
+    Write-HostTimestamp "    $Hive did not unload on the first try. Waiting for the handle to clear before retrying..." -ForegroundColor Yellow
+    Start-Sleep -Milliseconds 500
+    [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+    & reg.exe unload $Hive *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-HostTimestamp "    $Hive is still loaded under the host's HKLM and could not be released. Do not commit the mount until this hive is confirmed unloaded, or the ISO ships an orphaned hive-mount key." -ForegroundColor Red
+    }
+}
+
 # Reads the exact build (with UBR) out of an ALREADY-MOUNTED image's offline SOFTWARE hive.
 # Returns a version string, or $null if the hive could not be read.
 function Get-MountedImageBuild {
@@ -3331,9 +3352,31 @@ function Get-MountedImageBuild {
             return "10.0.$($Cv.CurrentBuildNumber).$($Cv.UBR)$(if ($Cv.DisplayVersion) { " ($($Cv.DisplayVersion))" })"
         }
         finally {
-            # The hive will not unload while PowerShell still holds a handle to the key it just read.
-            [gc]::Collect(); [gc]::WaitForPendingFinalizers()
-            & reg.exe unload $Hive *> $null
+            Dismount-RegistryHive -Hive $Hive
+        }
+    }
+    catch { return $null }
+}
+
+# Reads the shipped display language out of an ALREADY-MOUNTED image's offline DEFAULT user hive
+# (Control Panel\International\LocaleName), the same source HKEY_USERS\.DEFAULT exposes live.
+# Returns a culture name such as "en-US", or $null if the hive could not be read.
+function Get-MountedImageLocale {
+    param([Parameter(Mandatory)][string]$MountPath)
+
+    $Hive = 'HKLM\WISO_LOCALE'
+    $DefaultHive = Join-Path $MountPath 'Windows\System32\config\default'
+    if (-not (Test-Path -LiteralPath $DefaultHive)) { return $null }
+    try {
+        & reg.exe load $Hive $DefaultHive *> $null
+        if ($LASTEXITCODE -ne 0) { return $null }
+        try {
+            $Intl = Get-ItemProperty -Path "Registry::$Hive\Control Panel\International" -ErrorAction Stop
+            if (-not $Intl.LocaleName) { return $null }
+            return $Intl.LocaleName
+        }
+        finally {
+            Dismount-RegistryHive -Hive $Hive
         }
     }
     catch { return $null }
@@ -3518,10 +3561,11 @@ Write-HostTimestamp "Windows ISO Updater v$ScriptVersion (slipstream latest upda
 Write-HostTimestamp "Run date       : $(Get-FriendlyDate)"
 # Recorded because culture-sensitive parsing (e.g. the catalog's "Last Updated" column) breaks only on
 # non-en-US machines, so the log needs to say what locale actually ran without asking the reporter to check.
-$CurrentCulture   = [System.Globalization.CultureInfo]::CurrentCulture
-$CurrentUICulture = [System.Globalization.CultureInfo]::CurrentUICulture
-$SystemLocale     = try { (Get-WinSystemLocale -ErrorAction Stop).Name } catch { 'unknown' }
-Write-HostTimestamp "Locale         : Thread culture $($CurrentCulture.Name), UI culture $($CurrentUICulture.Name), system locale $SystemLocale"
+# Script-scoped so the build tattoo, written much later, can reuse this instead of reading it a second time.
+$script:CurrentCulture   = [System.Globalization.CultureInfo]::CurrentCulture
+$script:CurrentUICulture = [System.Globalization.CultureInfo]::CurrentUICulture
+$script:SystemLocale     = try { (Get-WinSystemLocale -ErrorAction Stop).Name } catch { 'unknown' }
+Write-HostTimestamp "Locale         : Thread culture $($script:CurrentCulture.Name), UI culture $($script:CurrentUICulture.Name), system locale $script:SystemLocale"
 Write-Host $LineBreak
 
 #endregion
@@ -4752,6 +4796,7 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
                 # Grabbed here because the image is already mounted, since mounting the finished image later
                 # just to read this one value costs several minutes.
                 if (-not $script:FinalBuildString) { $script:FinalBuildString = Get-MountedImageBuild -MountPath $MountDir }
+                if (-not $script:FinalImageLocale) { $script:FinalImageLocale = Get-MountedImageLocale -MountPath $MountDir }
 
                 Write-HostTimestamp '    Committing and unmounting...'
                 Dismount-WindowsImage -Path $MountDir -Save -ErrorAction Stop | Out-Null
@@ -5109,6 +5154,8 @@ if (-not $SkipTattoo) {
                 User            = "$env:USERDOMAIN\$env:USERNAME"
                 OperatingSystem = "$($OsInfo.Caption) ($($OsInfo.Version))"
                 PowerShell      = "$($PSVersionTable.PSVersion)"
+                # Reuses the run header's read rather than asking Get-WinSystemLocale a second time.
+                Locale          = "Thread culture $($script:CurrentCulture.Name), UI culture $($script:CurrentUICulture.Name), system locale $($script:SystemLocale)"
                 ScriptPath      = $script:ScriptPath
                 CommandLine     = Get-ScriptCommandLine
             }
@@ -5126,6 +5173,9 @@ if (-not $SkipTattoo) {
             }
             Contents    = [ordered]@{
                 FinalBuild         = if ($script:FinalBuildString) { $script:FinalBuildString } else { "$ImageVersionText (unchanged)" }
+                # Read from the offline SYSTEM hive while an edition was mounted to service it, since the
+                # WIM's own metadata (SourceMedia.Language, above) is only ever the value captured at build time.
+                ImageLocale        = if ($script:FinalImageLocale) { $script:FinalImageLocale } else { "$($ImageInfo.DefaultLanguage) (from WIM metadata; offline read unavailable)" }
                 InstallImage       = Split-Path -Leaf $FinalInstallImage
                 EditionsKept       = $KeptNames
                 EditionsRemoved    = $RemovedNames

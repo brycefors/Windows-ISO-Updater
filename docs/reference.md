@@ -99,11 +99,12 @@ The build stamp stays on the machine that did the building, which is no use to w
 It costs about half a megabyte, Windows Setup ignores it, and deleting it off a USB stick changes nothing. It records:
 
 - **The source media**, by file name, SHA-256, product name, version, feature update, architecture, language and the full list of editions it shipped with.
+- **The finished image's own locale** (for example `es-ES`, `ko-KR`, `en-US`), read from the offline registry of the serviced image while it is mounted, since a WIM's own metadata only ever reflects the language it was captured with.
 - **Every update**, by KB and SHA-256, and the result of applying each one to each image, so a package that failed on `boot.wim` but applied to `install.wim` is visible without digging through `dism.log`.
 - **What was kept and what was stripped**: the editions kept, the editions removed, any edition left in the ISO that was not updated, whether the component store was reset, and how much servicing residue was deleted.
 - **Any drivers injected** with `-DriverPath`: the source folder, a hash of its contents, every `.inf` that went in, and whether unsigned drivers were accepted.
 - **Any files added** with `-ExtraFilesPath`: the source folder, a hash of its contents, and every file that was copied with its size, SHA-256, and whether it replaced something the media already had.
-- **Who built it**: machine name, user, operating system, PowerShell version, script version and the command line that was used.
+- **Who built it**: machine name, user, operating system, PowerShell version, the operator's own locale (thread culture, UI culture and system locale), script version and the command line that was used.
 - **When**, both in local time and UTC.
 
 Pass `-SkipTattoo` to leave the media untouched. The switch is build-affecting, so toggling it forces one rebuild.
