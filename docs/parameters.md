@@ -68,7 +68,7 @@ See [Scheduled Runs](scheduled-runs.md) for how these fit together.
 | `-NoStamp` | Ignore the stamps completely: do not read one to skip the run, and do not write one at the end. |
 | `-StampPath` | Directory to keep the build stamps in. Defaults to a `Stamps` folder inside the working folder. Point several machines at a share to give them one shared history. |
 | `-StampHistoryCount` | How many past stamps to keep in `Stamps\History`. Defaults to `30`. |
-| `-AutoClean` | After a successful build, delete the update packages this script downloaded for **earlier** builds and every generated ISO except the newest few. Only files recorded in a stamp are ever deleted, so anything else in those folders is left alone. |
+| `-AutoClean` | After a successful build, delete the update packages this script downloaded for **earlier** builds and every generated ISO except the newest few. Also deletes stale locally-cached copies of a remote or cloud-synced `-IsoPath` left behind in the download folder, keeping only the one the current build used. Only files recorded in a stamp are ever deleted, so an ISO you placed in the download folder yourself or pointed `-IsoPath` at directly (as a local path, not remote or cloud) is never touched, and anything else in those folders is left alone. |
 | `-KeepIsoCount` | How many generated ISOs `-AutoClean` keeps (newest first). Defaults to `3`. |
 | `-RegisterScheduledTask` | Create (or update) a scheduled task that runs this script with the other parameters you passed, then exit without building. The task runs as `SYSTEM` with the highest privileges. |
 | `-UnregisterScheduledTask` | Delete the scheduled task named by `-TaskName`, then exit. |

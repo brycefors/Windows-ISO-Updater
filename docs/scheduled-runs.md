@@ -114,11 +114,12 @@ Exit code `0` means nothing to do, `10` means a rebuild is needed, `1` means the
 
 * deletes the update packages **this script downloaded** for earlier builds, keeping the ones the newest
   build uses,
-* deletes generated ISOs, keeping the newest `-KeepIsoCount` (default `3`).
+* deletes generated ISOs, keeping the newest `-KeepIsoCount` (default `3`),
+* deletes a locally-cached copy of `-IsoPath` in the download folder once a later run's source ISO
+  differs from it, whether by name or by no longer matching what was stamped, keeping only the version
+  used by the current build.
 
-It only ever deletes files that a stamp recorded, so an ISO you dropped in yourself, packages you pointed
-at with `-UpdatePath`, and anything else living in those folders are never touched. The source ISO the
-current run is using is always protected.
+It only ever deletes files that a stamp recorded. An ISO you dropped in yourself, packages you pointed at with `-UpdatePath`, and anything else living in those folders are never touched, because the script only creates a cached copy when `-IsoPath` pointed at a network path or cloud-synced folder, so an ISO you placed directly in the download folder or pointed `-IsoPath` at as a local path is never treated as a cached copy and never a deletion candidate. The source ISO the current run is using is always protected.
 
 The folder it prunes is the one the ISO is written to, so pointing `-OutputIsoPath` at a folder of your own
 moves the pruning there as well, including a share (the stamp records where the ISO ended up, not the local
