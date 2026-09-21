@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.19.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.20.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -279,7 +279,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.19.2'
+$ScriptVersion = '2026.09.20.1'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -460,6 +460,9 @@ $script:ExtraFileRecords    = @()
 $script:ExtraFileOverwrites = New-Object System.Collections.Generic.List[string]
 # Taken while a staged ISO is still local, so the stamp does not have to read it back over the wire.
 $script:OutputIsoSha256 = $null
+# Set only when -IsoPath was copied into $DlDir from a remote/cloud path, so the stamp can tell that copy
+# apart from an ISO the user placed in $DlDir themselves - the two must never be cleaned up the same way.
+$script:SourceLocalCopy = $null
 #endregion
 
 #region Functions
@@ -2047,7 +2050,46 @@ function Invoke-AutoClean {
     }
     if ($RemovedIsos -eq 0) { Write-HostTimestamp '  No old ISOs to remove.' -ForegroundColor DarkGray }
 
-    Write-HostTimestamp ('  Cleanup removed {0} update package(s) and {1} ISO(s), freeing {2:N1} GB.' -f $RemovedUpdates, $RemovedIsos, ($FreedMB / 1024)) -ForegroundColor Green
+    # 3. Locally cached source ISOs: a copy this script made of a remote/cloud -IsoPath under $DlDir, using
+    #    the source's own file name. A stamp only records a RemoteOrigin when that happened, so an ISO the
+    #    user dropped into $DlDir themselves, or one this script downloaded directly, is never a candidate.
+    $KeepSourceIso = @()
+    if ($CurrentStamp -and $CurrentStamp.Source -and "$($CurrentStamp.Source.RemoteOrigin)") {
+        $KeepSourceIso = @("$($CurrentStamp.Source.FileName)")
+    }
+    $KnownSourceIso = @{}
+    foreach ($Stamp in @($History)) {
+        if (-not $Stamp -or -not $Stamp.Source -or -not "$($Stamp.Source.RemoteOrigin)") { continue }
+        $FileName = "$($Stamp.Source.FileName)"
+        # History is newest first, so the first record seen for a name is the one whose size is trusted.
+        if ($FileName -and -not $KnownSourceIso.ContainsKey($FileName)) { $KnownSourceIso[$FileName] = [int64]$Stamp.Source.Length }
+    }
+
+    $RemovedSourceIsos = 0
+    foreach ($FileName in @($KnownSourceIso.Keys | Sort-Object)) {
+        if ($KeepSourceIso -contains $FileName) { continue }
+        # A stamp is written by this script, but it is still a file on disk: never let a name out of one
+        # escape the download folder.
+        if ($FileName -match '[\\/:]' -or $FileName -notmatch '(?i)\.iso$') { continue }
+        $Path = Join-Path -Path $DlDir -ChildPath $FileName
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { continue }
+        if ($ProtectedPaths -contains $Path.ToLowerInvariant()) { continue }
+        $OnDisk = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+        # A same-named file whose size no longer matches what was stamped is not the file this script
+        # cached, so it is left alone rather than risk deleting something the user swapped in by hand.
+        if (-not $OnDisk -or ($KnownSourceIso[$FileName] -gt 0 -and $OnDisk.Length -ne $KnownSourceIso[$FileName])) { continue }
+        try {
+            $SizeMB = $OnDisk.Length / 1MB
+            Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+            $RemovedSourceIsos++
+            $FreedMB += $SizeMB
+            Write-HostTimestamp ('  Deleted stale cached source ISO: {0} ({1:N0} MB)' -f $FileName, $SizeMB) -ForegroundColor DarkGray
+        }
+        catch { Write-HostTimestamp "  Could not delete '$FileName': $($_.Exception.Message)" -ForegroundColor Yellow }
+    }
+    if ($RemovedSourceIsos -eq 0) { Write-HostTimestamp '  No stale cached source ISOs to remove.' -ForegroundColor DarkGray }
+
+    Write-HostTimestamp ('  Cleanup removed {0} update package(s), {1} ISO(s) and {2} cached source ISO(s), freeing {3:N1} GB.' -f $RemovedUpdates, $RemovedIsos, $RemovedSourceIsos, ($FreedMB / 1024)) -ForegroundColor Green
 }
 
 #endregion
@@ -3968,11 +4010,13 @@ if ($IsoPath) {
     $DlDirIsCloud = ($DlDir -match $CloudPattern -or $DlDir -match '(?i)OneDrive')
     if (($IsoIsCloud -or $IsoIsRemote) -and -not $DlDirIsCloud -and -not (Test-RemotePath -Path $DlDir) -and -not $CheckOnly) {
         $RemoteKind = if ($IsoIsRemote) { 'a network path' } else { 'a cloud-synced path' }
+        $RemoteOrigin = $ResolvedIso
         $LocalIso = Join-Path -Path $DlDir -ChildPath (Split-Path -Leaf $ResolvedIso)
         $SourceLen = (Get-Item -LiteralPath $ResolvedIso).Length
         if ((Test-Path -LiteralPath $LocalIso) -and ((Get-Item -LiteralPath $LocalIso).Length -eq $SourceLen)) {
             Write-HostTimestamp "  A local copy already exists - using it: $LocalIso" -ForegroundColor Green
             $ResolvedIso = $LocalIso
+            $script:SourceLocalCopy = $RemoteOrigin
         }
         else {
             try {
@@ -3981,6 +4025,7 @@ if ($IsoPath) {
                     Write-HostTimestamp '  Copy complete.' -ForegroundColor Green
                 }
                 $ResolvedIso = $LocalIso
+                $script:SourceLocalCopy = $RemoteOrigin
             }
             catch {
                 Write-HostTimestamp "  Could not copy the ISO locally ($($_.Exception.Message)). Proceeding from $RemoteKind - this may be slow or fail." -ForegroundColor Yellow
@@ -5242,6 +5287,9 @@ if (-not $NoStamp) {
                 Length           = if ($SourceItem) { $SourceItem.Length } else { 0 }
                 LastWriteTimeUtc = if ($SourceItem) { $SourceItem.LastWriteTimeUtc.ToString('o') } else { '' }
                 Sha256           = $script:StampSourceHash
+                # Non-empty only when this run copied -IsoPath into $DlDir from a remote/cloud path, so
+                # -AutoClean can tell a script-managed cached copy apart from the user's own ISO.
+                RemoteOrigin     = if ($script:SourceLocalCopy) { "$script:SourceLocalCopy" } else { '' }
             }
             Image           = [ordered]@{
                 Version       = $ImageVersionText
