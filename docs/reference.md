@@ -82,7 +82,7 @@ flowchart TD
 7.  **Clean up and shrink.** Runs `DISM /Cleanup-Image /StartComponentCleanup /ResetBase`, optionally strips the servicing residue DISM left inside the image with `-StripImageResidue` (CBS and DISM logs, `Windows\Temp`, `$WinREAgent`, and anything a captured source image dragged in), re-exports `install.wim` to reclaim space, and re-exports `boot.wim` (which servicing inflates), preserving the bootable flag on the Windows Setup index. With `-CompressEsd` the install image is written as `install.esd` instead, using recovery compression. See [Why Two Identical Builds Aren't the Same Size](design-notes.md#why-two-identical-builds-arent-the-same-size).
 8.  **Add the answer file.** If `-UnattendPath` was supplied, copies it to the root of the media as `autounattend.xml`. Then, if `-ExtraFilesPath` was supplied, copies that folder's contents over the media, listing every file that replaced one the media already had.
 9.  **Tattoo the media.** Writes a `\WISO-Build` folder onto the media describing the build, unless `-SkipTattoo` was passed. See [The Build Record on the ISO](#the-build-record-on-the-iso).
-10. **Recompile the ISO.** Uses `oscdimg` to build a new bootable ISO, preserving both the **BIOS (`etfsboot.com`)** and **UEFI (`efisys.bin`)** boot sectors so the media boots on legacy and modern PCs alike. The ISO is given a volume label describing its contents, e.g. `WIN11_ENTPRO_X64_26100_4652`, which is what File Explorer shows and what Rufus and Ventoy copy onto the USB stick. Override it with `-VolumeLabel`.
+10. **Recompile the ISO.** Uses `oscdimg` to build a new bootable ISO, preserving both the **BIOS (`etfsboot.com`)** and **UEFI (`efisys.bin`)** boot sectors so the media boots on legacy and modern PCs alike. The ISO is given a volume label describing its contents, e.g. `WIN11_ENTPRO_X64_ENGB_26100_4652`, which is what File Explorer shows and what Rufus and Ventoy copy onto the USB stick. Override it with `-VolumeLabel`.
 11. **Clean up.** Removes the extracted working files, leaving the finished ISO.
 
 ## The Build Record on the ISO
@@ -99,11 +99,12 @@ The build stamp stays on the machine that did the building, which is no use to w
 It costs about half a megabyte, Windows Setup ignores it, and deleting it off a USB stick changes nothing. It records:
 
 - **The source media**, by file name, SHA-256, product name, version, feature update, architecture, language and the full list of editions it shipped with.
+- **The finished image's own locale** (for example `es-ES`, `ko-KR`, `en-US`), read from the offline registry of the serviced image while it is mounted, since a WIM's own metadata only ever reflects the language it was captured with.
 - **Every update**, by KB and SHA-256, and the result of applying each one to each image, so a package that failed on `boot.wim` but applied to `install.wim` is visible without digging through `dism.log`.
 - **What was kept and what was stripped**: the editions kept, the editions removed, any edition left in the ISO that was not updated, whether the component store was reset, and how much servicing residue was deleted.
 - **Any drivers injected** with `-DriverPath`: the source folder, a hash of its contents, every `.inf` that went in, and whether unsigned drivers were accepted.
 - **Any files added** with `-ExtraFilesPath`: the source folder, a hash of its contents, and every file that was copied with its size, SHA-256, and whether it replaced something the media already had.
-- **Who built it**: machine name, user, operating system, PowerShell version, script version and the command line that was used.
+- **Who built it**: machine name, user, operating system, PowerShell version, the operator's own locale (thread culture, UI culture and system locale), script version and the command line that was used.
 - **When**, both in local time and UTC.
 
 Pass `-SkipTattoo` to leave the media untouched. The switch is build-affecting, so toggling it forces one rebuild.
@@ -159,6 +160,8 @@ Each run writes two files to `<WorkPath>\Logs` (or `-LogPath`), both stamped wit
 | `Windows-ISO-Updater_<date>_<time>_console.txt` | The raw PowerShell transcript of the same run |
 
 Open the `.log` in CMTrace or OneTrace and you get the usual columns. Severity comes from the colour the script already prints in, so anything red is logged as an error and anything yellow as a warning, which makes CMTrace's error and warning highlighting match what you would have seen on screen. The component column is the name of the step that was running, for example `Mounting the install image`, so filtering by component narrows a long build down to one phase. Each entry also records the line of the script that wrote it.
+
+The first lines in each log record the startup banner. It includes a run date line formatted as full month name, day with English ordinal suffix, and year (for example `Run date       : September 20th 2026`), followed by the thread culture, UI culture, and system locale. This is logged because culture-sensitive parsing (for example, the date format in the Microsoft Update Catalog search results) breaks only on non-English machines, so if a catalog query fails or a date is parsed incorrectly, the log says what locale actually ran without having to ask the user.
 
 The `_console.txt` beside it is the plain transcript. It is worth opening when a run has died in a way the script did not expect, because it also holds the confirmation prompts, the plan the script printed before starting, and any raw error text that never made it to a log call.
 

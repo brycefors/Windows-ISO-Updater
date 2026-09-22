@@ -42,6 +42,26 @@ Licensing Service Center, or a Visual Studio subscription first.
 .\Run-Windows-ISO-Updater.bat -Server
 ```
 
+## Updating a Windows 11 LTSC ISO
+
+Windows 11 LTSC and IoT Enterprise LTSC media work the same way as Windows Server: pass `-IsoPath` or drop
+the ISO into the download folder, and the script handles the rest. The key difference is that neither
+Fido nor the Media Creation Tool serves LTSC media at all, so you must supply it from the Volume
+Licensing Service Center, the Evaluation Center, or a Visual Studio subscription.
+
+```shell
+:: Slipstream the latest cumulative update into your own Windows 11 LTSC ISO
+.\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Win11LTSC.iso"
+
+:: Or drop the ISO into the download folder and let it be picked up automatically
+.\Run-Windows-ISO-Updater.bat
+```
+
+One thing to note: `-BaselineOnly` does not apply to LTSC media. LTSC has no hotpatch enrollment, so
+the cumulative update is applied every month regardless of the month type.
+
+## Windows Server Specific Notes
+
 A few differences worth knowing:
 
 - The release is read from the image, so there is no `-Release` to set. Server 2022 and newer are listed
@@ -238,3 +258,6 @@ The same list, with the SHA-256 and size of each file, goes into the [build reco
 - **Anything under `WISO-Build`.** The build record is written after this step, so it wins. Pass `-SkipTattoo` if you want to keep your own copy there.
 
 Read-only attributes inherited from the source ISO do not block the copy, they are cleared first. The folder is build-affecting and hashed by content, so editing one of the files forces a rebuild on the next scheduled run.
+
+
+[← Back to README](../README.md)

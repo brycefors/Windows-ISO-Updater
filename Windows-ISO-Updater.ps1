@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.20.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.21.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -279,7 +279,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.20.1'
+$ScriptVersion = '2026.09.21.3'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -443,6 +443,8 @@ $script:ScriptStartTime = Get-Date
 $script:StepTimings = [System.Collections.Generic.List[psobject]]::new()
 # Captured from the serviced image while it is still mounted, so the final report does not have to mount it again.
 $script:FinalBuildString = $null
+# Same idea as FinalBuildString, but the shipped display language, read from the offline SYSTEM hive.
+$script:FinalImageLocale = $null
 # Filled in as servicing happens, because by the time the tattoo is written the images are already
 # dismounted and DISM's own log is the only other record of which package landed on which image.
 $script:TattooServicing   = New-Object System.Collections.Generic.List[object]
@@ -470,6 +472,23 @@ $script:SourceLocalCopy = $null
 #region Output and timing helpers
 function Get-TimeStamp {
     return (Get-Date -Format '[MM/dd/yyyy|HH:mm:ss]')
+}
+
+function Get-FriendlyDate {
+    param([datetime]$Date = (Get-Date))
+    # Ordinal suffixes are English-only, so the month name is forced to invariant culture rather than
+    # the thread culture the Locale line above already reports.
+    $Day = $Date.Day
+    $Suffix = if ($Day -in 11, 12, 13) { 'th' }
+    else {
+        switch ($Day % 10) {
+            1 { 'st' }
+            2 { 'nd' }
+            3 { 'rd' }
+            default { 'th' }
+        }
+    }
+    return '{0} {1}{2} {3}' -f $Date.ToString('MMMM', [System.Globalization.CultureInfo]::InvariantCulture), $Day, $Suffix, $Date.Year
 }
 
 function Format-Duration {
@@ -1273,7 +1292,12 @@ function Search-UpdateCatalog {
 
         $LastUpdated = $null
         if ($DateText -and $DateText -match '(\d{1,2}/\d{1,2}/\d{4})') {
-            try { $LastUpdated = [datetime]::Parse($Matches[1]) } catch { }
+            # The catalog always renders this column as US M/d/yyyy, so parsing it under the caller's
+            # culture (e.g. en-GB reads d/M/yyyy) silently swaps day and month for two-digit days.
+            $Parsed = [datetime]::MinValue
+            if ([datetime]::TryParseExact($Matches[1], 'M/d/yyyy', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$Parsed)) {
+                $LastUpdated = $Parsed
+            }
         }
 
         $SizeMB = $null
@@ -1401,7 +1425,7 @@ function Get-LatestCatalogPackage {
         return $null
     }
 
-    Write-HostTimestamp "  Selected: $($Selected.Title)$(if ($Selected.LastUpdated) { " (released $($Selected.LastUpdated.ToString('yyyy-MM-dd')))" })" -ForegroundColor Green
+    Write-HostTimestamp "  Selected: $($Selected.Title)$(if ($Selected.LastUpdated) { " (released $(Get-FriendlyDate -Date $Selected.LastUpdated))" })" -ForegroundColor Green
 
     if ($BaselineOnly -and $Selected.LastUpdated -and (Test-IsHotpatchMonth -AllResults $Results -ReferenceDate ([datetime]$Selected.LastUpdated))) {
         Write-HostTimestamp "  -BaselineOnly: $($Selected.LastUpdated.ToString('yyyy-MM')) is a hotpatch non-baseline month - skipping this cumulative update." -ForegroundColor Yellow
@@ -2015,8 +2039,9 @@ function Invoke-AutoClean {
         $Item = Get-Item -LiteralPath "$($Stamp.Output.Path)" -ErrorAction SilentlyContinue
         if ($Item -and -not $Item.PSIsContainer) { $Candidates[$Item.FullName.ToLowerInvariant()] = $Item }
     }
-    # Must track every tag Get-DefaultIsoName can emit, including the Server release names.
-    $GeneratedName = '(Win10|Win11|Windows|Server[A-Za-z0-9]*)_[A-Za-z0-9]+_[A-Za-z0-9]+(_[\d.]+)?_\d{8}-\d{4}.*\.iso$'
+    # Must track every tag Get-DefaultIsoName can emit, including the Server release names and the
+    # optional locale tag between architecture and build.
+    $GeneratedName = '(Win10|Win11|Windows|Server[A-Za-z0-9]*)_[A-Za-z0-9]+_[A-Za-z0-9]+(_[A-Za-z0-9]+)?(_[\d.]+)?_\d{8}-\d{4}.*\.iso$'
     # When the output is a remote file path, $FinishedIsoDir is still the default local folder and any ISOs
     # there are orphans from earlier runs, not candidates for this remote-output run.
     if (-not $OutputIsRemote) {
@@ -2593,6 +2618,10 @@ function Get-EditionShortName {
     if ($n -match 'datacenter|standard') {
         if ($n -match 'datacenter') { return 'DC' } else { return 'Std' }
     }
+    # LTSC names all contain "enterprise" too, so this has to run before the plain Enterprise match below.
+    if ($n -match 'ltsc') {
+        if ($n -match 'iot') { return 'IoTLTSC' } else { return 'LTSC' }
+    }
     if ($n -match 'enterprise') { return 'Ent' }
     if ($n -match 'education') { return 'Edu' }
     if ($n -match 'pro') { return 'Pro' }
@@ -2601,8 +2630,8 @@ function Get-EditionShortName {
     if ($Short) { return $Short } else { return 'Windows' }
 }
 
-# Builds the default output ISO name, e.g. Win11_Pro_x64_26100.4061_20260815-1332.iso. The build/UBR comes
-# from the serviced image when available (that is the only place the post-update revision is known),
+# Builds the default output ISO name, e.g. Win11_Pro_x64_enGB_26100.4061_20260815-1332.iso. The build/UBR
+# comes from the serviced image when available (that is the only place the post-update revision is known),
 # otherwise from the source image's version. Multiple kept editions are joined into a compound tag such as EntPro or StdDC.
 function Get-DefaultIsoName {
     param(
@@ -2610,7 +2639,8 @@ function Get-DefaultIsoName {
         [int[]]$Indexes,
         [string]$BuildString,
         [string]$FallbackVersion,
-        [string]$Architecture
+        [string]$Architecture,
+        [string]$Locale
     )
 
     $Kept = @($Images | Where-Object { $Indexes -contains [int]$_.ImageIndex })
@@ -2630,6 +2660,7 @@ function Get-DefaultIsoName {
 
     $Parts = @($WindowsTag, $EditionTag)
     if ($Architecture) { $Parts += ($Architecture -replace '[^A-Za-z0-9]', '') }
+    if ($Locale) { $Parts += ($Locale -replace '[^A-Za-z0-9]', '') }
     if ($BuildUbr) { $Parts += $BuildUbr }
     $Parts += (Get-Date -Format 'yyyyMMdd-HHmm')
     return (($Parts -join '_') + '.iso')
@@ -2639,17 +2670,24 @@ function Get-DefaultIsoName {
 # the file does. oscdimg writes no label unless -l is passed, and unlabelled media turns up as a generic
 # "DVD_ROM" in File Explorer and in the Rufus volume label box.
 function Get-IsoVolumeLabel {
-    param([Parameter(Mandatory)][string]$IsoFileName)
+    param(
+        [Parameter(Mandatory)][string]$IsoFileName,
+        [string]$Locale
+    )
 
     # Windows shows 32 characters, and only A-Z, 0-9 and underscore survive every reader, so the build
     # timestamp is dropped (the label describes contents, not when it was made) and the rest is folded.
     $MaxLength = 32
     $Base = [System.IO.Path]::GetFileNameWithoutExtension($IsoFileName) -replace '_\d{8}-\d{4}$', ''
     $Label = ($Base.ToUpperInvariant() -replace '[^A-Z0-9]', '_') -replace '_+', '_'
+    # A free-form locale tag (unlike the fixed architecture set) can't be matched by pattern, so the exact
+    # value that went into the file name is passed in here to find and drop it.
+    $LocaleTag = if ($Locale) { ($Locale -replace '[^A-Za-z0-9]', '').ToUpperInvariant() } else { $null }
 
-    # Too long drops the architecture first, then shortens the edition, so the Windows release and the
-    # build number (the two things worth reading off a USB stick) always survive intact.
+    # Too long drops the architecture tag, then the locale tag (neither changes the release or the build,
+    # the two things worth reading off a USB stick), then shortens the edition, so those two always survive.
     if ($Label.Length -gt $MaxLength) { $Label = $Label -replace '_(X64|X86|ARM64|AMD64)_', '_' }
+    if ($Label.Length -gt $MaxLength -and $LocaleTag) { $Label = $Label -replace "_$([regex]::Escape($LocaleTag))_", '_' }
     if ($Label.Length -gt $MaxLength -and $Label -match '^([A-Z0-9]+)_([A-Z0-9]+)_(.+)$') {
         $Room = $MaxLength - ($Matches[1].Length + $Matches[3].Length + 2)
         if ($Room -ge 3) {
@@ -3293,6 +3331,25 @@ function Remove-ImageResidue {
 #endregion
 
 #region Image inspection and final report
+# Unloads a hive `reg.exe load`-ed by Get-MountedImageBuild/Get-MountedImageLocale, retrying once because
+# the handle release can be delayed rather than permanent. Warns loudly instead of failing silently,
+# because a hive left loaded under the host's HKLM at commit time ships an orphaned GUID key in the ISO.
+function Dismount-RegistryHive {
+    param([Parameter(Mandatory)][string]$Hive)
+
+    [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+    & reg.exe unload $Hive *> $null
+    if ($LASTEXITCODE -eq 0) { return }
+
+    Write-HostTimestamp "    $Hive did not unload on the first try. Waiting for the handle to clear before retrying..." -ForegroundColor Yellow
+    Start-Sleep -Milliseconds 500
+    [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+    & reg.exe unload $Hive *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-HostTimestamp "    $Hive is still loaded under the host's HKLM and could not be released. Do not commit the mount until this hive is confirmed unloaded, or the ISO ships an orphaned hive-mount key." -ForegroundColor Red
+    }
+}
+
 # Reads the exact build (with UBR) out of an ALREADY-MOUNTED image's offline SOFTWARE hive.
 # Returns a version string, or $null if the hive could not be read.
 function Get-MountedImageBuild {
@@ -3309,9 +3366,31 @@ function Get-MountedImageBuild {
             return "10.0.$($Cv.CurrentBuildNumber).$($Cv.UBR)$(if ($Cv.DisplayVersion) { " ($($Cv.DisplayVersion))" })"
         }
         finally {
-            # The hive will not unload while PowerShell still holds a handle to the key it just read.
-            [gc]::Collect(); [gc]::WaitForPendingFinalizers()
-            & reg.exe unload $Hive *> $null
+            Dismount-RegistryHive -Hive $Hive
+        }
+    }
+    catch { return $null }
+}
+
+# Reads the shipped display language out of an ALREADY-MOUNTED image's offline DEFAULT user hive
+# (Control Panel\International\LocaleName), the same source HKEY_USERS\.DEFAULT exposes live.
+# Returns a culture name such as "en-US", or $null if the hive could not be read.
+function Get-MountedImageLocale {
+    param([Parameter(Mandatory)][string]$MountPath)
+
+    $Hive = 'HKLM\WISO_LOCALE'
+    $DefaultHive = Join-Path $MountPath 'Windows\System32\config\default'
+    if (-not (Test-Path -LiteralPath $DefaultHive)) { return $null }
+    try {
+        & reg.exe load $Hive $DefaultHive *> $null
+        if ($LASTEXITCODE -ne 0) { return $null }
+        try {
+            $Intl = Get-ItemProperty -Path "Registry::$Hive\Control Panel\International" -ErrorAction Stop
+            if (-not $Intl.LocaleName) { return $null }
+            return $Intl.LocaleName
+        }
+        finally {
+            Dismount-RegistryHive -Hive $Hive
         }
     }
     catch { return $null }
@@ -3377,6 +3456,11 @@ function Show-FinalImageInfo {
 
     if ($BuildStr) { Write-HostTimestamp "Final OS build: $BuildStr" -ForegroundColor Cyan }
     else { Write-HostTimestamp "Final OS build: $($Images[0].Version) (revision unavailable)" -ForegroundColor Cyan }
+
+    # Same offline-read-else-WIM-metadata fallback already used for the ISO name and tattoo.
+    $LocaleStr = if ($script:FinalImageLocale) { $script:FinalImageLocale }
+                 else { "$($ImageInfo.DefaultLanguage) (from WIM metadata; offline read unavailable)" }
+    Write-HostTimestamp "Image locale  : $LocaleStr" -ForegroundColor Cyan
 }
 
 #endregion
@@ -3493,6 +3577,14 @@ function Write-BuildTattoo {
 #region Run header
 Write-Host $LineBreak
 Write-HostTimestamp "Windows ISO Updater v$ScriptVersion (slipstream latest updates into a new ISO) on $($env:ComputerName)" -ForegroundColor Cyan
+Write-HostTimestamp "Run date       : $(Get-FriendlyDate)"
+# Recorded because culture-sensitive parsing (e.g. the catalog's "Last Updated" column) breaks only on
+# non-en-US machines, so the log needs to say what locale actually ran without asking the reporter to check.
+# Script-scoped so the build tattoo, written much later, can reuse this instead of reading it a second time.
+$script:CurrentCulture   = [System.Globalization.CultureInfo]::CurrentCulture
+$script:CurrentUICulture = [System.Globalization.CultureInfo]::CurrentUICulture
+$script:SystemLocale     = try { (Get-WinSystemLocale -ErrorAction Stop).Name } catch { 'unknown' }
+Write-HostTimestamp "Locale         : Thread culture $($script:CurrentCulture.Name), UI culture $($script:CurrentUICulture.Name), system locale $script:SystemLocale"
 Write-Host $LineBreak
 
 #endregion
@@ -4723,6 +4815,7 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
                 # Grabbed here because the image is already mounted, since mounting the finished image later
                 # just to read this one value costs several minutes.
                 if (-not $script:FinalBuildString) { $script:FinalBuildString = Get-MountedImageBuild -MountPath $MountDir }
+                if (-not $script:FinalImageLocale) { $script:FinalImageLocale = Get-MountedImageLocale -MountPath $MountDir }
 
                 Write-HostTimestamp '    Committing and unmounting...'
                 Dismount-WindowsImage -Path $MountDir -Save -ErrorAction Stop | Out-Null
@@ -5023,16 +5116,17 @@ if ($ResolvedExtraFiles) {
 #endregion
 
 #region Decide the output ISO name and volume label
-# The name describes what the ISO actually contains: Win11_Pro_x64_26100.4061_20260815-1332.iso. It is
+# The name describes what the ISO actually contains: Win11_Pro_x64_enGB_26100.4061_20260815-1332.iso. It is
 # built even when -OutputIsoPath overrides the path, because the volume label is derived from it.
-$DefaultIsoName = Get-DefaultIsoName -Images $InstallImages -Indexes $KeepIndexes -BuildString $script:FinalBuildString -FallbackVersion $ImageInfo.Version -Architecture $ImageArch
+$IsoLocale = if ($script:FinalImageLocale) { $script:FinalImageLocale } else { "$($ImageInfo.DefaultLanguage)" }
+$DefaultIsoName = Get-DefaultIsoName -Images $InstallImages -Indexes $KeepIndexes -BuildString $script:FinalBuildString -FallbackVersion $ImageInfo.Version -Architecture $ImageArch -Locale $IsoLocale
 if ($IsoNamePrefix -or $IsoNameSuffix) {
     $DefaultIsoName = "$IsoNamePrefix$([System.IO.Path]::GetFileNameWithoutExtension($DefaultIsoName))$IsoNameSuffix.iso"
 }
 if (-not $OutputIsoPath) {
     $OutputIsoPath = Join-Path -Path $FinishedIsoDir -ChildPath $DefaultIsoName
 }
-$IsoVolumeLabel = if ($VolumeLabel) { $VolumeLabel } else { Get-IsoVolumeLabel -IsoFileName $DefaultIsoName }
+$IsoVolumeLabel = if ($VolumeLabel) { $VolumeLabel } else { Get-IsoVolumeLabel -IsoFileName $DefaultIsoName -Locale $IsoLocale }
 # Make sure the destination folder exists before oscdimg writes the ISO into it.
 try {
     $OutDir = Split-Path -Path $OutputIsoPath -Parent
@@ -5080,6 +5174,8 @@ if (-not $SkipTattoo) {
                 User            = "$env:USERDOMAIN\$env:USERNAME"
                 OperatingSystem = "$($OsInfo.Caption) ($($OsInfo.Version))"
                 PowerShell      = "$($PSVersionTable.PSVersion)"
+                # Reuses the run header's read rather than asking Get-WinSystemLocale a second time.
+                Locale          = "Thread culture $($script:CurrentCulture.Name), UI culture $($script:CurrentUICulture.Name), system locale $($script:SystemLocale)"
                 ScriptPath      = $script:ScriptPath
                 CommandLine     = Get-ScriptCommandLine
             }
@@ -5097,6 +5193,9 @@ if (-not $SkipTattoo) {
             }
             Contents    = [ordered]@{
                 FinalBuild         = if ($script:FinalBuildString) { $script:FinalBuildString } else { "$ImageVersionText (unchanged)" }
+                # Read from the offline SYSTEM hive while an edition was mounted to service it, since the
+                # WIM's own metadata (SourceMedia.Language, above) is only ever the value captured at build time.
+                ImageLocale        = if ($script:FinalImageLocale) { $script:FinalImageLocale } else { "$($ImageInfo.DefaultLanguage) (from WIM metadata; offline read unavailable)" }
                 InstallImage       = Split-Path -Leaf $FinalInstallImage
                 EditionsKept       = $KeptNames
                 EditionsRemoved    = $RemovedNames
