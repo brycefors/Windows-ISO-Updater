@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.21.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.21.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -279,7 +279,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.21.2'
+$ScriptVersion = '2026.09.21.3'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -3456,6 +3456,11 @@ function Show-FinalImageInfo {
 
     if ($BuildStr) { Write-HostTimestamp "Final OS build: $BuildStr" -ForegroundColor Cyan }
     else { Write-HostTimestamp "Final OS build: $($Images[0].Version) (revision unavailable)" -ForegroundColor Cyan }
+
+    # Same offline-read-else-WIM-metadata fallback already used for the ISO name and tattoo.
+    $LocaleStr = if ($script:FinalImageLocale) { $script:FinalImageLocale }
+                 else { "$($ImageInfo.DefaultLanguage) (from WIM metadata; offline read unavailable)" }
+    Write-HostTimestamp "Image locale  : $LocaleStr" -ForegroundColor Cyan
 }
 
 #endregion
