@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.22.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.22.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -279,7 +279,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.22.1'
+$ScriptVersion = '2026.09.22.2'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1396,7 +1396,9 @@ function Get-LatestCatalogPackage {
         [int]$CurrentUbr,        # UBR from the WIM header (only a hint - it is confirmed before use)
         [string]$VerifyWimPath,  # WIM to mount read-only to confirm that UBR before anything is skipped
         [ref]$AlreadyCurrent,    # receives the image's confirmed build when the update is not needed
-        [switch]$BaselineOnly
+        [switch]$BaselineOnly,
+        [datetime]$NotAfter,     # optional upper bound - packages released after this date are excluded
+        [ref]$SelectedDate       # receives the selected package's LastUpdated, for bounding a later query by it
     )
 
     Write-HostTimestamp "  Searching the Microsoft Update Catalog for: $Query"
@@ -1412,6 +1414,10 @@ function Get-LatestCatalogPackage {
     if ($TitleInclude) { $Filtered = $Filtered | Where-Object { $_.Title -match $TitleInclude } }
     if ($TitleExclude) { $Filtered = $Filtered | Where-Object { $_.Title -notmatch $TitleExclude } }
     if (-not $AllowPreview) { $Filtered = $Filtered | Where-Object { $_.Title -notmatch '(?i)preview' } }
+    if ($PSBoundParameters.ContainsKey('NotAfter')) {
+        # e.g. keeps the Setup Dynamic Update no newer than the LCU it ships alongside.
+        $Filtered = $Filtered | Where-Object { $_.LastUpdated -and ([datetime]$_.LastUpdated) -le $NotAfter }
+    }
     if (-not $Filtered) {
         Write-HostTimestamp '  No catalog results matched the expected update type after filtering.' -ForegroundColor Yellow
         return $null
@@ -1426,6 +1432,7 @@ function Get-LatestCatalogPackage {
     }
 
     Write-HostTimestamp "  Selected: $($Selected.Title)$(if ($Selected.LastUpdated) { " (released $(Get-FriendlyDate -Date $Selected.LastUpdated))" })" -ForegroundColor Green
+    if ($SelectedDate) { $SelectedDate.Value = $Selected.LastUpdated }
 
     if ($BaselineOnly -and $Selected.LastUpdated -and (Test-IsHotpatchMonth -AllResults $Results -ReferenceDate ([datetime]$Selected.LastUpdated))) {
         Write-HostTimestamp "  -BaselineOnly: $($Selected.LastUpdated.ToString('yyyy-MM')) is a hotpatch non-baseline month - skipping this cumulative update." -ForegroundColor Yellow
@@ -1836,7 +1843,8 @@ function Get-CatalogLatestEntry {
     param(
         [Parameter(Mandatory)][string]$Query,
         [string]$TitleInclude,
-        [string]$TitleExclude
+        [string]$TitleExclude,
+        [datetime]$NotAfter      # optional upper bound - packages released after this date are excluded
     )
     $Results = Search-UpdateCatalog -Query $Query
     if (-not $Results -or $Results.Count -eq 0) { return $null }
@@ -1844,6 +1852,9 @@ function Get-CatalogLatestEntry {
     if ($TitleInclude) { $Filtered = $Filtered | Where-Object { $_.Title -match $TitleInclude } }
     if ($TitleExclude) { $Filtered = $Filtered | Where-Object { $_.Title -notmatch $TitleExclude } }
     $Filtered = $Filtered | Where-Object { $_.Title -notmatch '(?i)preview' }
+    if ($PSBoundParameters.ContainsKey('NotAfter')) {
+        $Filtered = $Filtered | Where-Object { $_.LastUpdated -and ([datetime]$_.LastUpdated) -le $NotAfter }
+    }
     if (-not $Filtered) { return $null }
     return ($Filtered |
         Sort-Object -Property @{ Expression = { $_.LastUpdated }; Descending = $true }, @{ Expression = { $_.SizeMB }; Descending = $true } |
@@ -1908,7 +1919,11 @@ function Get-ExpectedUpdateSet {
         $Set.Add("DotNet=$(Get-CatalogEntryTag -Entry $DotNet)")
     }
     if (-not $SkipSetupDU) {
-        $SetupDu = Get-CatalogLatestEntry -Query "Setup Dynamic Update $Product $CatalogArch" -TitleInclude '(?i)setup dynamic update'
+        # Bounds the Setup Dynamic Update by the LCU's own date so a stamp comparison always agrees with
+        # what the download step would actually pick (see Get-LatestCatalogPackage's -NotAfter).
+        $SetupDuArgs = @{ Query = "Setup Dynamic Update $Product $CatalogArch"; TitleInclude = '(?i)setup dynamic update' }
+        if ($Lcu.LastUpdated) { $SetupDuArgs.NotAfter = $Lcu.LastUpdated }
+        $SetupDu = Get-CatalogLatestEntry @SetupDuArgs
         $Set.Add("SetupDU=$(Get-CatalogEntryTag -Entry $SetupDu)")
     }
     if ($ServiceWinRE) {
@@ -2564,7 +2579,7 @@ function Get-EditionRank {
     elseif ($n -match 'education|workstation') { $Rank = 5 }  # excluded tiers - lowest priority
     elseif ($n -match 'enterprise') { $Rank = 60 }
     elseif ($n -match 'pro') { $Rank = 40 }
-    elseif ($n -match 'home|core') { $Rank = 20 }
+    elseif ($n -match 'home|core|famille') { $Rank = 20 } # Famille is the French localized name for Home
     else { $Rank = 10 }
     if ($n -match 'desktop experience') { $Rank += 1 } # prefer the full server install over Server Core
     if ($n -match '(^|\s)n(\s|$)') { $Rank -= 2 }   # prefer base over "N" variants
@@ -2596,7 +2611,7 @@ function Select-DefaultEditions {
     else {
         # Highest tier first, so the top edition lands at index 1 after the re-export renumbers the image
         # and an answer file selecting by /IMAGE/INDEX still gets the edition it used to.
-        foreach ($Tier in '(?i)enterprise', '(?i)pro', '(?i)home|core') {
+        foreach ($Tier in '(?i)enterprise', '(?i)pro', '(?i)home|core|famille') {
             $Best = $Ranked |
                 Where-Object { "$($_.ImageName)" -match $Tier -and "$($_.ImageName)" -notmatch '(?i)education|workstation' } |
                 Where-Object { $Keep.ImageIndex -notcontains [int]$_.ImageIndex } |
@@ -2625,7 +2640,7 @@ function Get-EditionShortName {
     if ($n -match 'enterprise') { return 'Ent' }
     if ($n -match 'education') { return 'Edu' }
     if ($n -match 'pro') { return 'Pro' }
-    if ($n -match 'home|core') { return 'Home' }
+    if ($n -match 'home|core|famille') { return 'Home' } # Famille is the French localized name for Home
     $Short = ($Name -replace '(?i)^\s*windows\s*\d+\s*', '') -replace '[^A-Za-z0-9]', ''
     if ($Short) { return $Short } else { return 'Windows' }
 }
@@ -4590,13 +4605,14 @@ else {
         $Exclude = '(?i)\.net|dynamic update'
         $script:LcuUpToDate = $null
         $script:LcuSkippedBaselineOnly = $false
-        $script:Lcu = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly
+        $script:LcuReleaseDate = $null
+        $script:Lcu = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly -SelectedDate ([ref]$script:LcuReleaseDate)
         if (-not $script:Lcu -and -not $script:LcuUpToDate -and -not $Server) {
             # Retry with a looser query (some releases omit the "Version xxHx" token in the title). Server
             # media is excluded because its product name without the version matches every Server release.
             $Query2 = "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems"
             Write-HostTimestamp "  Retrying with a broader query: $Query2" -ForegroundColor Yellow
-            $script:Lcu = Get-LatestCatalogPackage -Query $Query2 -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly
+            $script:Lcu = Get-LatestCatalogPackage -Query $Query2 -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly -SelectedDate ([ref]$script:LcuReleaseDate)
         }
     }
     if ($script:Lcu) { $UpdateGroups.Add(@($script:Lcu)) }
@@ -4630,7 +4646,15 @@ else {
     # manifests in step with the serviced boot.wim. It is therefore kept out of $UpdateGroups.
     if (-not $SkipSetupDU) {
         Invoke-Task -Description 'Downloading the latest Setup Dynamic Update from the Microsoft Update Catalog...' -ScriptBlock {
-            $script:SetupDu = Get-LatestCatalogPackage -Query "Setup Dynamic Update $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) $CatalogArch" -DownloadDir $DlDir -TitleInclude '(?i)setup dynamic update'
+            # Bounded by the LCU's own release date, since a DU published after it can carry Setup logic
+            # the LCU's servicing stack does not yet expect.
+            $SetupDuArgs = @{
+                Query        = "Setup Dynamic Update $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) $CatalogArch"
+                DownloadDir  = $DlDir
+                TitleInclude = '(?i)setup dynamic update'
+            }
+            if ($script:LcuReleaseDate) { $SetupDuArgs.NotAfter = $script:LcuReleaseDate }
+            $script:SetupDu = Get-LatestCatalogPackage @SetupDuArgs
         }
         if (-not $script:SetupDu) {
             Write-HostTimestamp '  No Setup Dynamic Update was found. The media Setup files will only be refreshed from boot.wim, which can make Windows Setup fail on the finished ISO.' -ForegroundColor Yellow
