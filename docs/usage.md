@@ -198,7 +198,7 @@ Every kept edition is serviced by default, so a two-edition build takes roughly 
 .\Run-Windows-ISO-Updater.bat -KeepEditions 6,1
 ```
 
-`-KeepEditions` accepts edition names (partial matches allowed) or index numbers, and overrides the default. Only the kept editions are serviced and re-exported, so the removed editions are gone from the final `install.wim`. It works with `-SkipUpdates` too, if you only want to trim editions without integrating updates.
+`-KeepEditions` accepts edition names (partial matches allowed) or index numbers, and overrides the default. Only the kept editions are serviced and re-exported, so the removed editions are gone from the final `install.wim`. If none of your values match any edition in the ISO, all editions are kept instead (the script prints a warning and lists the available editions). A partial mismatch (some values match, some don't) exits with error 1. It works with `-SkipUpdates` too, if you only want to trim editions without integrating updates.
 
 ## Adding Drivers
 

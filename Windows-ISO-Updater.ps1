@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.21.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.22.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -279,7 +279,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.21.3'
+$ScriptVersion = '2026.09.22.1'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -4684,23 +4684,29 @@ if ($script:EsdPreTrimmed) {
 elseif ($KeepEditions -and $KeepEditions.Count -gt 0) {
     $KeepUnmatched = $null
     $KeepIndexes = @(Resolve-EditionIndexes -Images $InstallImages -Tokens $KeepEditions -Unmatched ([ref]$KeepUnmatched))
-    if ($KeepUnmatched -and $KeepUnmatched.Count -gt 0) {
+    if ($KeepIndexes.Count -eq 0) {
+        # None of several values matching nothing is almost always a typo in the whole list, not a
+        # deliberate "keep nothing", so fall back to every edition rather than a hard exit.
+        Write-HostTimestamp "None of these -KeepEditions values matched any edition: $($KeepEditions -join ', '). Keeping all $($InstallImages.Count) editions instead." -ForegroundColor Yellow
+        Write-HostTimestamp 'Available editions:' -ForegroundColor Yellow
+        $InstallImages | ForEach-Object { Write-Host "    [$($_.ImageIndex)] $($_.ImageName)" }
+        $KeepIndexes = @($InstallImages.ImageIndex)
+        Write-Host $LineBreak
+    }
+    elseif ($KeepUnmatched -and $KeepUnmatched.Count -gt 0) {
         Write-HostTimestamp "These -KeepEditions values did not match any edition: $($KeepUnmatched -join ', ')" -ForegroundColor Red
         Write-HostTimestamp 'Available editions:' -ForegroundColor Yellow
         $InstallImages | ForEach-Object { Write-Host "    [$($_.ImageIndex)] $($_.ImageName)" }
         Stop-Transcript | Out-Null
         exit 1
     }
-    if ($KeepIndexes.Count -eq 0) {
-        Write-HostTimestamp '-KeepEditions matched no editions. Cannot continue.' -ForegroundColor Red
-        Stop-Transcript | Out-Null
-        exit 1
+    else {
+        $KeptNames = $InstallImages | Where-Object { $KeepIndexes -contains $_.ImageIndex } | ForEach-Object { $_.ImageName }
+        $DroppedNames = $InstallImages | Where-Object { $KeepIndexes -notcontains $_.ImageIndex } | ForEach-Object { $_.ImageName }
+        Write-HostTimestamp "Keeping $($KeepIndexes.Count) of $($InstallImages.Count) editions: $($KeptNames -join ', ')" -ForegroundColor Cyan
+        if ($DroppedNames) { Write-HostTimestamp "Removing from the ISO: $($DroppedNames -join ', ')" -ForegroundColor Yellow }
+        Write-Host $LineBreak
     }
-    $KeptNames = $InstallImages | Where-Object { $KeepIndexes -contains $_.ImageIndex } | ForEach-Object { $_.ImageName }
-    $DroppedNames = $InstallImages | Where-Object { $KeepIndexes -notcontains $_.ImageIndex } | ForEach-Object { $_.ImageName }
-    Write-HostTimestamp "Keeping $($KeepIndexes.Count) of $($InstallImages.Count) editions: $($KeptNames -join ', ')" -ForegroundColor Cyan
-    if ($DroppedNames) { Write-HostTimestamp "Removing from the ISO: $($DroppedNames -join ', ')" -ForegroundColor Yellow }
-    Write-Host $LineBreak
 }
 elseif ($KeepAllEditions) {
     Write-HostTimestamp "Keeping all $($InstallImages.Count) editions (-KeepAllEditions)." -ForegroundColor Cyan
