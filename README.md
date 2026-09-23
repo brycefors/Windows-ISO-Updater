@@ -73,6 +73,9 @@ This is a **disk- and time-intensive** operation, and with the default parameter
 - **`oscdimg.exe`**, downloaded automatically from Microsoft if it is not already present (or installed with the ADK via `-InstallAdk`).
 - Plenty of free disk space on a **local** working drive, as covered in [Disk Space Requirements](docs/reference.md#disk-space-requirements).
 
+> [!NOTE]
+> This script is primarily designed and tested for Windows 11 with en-US locale. While it may work with other locales and Windows 10, international language support is not fully guaranteed. Full support for international locales is planned for future versions.
+
 ## License
 
 Released under the [MIT License](LICENSE). Nothing third-party is redistributed here: `oscdimg.exe`, Fido and the Microsoft updates are all fetched from their own sources at run time and keep their own licenses, and the Windows media itself stays subject to your Microsoft license terms.

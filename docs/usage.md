@@ -6,6 +6,9 @@ The easiest and recommended way to run this script is by using the `Run-Windows-
 
 **As long as you use the batch file, no setup or PowerShell experience is needed.** It requests administrator rights through the normal UAC prompt and runs the script with `-ExecutionPolicy Bypass` scoped to that single run, so your system-wide execution policy is never changed. Running the `.ps1` by hand works too, but then elevation and execution policy are on you.
 
+> [!NOTE]
+> This script is primarily designed and tested for Windows 11 with en-US locale. If you are running this on a system with a different locale or Windows 10, some features or output may not work as expected. Please report any locale-specific issues you encounter.
+
 ## Recommended Method: Using the Batch File
 
 1.  **Download Files:** Make sure both `Run-Windows-ISO-Updater.bat` and `Windows-ISO-Updater.ps1` are saved in the **same folder**.
@@ -195,7 +198,7 @@ Every kept edition is serviced by default, so a two-edition build takes roughly 
 .\Run-Windows-ISO-Updater.bat -KeepEditions 6,1
 ```
 
-`-KeepEditions` accepts edition names (partial matches allowed) or index numbers, and overrides the default. Only the kept editions are serviced and re-exported, so the removed editions are gone from the final `install.wim`. It works with `-SkipUpdates` too, if you only want to trim editions without integrating updates.
+`-KeepEditions` accepts edition names (partial matches allowed) or index numbers, and overrides the default. Only the kept editions are serviced and re-exported, so the removed editions are gone from the final `install.wim`. If none of your values match any edition in the ISO, all editions are kept instead (the script prints a warning and lists the available editions). A partial mismatch (some values match, some don't) exits with error 1. It works with `-SkipUpdates` too, if you only want to trim editions without integrating updates.
 
 ## Adding Drivers
 
