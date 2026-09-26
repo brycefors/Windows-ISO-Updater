@@ -77,10 +77,7 @@ A few differences worth knowing:
   instead, or `-KeepAllEditions` to keep every edition the media carries.
 - Microsoft only publishes a **Setup Dynamic Update** for Server 2025 and newer, so on older Server media
   the script reports that none was found and refreshes the media Setup files from `boot.wim` alone.
-- **A mismatch between the media and the switch is a fatal error, both ways round.** The script reads the
-  edition out of the image right after extraction, and stops with exit code 1 if `-Server` was passed
-  against client media or omitted against Server media, rather than downloading updates that DISM would
-  refuse to apply.
+- `-Server` is only required pre-mount when no local ISO exists and none can be auto-downloaded (neither Fido nor the Media Creation Tool serves Server media). Once an ISO is mounted, the script auto-detects whether it is Server or client media by reading the edition from the image. If `-Server` was passed but the media is actually client, or omitted but the media is actually Server, the script prints a yellow console warning and continues with the detected media. The update selection and edition handling automatically adapt to what was found, so the build completes successfully.
 - **Give Server its own working folder if you also build client ISOs.** See
   [Building Several Windows Versions Side by Side](#building-several-windows-versions-side-by-side).
 

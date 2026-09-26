@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.22.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.25.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -77,11 +77,11 @@ param(
     [Parameter(HelpMessage = 'When -IsoPath (or the download folder) is a directory holding more than one .iso, pick the largest .iso over 3 GB instead of the most recently modified one')]
     [switch]$UseLargestIso,
 
-    [Parameter(HelpMessage = 'Windows version to download/update: 10 or 11. Defaults to 11')]
+    [Parameter(HelpMessage = 'Windows version to download when no ISO is supplied: 10 or 11. Defaults to 11. Once an ISO is mounted, catalog searches use the version the image itself reports, not this parameter, so it does not need to match -IsoPath media')]
     [ValidateSet('10', '11')]
     [string]$WindowsVersion = '11',
 
-    [Parameter(HelpMessage = 'Service Windows Server media (2016 through 2025) instead of a client ISO. Server ISOs cannot be downloaded automatically, so supply one with -IsoPath or drop it into the download folder. -WindowsVersion, -Release and -Language are then ignored')]
+    [Parameter(HelpMessage = 'Service Windows Server media (2016 through 2025) instead of a client ISO. Only needed to skip the automatic download attempt, since neither Fido nor the Media Creation Tool serves Server media, so without this you must supply Server media yourself with -IsoPath or drop it into the download folder. Once an ISO is mounted, Server versus client is detected from the image itself, so -IsoPath pointed at Server media works without this switch too. -WindowsVersion, -Release and -Language are ignored once Server media is detected')]
     [switch]$Server,
 
     [Parameter(HelpMessage = 'Fido release to request (e.g. 25H2, 24H2) or "Latest". Defaults to Latest')]
@@ -279,7 +279,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.22.2'
+$ScriptVersion = '2026.09.25.1'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -465,6 +465,14 @@ $script:OutputIsoSha256 = $null
 # Set only when -IsoPath was copied into $DlDir from a remote/cloud path, so the stamp can tell that copy
 # apart from an ISO the user placed in $DlDir themselves - the two must never be cleaned up the same way.
 $script:SourceLocalCopy = $null
+# Read by Get-CatalogProductQuery for client media. Starts as -WindowsVersion, then corrected once the
+# mounted (or stamped) image's own build number is known, so an ISO that does not match -WindowsVersion
+# still gets the right catalog search.
+$script:EffectiveWindowsVersion = $WindowsVersion
+# Read the same way by every Server/client branch below. Starts as -Server, then corrected once the
+# mounted image is known to actually be Server or client media, so -IsoPath media that disagrees with
+# -Server still gets the right catalog family and edition keep-list.
+$script:EffectiveServer = [bool]$Server
 #endregion
 
 #region Functions
@@ -1215,8 +1223,8 @@ function Resolve-FeatureUpdateName {
 function Get-CatalogProductQuery {
     param([string]$FeatureUpdate)
 
-    if (-not $Server) {
-        return "Windows $WindowsVersion$(if ($FeatureUpdate) { " Version $FeatureUpdate" })"
+    if (-not $script:EffectiveServer) {
+        return "Windows $script:EffectiveWindowsVersion$(if ($FeatureUpdate) { " Version $FeatureUpdate" })"
     }
     switch ($FeatureUpdate) {
         '1607' { return 'Windows Server 2016' }
@@ -1890,7 +1898,7 @@ function Get-ExpectedUpdateSet {
     if (-not $CatalogArch) { return $null }
     # The server product name carries no branding of its own, so without a feature update it matches every
     # Server release in the catalog and no query can identify this media.
-    if ($Server -and -not $FeatureName) { return $null }
+    if ($script:EffectiveServer -and -not $FeatureName) { return $null }
 
     $Product = Get-CatalogProductQuery -FeatureUpdate $FeatureName
     $Include = '(?i)cumulative update for (windows|microsoft server operating system)'
@@ -1899,7 +1907,7 @@ function Get-ExpectedUpdateSet {
 
     # Same queries (including the broader fallback) the download step uses, so the two always agree.
     $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $Product for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude
-    if (-not $Lcu -and -not $Server) {
+    if (-not $Lcu -and -not $script:EffectiveServer) {
         $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude
     }
     if (-not $Lcu) { return $null }
@@ -1929,7 +1937,7 @@ function Get-ExpectedUpdateSet {
     if ($ServiceWinRE) {
         # Server media labels the Safe OS package plain "Dynamic Update", so the Setup one is excluded by
         # name instead of the Safe OS one being required by name.
-        $SafeInclude = if ($Server) { '(?i)dynamic update' } else { '(?i)safe os dynamic update' }
+        $SafeInclude = if ($script:EffectiveServer) { '(?i)dynamic update' } else { '(?i)safe os dynamic update' }
         $SafeOs = Get-CatalogLatestEntry -Query "Safe OS Dynamic Update $Product $CatalogArch" -TitleInclude $SafeInclude -TitleExclude '(?i)setup dynamic update'
         $Set.Add("SafeOS=$(Get-CatalogEntryTag -Entry $SafeOs)")
     }
@@ -2668,7 +2676,7 @@ function Get-DefaultIsoName {
     }
     $BuildNumber = if ("$BuildUbr" -match '^(\d+)') { [int]$Matches[1] } else { 0 }
     $WindowsTag =
-        if ($Server) { Get-ServerReleaseName -Build $BuildNumber }
+        if ($script:EffectiveServer) { Get-ServerReleaseName -Build $BuildNumber }
         elseif ($BuildNumber -ge 22000) { 'Win11' }
         elseif ($BuildNumber -gt 0) { 'Win10' }
         else { 'Windows' }
@@ -4299,6 +4307,12 @@ if (-not $NoStamp) {
         if ($script:PreviousStamp -and $script:PreviousStamp.Image) {
             $StampFeature = "$($script:PreviousStamp.Image.FeatureUpdate)"
             $StampArch    = "$($script:PreviousStamp.Image.CatalogArch)"
+            # Same correction as below, taken from the last stamp's recorded build instead of a mount,
+            # since that is the whole point of this pre-extraction check.
+            if (-not $Server) {
+                $StampBuild = if ($script:PreviousStamp.Image.Build) { [int]$script:PreviousStamp.Image.Build } else { 0 }
+                $script:EffectiveWindowsVersion = if ($StampBuild -ge 22000) { '11' } elseif ($StampBuild -gt 0) { '10' } else { $WindowsVersion }
+            }
             $script:ExpectedUpdateSet = Get-ExpectedUpdateSet -FeatureName $StampFeature -CatalogArch $StampArch
             $script:ExpectedUpdateFor = "$StampFeature|$StampArch"
 
@@ -4453,7 +4467,7 @@ if (-not (Test-Path -LiteralPath $InstallWimExtracted) -and (Test-Path -LiteralP
             if ($Resolved.Count -gt 0 -and -not $EsdUnmatched) { $Wanted = $Resolved }
         }
         elseif (-not $KeepAllEditions -and $Images.Count -gt 1) {
-            $Wanted = @(Select-DefaultEditions -Images $Images -ServerMedia:$Server)
+            $Wanted = @(Select-DefaultEditions -Images $Images -ServerMedia:$script:EffectiveServer)
         }
 
         $Skipped = @($Images | Where-Object { $Wanted -notcontains [int]$_.ImageIndex })
@@ -4487,6 +4501,11 @@ $ImageInfo = $null
 try { $ImageInfo = Get-WindowsImage -ImagePath $InstallWimExtracted -Index 1 -ErrorAction Stop } catch { }
 $ImageBuild = 0
 if ($ImageInfo -and $ImageInfo.Version -match '^\d+\.\d+\.(\d+)') { $ImageBuild = [int]$Matches[1] }
+# Catalog searches for client media go by the image's own build, not -WindowsVersion, so an ISO supplied
+# with -IsoPath is queried correctly even when -WindowsVersion names the other family or was left default.
+if (-not $Server) {
+    $script:EffectiveWindowsVersion = if ($ImageBuild -ge 22000) { '11' } elseif ($ImageBuild -gt 0) { '10' } else { $WindowsVersion }
+}
 # The WIM header carries the UBR as the "service pack build", so the image's exact patch level is known
 # without mounting anything.
 $ImageUbr = if ($ImageInfo -and $null -ne $ImageInfo.SPBuild) { [int]$ImageInfo.SPBuild } else { 0 }
@@ -4507,22 +4526,17 @@ if ($ImageUbr -and $ImageVersionText -match '^\d+\.\d+\.\d+$') { $ImageVersionTe
 Write-HostTimestamp "Image build    : $ImageVersionText$(if ($FeatureName) { " ($FeatureName)" })"
 Write-HostTimestamp "Image arch     : $ImageArch"
 
-# -Server picks an entirely different family of catalog queries, so a mismatch would fetch an update that
-# DISM then refuses to apply. Stop now rather than an hour into the run. EditionId is not localised, so
-# this holds on non-English media too.
+# The image itself is now the source of truth for Server versus client, the same way catalog queries
+# already follow the mounted build rather than -WindowsVersion. EditionId is not localised, so this
+# holds on non-English media too.
 $ImageIsServer = "$($ImageInfo.ImageName) $($ImageInfo.EditionId)" -match '(?i)server'
 if ($ImageIsServer -and -not $Server) {
-    Write-HostTimestamp "This is Windows Server media, but -Server was not passed: $($ImageInfo.ImageName) (edition '$($ImageInfo.EditionId)')." -ForegroundColor Red
-    Write-HostTimestamp '  Client updates would be downloaded and DISM would refuse to apply them, so this run stops here. Re-run with -Server.' -ForegroundColor Red
-    Stop-Transcript | Out-Null
-    exit 1
+    Write-HostTimestamp "This is Windows Server media, but -Server was not passed: $($ImageInfo.ImageName) (edition '$($ImageInfo.EditionId)'). Continuing as Windows Server, since that is what the image actually is." -ForegroundColor Yellow
 }
 elseif ($Server -and $ImageInfo -and -not $ImageIsServer) {
-    Write-HostTimestamp "-Server was passed, but this is client media, not Windows Server: $($ImageInfo.ImageName) (edition '$($ImageInfo.EditionId)')." -ForegroundColor Red
-    Write-HostTimestamp '  Server updates would be downloaded and DISM would refuse to apply them, so this run stops here. Re-run without -Server, or point -IsoPath at Windows Server media.' -ForegroundColor Red
-    Stop-Transcript | Out-Null
-    exit 1
+    Write-HostTimestamp "-Server was passed, but this is client media, not Windows Server: $($ImageInfo.ImageName) (edition '$($ImageInfo.EditionId)'). Continuing as client media, since that is what was actually found." -ForegroundColor Yellow
 }
+$script:EffectiveServer = $ImageIsServer
 
 # DISM on a Windows 10 or later host cannot service a Vista, 7 or 8 era image, and Microsoft never
 # published cumulative updates for those releases either, so all that is possible on media that old is a
@@ -4585,7 +4599,7 @@ else {
     # Dropping the version token narrows a client query to the right product family, but the server one
     # becomes "Microsoft server operating system", which matches every release and would hand back the
     # newest Server LCU no matter how old this media is.
-    if ($Server -and -not $FeatureName) {
+    if ($script:EffectiveServer -and -not $FeatureName) {
         Write-HostTimestamp "Neither this script nor the image itself could name the release build $ImageBuild belongs to, so there is no catalog query that can identify this media." -ForegroundColor Red
         Write-HostTimestamp '  Searching on the product name alone would return an update for a different Server release, which DISM would refuse to apply, so this run stops here.' -ForegroundColor Red
         Write-HostTimestamp '  Supply the packages yourself with -UpdatePath, or use -SkipUpdates to repack the media unchanged.' -ForegroundColor Yellow
@@ -4607,7 +4621,7 @@ else {
         $script:LcuSkippedBaselineOnly = $false
         $script:LcuReleaseDate = $null
         $script:Lcu = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly -SelectedDate ([ref]$script:LcuReleaseDate)
-        if (-not $script:Lcu -and -not $script:LcuUpToDate -and -not $Server) {
+        if (-not $script:Lcu -and -not $script:LcuUpToDate -and -not $script:EffectiveServer) {
             # Retry with a looser query (some releases omit the "Version xxHx" token in the title). Server
             # media is excluded because its product name without the version matches every Server release.
             $Query2 = "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems"
@@ -4658,7 +4672,7 @@ else {
         }
         if (-not $script:SetupDu) {
             Write-HostTimestamp '  No Setup Dynamic Update was found. The media Setup files will only be refreshed from boot.wim, which can make Windows Setup fail on the finished ISO.' -ForegroundColor Yellow
-            if ($Server) {
+            if ($script:EffectiveServer) {
                 Write-HostTimestamp '  Microsoft only publishes one for Server 2025 and newer, so this is expected on older Server media.' -ForegroundColor DarkGray
             }
         }
@@ -4669,7 +4683,7 @@ else {
         Invoke-Task -Description 'Looking for a Safe OS Dynamic Update for the recovery image (WinRE)...' -ScriptBlock {
             # Server media labels the Safe OS package plain "Dynamic Update", so the Setup one is excluded
             # by name instead of the Safe OS one being required by name.
-            $SafeInclude = if ($Server) { '(?i)dynamic update' } else { '(?i)safe os dynamic update' }
+            $SafeInclude = if ($script:EffectiveServer) { '(?i)dynamic update' } else { '(?i)safe os dynamic update' }
             $script:SafeOs = Get-LatestCatalogPackage -Query "Safe OS Dynamic Update $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) $CatalogArch" -DownloadDir $DlDir -TitleInclude $SafeInclude -TitleExclude '(?i)setup dynamic update'
         }
         if ($script:SafeOs) { $SafeOsGroup = @($script:SafeOs) }
@@ -4737,12 +4751,12 @@ elseif ($KeepAllEditions) {
     Write-Host $LineBreak
 }
 elseif ($InstallImages.Count -gt 1) {
-    $KeepIndexes = @(Select-DefaultEditions -Images $InstallImages -ServerMedia:$Server)
+    $KeepIndexes = @(Select-DefaultEditions -Images $InstallImages -ServerMedia:$script:EffectiveServer)
     $KeptNames = $InstallImages | Where-Object { $KeepIndexes -contains [int]$_.ImageIndex } | ForEach-Object { $_.ImageName }
     $DroppedNames = $InstallImages | Where-Object { $KeepIndexes -notcontains [int]$_.ImageIndex } | ForEach-Object { $_.ImageName }
-    $EditionRule = if ($Server) { 'the most upgradeable edition' } elseif ($KeepIndexes.Count -gt 1) { 'the Enterprise, Pro and Home editions the media carries' } else { 'one edition' }
+    $EditionRule = if ($script:EffectiveServer) { 'the most upgradeable edition' } elseif ($KeepIndexes.Count -gt 1) { 'the Enterprise, Pro and Home editions the media carries' } else { 'one edition' }
     Write-HostTimestamp "Keeping only $EditionRule to speed up the build: $($KeptNames -join ', '). Use -KeepAllEditions to keep them all, or -KeepEditions to choose." -ForegroundColor Cyan
-    if ($Server) { Write-HostTimestamp '  Standard can be upgraded to Datacenter in place with DISM /Set-Edition, but Datacenter can never be downgraded, so Standard is the safer edition to ship.' -ForegroundColor DarkGray }
+    if ($script:EffectiveServer) { Write-HostTimestamp '  Standard can be upgraded to Datacenter in place with DISM /Set-Edition, but Datacenter can never be downgraded, so Standard is the safer edition to ship.' -ForegroundColor DarkGray }
     if ($DroppedNames) { Write-HostTimestamp "Removing from the ISO: $($DroppedNames -join ', ')" -ForegroundColor Yellow }
     Write-Host $LineBreak
 }
