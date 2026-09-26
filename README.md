@@ -1,81 +1,74 @@
 # Windows ISO Updater
 
-This is a specialized companion to the main [Windows Fix-Up](https://github.com/brycefors/Windows-Fix-Up), [Windows Update Fix](https://github.com/brycefors/Windows-Fix-Up/tree/main/Windows-Update-Fix), and [Windows In-Place Upgrade](https://github.com/brycefors/Windows-Fix-Up/tree/main/Windows-InPlace-Upgrade) scripts. Instead of repairing an installed system, it builds **fresh, fully-patched installation media**: it takes an official Microsoft ISO, integrates ("slipstreams") the latest cumulative update directly into the Windows images, and recompiles a brand-new bootable ISO that is already up to date.
+Automate the process of updating Windows installation media. This PowerShell script takes an official Microsoft ISO, slipstreams the latest cumulative updates directly into the Windows image using DISM, and generates a fresh, fully patched bootable ISO. 
 
-This PowerShell script automates the whole process. A clean install or in-place upgrade started from the resulting ISO begins already patched, instead of spending a long time downloading and installing the same cumulative update after Setup finishes.
+Installing Windows from this updated media saves time by eliminating large post-installation update downloads.
 
-**No PowerShell knowledge is required, just double-click `Run-Windows-ISO-Updater.bat`.** Everything is designed to run safely with its defaults: the batch file handles the UAC prompt and the execution policy for you (without changing any system-wide setting), the script explains what it is about to do and waits for your confirmation, and **nothing on the machine you run it from is modified**, because the build happens entirely against files in a working folder. Every file it fetches (the ISO, the updates, `oscdimg.exe`, and the Fido helper) is verified to come from an official Microsoft or GitHub source before it is used, as described in [Important Notes](#important-notes).
+## Key Features
+
+* **Safe Execution**: All operations occur within an isolated temporary directory (`C:\WISO-Work` by default). The host system configuration remains untouched.
+* **No Manual ADK Setup Needed**: Automatically fetches a verified copy of `oscdimg.exe` from Microsoft servers to compile the media.
+* **Official Sources Only**: Downloads packages directly from Microsoft endpoints over HTTPS.
+* **Windows Server Support**: Compatible with Windows Server media using the `-Server` flag.
+
+---
 
 ## Quick Start
 
-1.  Put `Run-Windows-ISO-Updater.bat` and `Windows-ISO-Updater.ps1` in the same folder.
-2.  Have a Windows ISO ready. Drop it into `C:\WISO-Work\Downloads` or pass it with `-IsoPath`. The script does not fetch one for you unless you add `-UseFido` ([why](docs/design-notes.md#why-the-iso-has-to-come-from-you)).
-3.  Double-click the batch file and accept the UAC prompt.
-4.  Read the summary it prints and confirm.
+1. Place `Run-Windows-ISO-Updater.bat` and `Windows-ISO-Updater.ps1` in the same directory.
+2. Put an official Windows ISO in `C:\WISO-Work\Downloads` or specify its location with `-IsoPath`.
+3. Right-click `Run-Windows-ISO-Updater.bat` and select **Run as administrator**.
+4. Confirm the build settings displayed in the console prompt.
 
-Everything else is optional. For a specific edition, your own ISO, or a run with no prompts:
+### Command Examples
 
+**Unattended Custom Build:**
 ```shell
 .\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Win11.iso" -Edition "Windows 11 Pro" -Unattended
 ```
 
-**Windows Server** media works too, with `-Server`. Server ISOs cannot be downloaded automatically, so
-pass your own:
-
+**Windows Server Build:**
 ```shell
 .\Run-Windows-ISO-Updater.bat -Server -IsoPath "C:\ISOs\Server2025.iso"
 ```
 
-## Documentation
+---
 
-| Page | Contents |
-|---|---|
-| [Usage](docs/usage.md) | Running the script, command-line examples, Windows Server media, slimming the ISO by removing editions, adding drivers and your own files, and building several Windows versions side by side. |
-| [Command-Line Parameters](docs/parameters.md) | Every parameter and what it does. |
-| [Scheduled Runs](docs/scheduled-runs.md) | Running this from a scheduled task: build stamps, skipping runs that would change nothing, and `-AutoClean` housekeeping. |
-| [Unattended Installs](docs/unattended-installs.md) | `-UnattendPath`, plus three worked answer files: a no-OOBE lab machine, a sysprep gold image, and a fully unattended variant with no disk-wipe confirmation. |
-| [Design Notes](docs/design-notes.md) | Why the ISO has to come from you, why the already-patched check works the way it does, why both `boot.wim` indexes are serviced, why you should not re-update an ISO this script built, why two builds are never the same size, and what Windows Update still offers afterwards. |
-| [Reference](docs/reference.md) | Step by step of a run, the build record written onto the finished ISO, how files are downloaded, disk space, output locations, and logging. |
+## Technical Considerations: Local Storage vs Network / Cloud Paths
 
-## Writing to USB
+* **Local Disk Requirement**: DISM mounting routines require local storage. Cloud-synced directories (OneDrive, Dropbox, Google Drive) introduce file-locking and sparse-file hydration issues that cause servicing errors, such as Unattend execution failures. Network shares (UNC paths and mapped drives) cannot host DISM scratch mounts.
+* **Alternative Perspective**: Storing source media and finished builds on remote network shares remains practical for pipeline workflows. The script accommodates this by copying a remote source ISO to a local working path before servicing, then uploading the finished image back to the remote target.
+* **Outcome**: Servicing operations will fail unless the primary working directory (`-WorkPath`) resides on a physical local disk. Keep the working directory local, and limit network paths strictly to input sources and final output destinations.
 
-The ISO produced by this script is a standard bootable Windows ISO built from an official Microsoft source. Its signatures are intact, so Secure Boot on any compliant device treats it exactly like media downloaded directly from Microsoft. Secure Boot should never be an obstacle when booting from it.
+---
 
-[Rufus](https://rufus.ie) is a popular tool for writing the ISO to USB. In its default mode it writes the image as-is, and the result boots and installs without issue.
+## Technical Considerations: Secure Boot and Media Creation
 
-> [!WARNING]
-> Rufus offers optional customizations at write time: bypassing TPM and Secure Boot requirements, injecting an `autounattend.xml`, or adding its own helper executable. These modifications alter the contents of the media after it leaves Microsoft's signing chain. On some devices with strict Secure Boot policies those changes will be caught and the drive will not boot. If the USB fails to boot on a device where Secure Boot is enabled, re-flash with all Rufus customizations turned off.
+* **Stock Media Integrity**: The script produces standard ISOs preserving official Microsoft signatures. These boot cleanly under standard UEFI Secure Boot policies.
+* **Alternative Perspective**: Tools like Rufus provide deployment conveniences, such as injecting `autounattend.xml` or bypassing TPM hardware checks.
+* **Outcome**: Modifying installation binaries or loader paths invalidates the Microsoft signature chain. If a target machine enforces strict Secure Boot validation, use standard media flashing without third-party bypasses to prevent boot rejections.
 
-## Important Notes
-
-This is a **disk- and time-intensive** operation, and with the default parameters a full run normally takes **an hour or two**. The downloaded ISO, the extracted media, the mounted image, and the re-exported image all coexist during the build, and offline DISM servicing plus component-store cleanup can take a long time. Nothing on the machine running the script is changed, because all servicing happens against files in the working folder.
-
-**The ISO has to come from you. Nothing is downloaded automatically unless you ask for it.** Pass it with `-IsoPath` or drop it into the download folder. Get it from [microsoft.com/software-download](https://www.microsoft.com/software-download), the Media Creation Tool, the Microsoft Evaluation Center, your Volume Licensing Service Center or a Visual Studio subscription. `-UseFido` opts into an automatic download through the community Fido helper, which queries Microsoft's software-download servers on your behalf, but Microsoft rate-limits and can temporarily block IP addresses that make repeated ISO requests. That shows up as *"Error: Sentinel marked this request as rejected"* or a *715-123130* error, which the script prints verbatim (add `-Verbose` for Fido's full request log), and it is retried a few times with a growing delay (`-FidoRetryCount`, default 2 extra attempts) because the block is often transient. Keeping one ISO on disk avoids all of it. See [Why the ISO Has to Come From You](docs/design-notes.md#why-the-iso-has-to-come-from-you).
-
-**Microsoft's Media Creation Tool is the other way to get an ISO without leaving the script (`-UseMct`).** MCT talks to different Microsoft servers, so it usually still works when Fido is blocked. It is downloaded from Microsoft's official `go.microsoft.com` link and its **Authenticode signature is verified as validly signed by Microsoft** before it runs. Microsoft provides **no headless switch** for choosing ISO output or a save path, so this is *semi*-automated: the script launches MCT's ordinary wizard, then you pick the language/architecture, click "Create installation media" → "ISO file" and save it into the download folder. The script waits for MCT to close, picks up the new ISO automatically, and carries on. An interactive run offers this whenever it has no ISO to work with, and `-UseMct` goes straight to it.
-
-**You don't have to pass `-IsoPath` at all, you can just drop your ISO in the download folder.** If `-IsoPath` is not given, the script looks in the download folder (`<SystemDrive>\WISO-Work\Downloads` by default, or wherever `-DownloadPath` points) and reuses the **largest `.iso` file over 3 GB** it finds there. This is the easiest route when double-clicking the batch file: create the folder, drop the ISO in, and run. It is also why an ISO is never fetched twice. `-IsoPath` accepts a folder too and applies the same rule to it, but neither search is recursive, so the ISO has to sit directly in the folder.
-
-- The Microsoft Update Catalog has **no public API**, so the script parses its search pages to find the latest cumulative update. If Microsoft changes the catalog layout the lookup may need adjustment, and you can always supply your own `.msu`/`.cab` packages with `-UpdatePath`.
-- Recompiling the ISO requires **`oscdimg.exe`**, part of the **Windows ADK "Deployment Tools"** feature. If it is not already installed, the script downloads a **standalone `oscdimg.exe` (~140 KB) straight from Microsoft's public symbol server** ([how this works](https://pete.akeo.ie/2025/06/downloading-oscdimgexe-from-microsoft.html)) and caches it under `<WorkPath>\Tools`, so the multi-hundred-MB ADK is not needed. The download is verified against a pinned SHA-256. Use `-SkipOscdimgDownload` to disable this, and `-InstallAdk` to fall back to installing the ADK Deployment Tools instead.
-- Every download URL (ISO, updates, oscdimg, ADK) is validated to point at an **official Microsoft host over HTTPS** before anything is downloaded.
-- The **Fido helper is downloaded and executed** when you pass `-UseFido`, so it is validated first: the URL must point at the official `github.com/pbatard/Fido` repository over HTTPS, and the downloaded script must be a plausible size, parse as PowerShell, carry Fido's header and `-GetUrl` parameter, and contain no code-execution, persistence or security-tampering commands (Fido is not code-signed, so there is no signature to verify). It is then run **in a separate PowerShell process** so it cannot touch this script's session. Its SHA-256 is logged on every run, and you can pin a version you have reviewed yourself with `-FidoSha256`.
-
-> [!WARNING]
-> The working and download folders **must be on a local, fixed disk**. Cloud-synced folders (Google Drive, OneDrive, Dropbox, etc.) turn files into on-demand placeholders and sync them in the background, which makes DISM unable to read the `.msu`/`.wim` reliably. That shows up as *"An error occurred applying the Unattend.xml file from the .msu package"*. By default the script works and downloads under `<SystemDrive>\WISO-Work`, so if you run it from a cloud-synced folder, keep `-WorkPath`/`-DownloadPath` pointed at a local disk (and preferably pass your ISO with `-IsoPath` from a local copy).
->
-> The same applies to network paths. A `-WorkPath` on a UNC share or a mapped drive is rejected outright, because DISM cannot mount and service images there. A **source ISO** on a network path is fine, it is copied to the download folder first, exactly like a cloud-synced one, and an `-OutputIsoPath` on a network path is fine too, the ISO is built locally and copied across when it is finished. Bear in mind that drive mappings are per-logon-session, so a mapped drive that works when you run the script by hand does not exist when the scheduled task runs. Use a UNC path rather than a drive letter for anything scheduled.
+---
 
 ## Requirements
 
-- **PowerShell 5.0+** and **Windows 10 / Server 2016** or newer, run **as Administrator**.
-- An internet connection (unless you supply both the ISO with `-IsoPath` and updates with `-UpdatePath`).
-- **`oscdimg.exe`**, downloaded automatically from Microsoft if it is not already present (or installed with the ADK via `-InstallAdk`).
-- Plenty of free disk space on a **local** working drive, as covered in [Disk Space Requirements](docs/reference.md#disk-space-requirements).
+* Windows 10, Windows Server 2016, or newer
+* PowerShell 5.1 or newer
+* Administrator permissions
+* Active internet connection for update retrieval
+* Sufficient local storage space (at least 30 GB free recommended)
 
-> [!NOTE]
-> This script is primarily designed and tested for Windows 11 with en-US locale. While it may work with other locales and Windows 10, international language support is not fully guaranteed. Full support for international locales is planned for future versions.
+---
+
+## Documentation Links
+
+* [Usage Guide](docs/usage.md)
+* [Command-Line Parameters](docs/parameters.md)
+* [Scheduled Automation](docs/scheduled-runs.md)
+* [Unattended Setups](docs/unattended-installs.md)
+* [Architecture and Design Details](docs/design-notes.md)
+* [Technical Reference](docs/reference.md)
 
 ## License
 
-Released under the [MIT License](LICENSE). Nothing third-party is redistributed here: `oscdimg.exe`, Fido and the Microsoft updates are all fetched from their own sources at run time and keep their own licenses, and the Windows media itself stays subject to your Microsoft license terms.
+Distributed under the [MIT License](LICENSE). Third-party utilities and Microsoft updates fetched during runtime remain governed by their respective vendor terms.
