@@ -188,6 +188,8 @@ Windows recreates all of it on first boot. The same pass also removes `Windows.o
 
 The switch is off by default because a build that touches nothing inside the image is the easier one to reason about when something goes wrong, and none of this residue affects whether the media installs. Turn it on when consistent ISO sizes matter more than that.
 
+It is still a switch that deletes things out of a Windows image, and the list above is a judgement about what is safe to remove rather than anything Microsoft documents as disposable. Not every file or folder that looks like leftover state is leftover. Some of it exists by design and is read again later by Setup, by first boot or by the recovery environment, and the failure from removing one of those does not show up at build time. It shows up on a machine. **Install once from an ISO built with this switch and confirm Setup, first boot and recovery all behave before deploying from it**, and re-test after a feature update changes what the media contains.
+
 What remains after that is genuine variance in what `/ResetBase` managed to reclaim, which depends on the component store's state at that moment. Running the cleanup more than once does not help, since a completed `/ResetBase` has already removed every superseded component and a second pass rescans the whole store to reclaim nothing. It also runs per edition, so repeating it is expensive.
 
 If two builds still differ by hundreds of megabytes, compare their stamps rather than guessing. A `Result` of `SuccessWithWarnings` means a package failed to apply to at least one edition and that ISO is genuinely under-patched.

@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.26.8   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.26.9   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -243,7 +243,7 @@ param(
     [Parameter(HelpMessage = 'After a successful build, delete the update packages this script downloaded for previous builds and all but the newest generated ISOs')]
     [switch]$AutoClean,
 
-    [Parameter(HelpMessage = 'Strip servicing residue from each image before committing it: DISM logs, temp files, and leftovers such as $Recycle.Bin that clean Microsoft media never contains. Off by default, so the images are committed exactly as DISM left them')]
+    [Parameter(HelpMessage = 'Strip servicing residue from each image before committing it: DISM logs, temp files, and leftovers such as $Recycle.Bin that clean Microsoft media never contains. Off by default, so the images are committed exactly as DISM left them. Not everything that looks like leftover state is, some of it is there by design, so test an ISO built with this switch by installing from it once before you deploy from it')]
     [switch]$StripImageResidue,
 
     [Parameter(HelpMessage = 'How many generated ISOs -AutoClean keeps (newest first). Defaults to 3')]
@@ -288,7 +288,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.26.8'
+$ScriptVersion = '2026.09.26.9'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -4301,6 +4301,9 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
     }
     if ($CompressEsd) {
         Write-Host "  - Export the image as install.esd with recovery compression (-CompressEsd): a much smaller ISO, but a slow export and the media cannot be serviced again afterwards" -ForegroundColor Yellow
+    }
+    if ($StripImageResidue) {
+        Write-Host "  - Strip the servicing residue out of each image (-StripImageResidue): not everything that looks like leftover state is, so install from this ISO once before you deploy from it" -ForegroundColor Yellow
     }
     if ($ResolvedDriverPath) {
         Write-Host "  - Inject $($script:DriverInfFiles.Count) driver package(s) from $ResolvedDriverPath into every serviced edition and into boot.wim index 2 (Windows Setup)" -ForegroundColor Yellow
