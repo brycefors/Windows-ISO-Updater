@@ -156,6 +156,24 @@ The intended setup is a pristine ISO kept somewhere permanent, with its own work
 
 `-AutoClean` prunes old outputs and superseded update packages on its own, and because it only deletes files a stamp recorded, the source ISO is never touched.
 
+## Why Re-Exporting Shrinks the Image
+
+Every serviced image in the build gets exported to a new file afterwards, which looks like an expensive copy for nothing. It is the only step that actually makes the file smaller.
+
+A `.wim` is an append-only archive. It holds one shared pool of file resources plus a separate metadata index per image inside it, and DISM never rewrites that pool in place:
+
+- **Servicing appends.** Applying a cumulative update writes the new version of every changed file as a fresh resource at the end of the archive. The old versions are still sitting in the file, they have just stopped being referenced by the image metadata. This is why `install.wim` and `boot.wim` both *grow* during servicing, often well past what the update itself weighs.
+- **Deleting does not delete.** `/Cleanup-Image /ResetBase` strips superseded components from WinSxS, and dropping an edition with `-KeepEditions` removes an index. Both only unlink references. The bytes stay exactly where they were.
+
+`Export-WindowsImage` is what rebuilds the file. It reads the metadata for the index you asked for, copies only the resources that index actually points at into a brand new archive, and leaves everything unreferenced behind. That is the entire shrink. Without it, `/ResetBase` reclaims nothing you can measure and the finished ISO ships larger than the media you started from.
+
+Two things come along with the rebuild:
+
+- **Recompression.** The export writes at whatever compression you ask for, so an image that arrived as `Fast` comes out `Max`, or as `recovery` with `-CompressEsd`.
+- **Fresh single-instancing.** Resources shared by the remaining editions are stored once again rather than carried as whatever the old layout left behind. This is also why dropping editions saves less than you would expect: most of what you removed was shared with the editions you kept, so only the genuinely edition-specific files go away.
+
+The cost is that an export needs room for a full second copy of the image while it runs. The build checks free space before starting one and skips that particular export with a warning if the drive cannot take it, shipping the serviced but unshrunk image rather than failing the run. `winre.wim` gets the same treatment for a different reason: it has to stay small enough to live in the recovery partition, which servicing can easily push it past.
+
 ## Why Two Identical Builds Aren't the Same Size
 
 The finished ISO's SHA-256 changes on **every** build, even from the same source and the same update, because `oscdimg` writes timestamps into the ISO and the output file name embeds the build date and time. Byte-identical output was never a goal. Size, though, should be stable to within a few megabytes, and a bigger gap than that is worth explaining.
