@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.26.7   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.26.8   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -24,8 +24,9 @@
 #   2. Extracts the ISO to a writable working folder.
 #   3. Detects the Windows feature-update (e.g. 25H2) and architecture from the image, then downloads the
 #      latest combined Servicing Stack + Cumulative Update (LCU) - and the .NET cumulative update
-#      (on by default, disable with -SkipDotNet) - from the Microsoft Update Catalog. You may
-#      instead point at your own .msu/.cab files with -UpdatePath.
+#      (on by default, disable with -SkipDotNet) - from the Microsoft Update Catalog. The optional
+#      preview updates released late in the month are passed over unless -IncludePreview says otherwise.
+#      You may instead point at your own .msu/.cab files with -UpdatePath.
 #   4. Integrates the update(s) offline with DISM into install.wim (by default the other editions are
 #      dropped and only the kept ones are serviced - on client media Enterprise, Pro and Home, whichever
 #      of them the media carries, or on Server media the most upgradeable one, Standard over Datacenter -
@@ -121,6 +122,9 @@ param(
 
     [Parameter(HelpMessage = 'Skip the cumulative update in hotpatch non-baseline months (February, March, May, June, August, September, November, December). Use only for Windows 11 Enterprise 25H2 media enrolled in Intune or Azure Arc hotpatch. In baseline months (January, April, July, October) the cumulative update is integrated normally.')]
     [switch]$BaselineOnly,
+
+    [Parameter(HelpMessage = 'Allow the optional preview updates Microsoft publishes late in the month (titled "... Preview of Monthly Quality Rollup" or "Cumulative Update Preview") to be selected. They are excluded by default because they are next month''s fixes released early for testing, so they carry a higher build than anything Windows Update will offer the finished media. Useful for validating a coming update, not for production media')]
+    [switch]$IncludePreview,
 
     [Parameter(HelpMessage = 'Skip integrating updates entirely and simply extract and recompile the ISO (useful for testing the build pipeline)')]
     [switch]$SkipUpdates,
@@ -284,7 +288,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.26.7'
+$ScriptVersion = '2026.09.26.8'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1408,8 +1412,9 @@ function Test-IsHotpatchMonth {
     })
 }
 
-# Finds the newest, non-preview cumulative update in the catalog for a given search query, downloads it
-# to the download folder, and returns the local .msu path (or $null on failure).
+# Finds the newest cumulative update in the catalog for a given search query, downloads it to the download
+# folder, and returns the local .msu path (or $null on failure). Preview releases are left out unless
+# -AllowPreview says otherwise.
 function Get-LatestCatalogPackage {
     param(
         [Parameter(Mandatory)][string]$Query,
@@ -1676,7 +1681,7 @@ function Get-UpdateFileRecords {
 # deliberately left out: moving the working folder does not make last month's ISO wrong.
 $script:BuildAffectingParameters = @(
     'WindowsVersion', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
-    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'SkipWinRE', 'BaselineOnly', 'SkipUpdates', 'SkipServicing', 'CompressEsd', 'FastCompression', 'VolumeLabel',
+    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'SkipWinRE', 'BaselineOnly', 'IncludePreview', 'SkipUpdates', 'SkipServicing', 'CompressEsd', 'FastCompression', 'VolumeLabel',
     'SkipTattoo', 'StripImageResidue', 'DriverPath', 'AllowUnsignedDrivers', 'ExtraFilesPath'
 )
 
@@ -1887,6 +1892,7 @@ function Get-CatalogLatestEntry {
         [Parameter(Mandatory)][string]$Query,
         [string]$TitleInclude,
         [string]$TitleExclude,
+        [switch]$AllowPreview,
         [datetime]$NotAfter      # optional upper bound - packages released after this date are excluded
     )
     $Results = Search-UpdateCatalog -Query $Query
@@ -1894,7 +1900,7 @@ function Get-CatalogLatestEntry {
     $Filtered = $Results
     if ($TitleInclude) { $Filtered = $Filtered | Where-Object { $_.Title -match $TitleInclude } }
     if ($TitleExclude) { $Filtered = $Filtered | Where-Object { $_.Title -notmatch $TitleExclude } }
-    $Filtered = $Filtered | Where-Object { $_.Title -notmatch '(?i)preview' }
+    if (-not $AllowPreview) { $Filtered = $Filtered | Where-Object { $_.Title -notmatch '(?i)preview' } }
     if ($PSBoundParameters.ContainsKey('NotAfter')) {
         $Filtered = $Filtered | Where-Object { $_.LastUpdated -and ([datetime]$_.LastUpdated) -le $NotAfter }
     }
@@ -1936,14 +1942,14 @@ function Get-ExpectedUpdateSet {
     if ($script:EffectiveServer -and -not $FeatureName) { return $null }
 
     $Product = Get-CatalogProductQuery -FeatureUpdate $FeatureName
-    $Include = '(?i)cumulative update for (windows|microsoft server operating system)'
+    $Include = '(?i)cumulative update (preview )?for (windows|microsoft server operating system)'
     $Exclude = '(?i)\.net|dynamic update'
     $Set = New-Object System.Collections.Generic.List[string]
 
     # Same queries (including the broader fallback) the download step uses, so the two always agree.
-    $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $Product for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude
+    $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $Product for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude -AllowPreview:$IncludePreview
     if (-not $Lcu -and -not $script:EffectiveServer) {
-        $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude
+        $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude -AllowPreview:$IncludePreview
     }
     if (-not $Lcu) { return $null }
     if ($BaselineOnly -and $Lcu.LastUpdated) {
@@ -1958,13 +1964,13 @@ function Get-ExpectedUpdateSet {
     }
 
     if (-not $SkipDotNet) {
-        $DotNet = Get-CatalogLatestEntry -Query "Cumulative Update for .NET Framework $Product for $CatalogArch" -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update'
+        $DotNet = Get-CatalogLatestEntry -Query "Cumulative Update for .NET Framework $Product for $CatalogArch" -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update' -AllowPreview:$IncludePreview
         $Set.Add("DotNet=$(Get-CatalogEntryTag -Entry $DotNet)")
     }
     if (-not $SkipSetupDU) {
         # Bounds the Setup Dynamic Update by the LCU's own date so a stamp comparison always agrees with
         # what the download step would actually pick (see Get-LatestCatalogPackage's -NotAfter).
-        $SetupDuArgs = @{ Query = "Setup Dynamic Update $Product $CatalogArch"; TitleInclude = '(?i)setup dynamic update' }
+        $SetupDuArgs = @{ Query = "Setup Dynamic Update $Product $CatalogArch"; TitleInclude = '(?i)setup dynamic update'; AllowPreview = $IncludePreview }
         if ($Lcu.LastUpdated) { $SetupDuArgs.NotAfter = $Lcu.LastUpdated }
         $SetupDu = Get-CatalogLatestEntry @SetupDuArgs
         $Set.Add("SetupDU=$(Get-CatalogEntryTag -Entry $SetupDu)")
@@ -1974,7 +1980,7 @@ function Get-ExpectedUpdateSet {
         # name instead of the Safe OS one being required by name. Bounded by the LCU's date for the same
         # reason the Setup DU is, so a stamp comparison agrees with what the download step would pick.
         $SafeInclude = if ($script:EffectiveServer) { '(?i)dynamic update' } else { '(?i)safe os dynamic update' }
-        $SafeOsArgs = @{ Query = "Safe OS Dynamic Update $Product $CatalogArch"; TitleInclude = $SafeInclude; TitleExclude = '(?i)setup dynamic update' }
+        $SafeOsArgs = @{ Query = "Safe OS Dynamic Update $Product $CatalogArch"; TitleInclude = $SafeInclude; TitleExclude = '(?i)setup dynamic update'; AllowPreview = $IncludePreview }
         if ($Lcu.LastUpdated) { $SafeOsArgs.NotAfter = $Lcu.LastUpdated }
         $SafeOs = Get-CatalogLatestEntry @SafeOsArgs
         $Set.Add("SafeOS=$(Get-CatalogEntryTag -Entry $SafeOs)")
@@ -4282,6 +4288,9 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
         else {
             Write-Host "  - Download the latest cumulative update(s)$(if (-not $SkipDotNet) { ' and the latest .NET cumulative update' }) from the Microsoft Update Catalog"
             Write-Host "      (the cumulative update is skipped entirely if the image already has that build)" -ForegroundColor DarkGray
+            if ($IncludePreview) {
+                Write-Host "  - Allow preview updates to be selected (-IncludePreview): the media can end up on a build Windows Update will not offer until next month" -ForegroundColor Yellow
+            }
             if (-not $SkipSetupDU) { Write-Host "  - Download the latest Setup Dynamic Update and apply it to the media's sources folder" }
         }
         Write-Host "  - Integrate the update(s) into install.wim ($Edition), boot.wim$(if (-not $SkipWinRE) { ', and winre.wim' })"
@@ -4886,20 +4895,22 @@ else {
     Invoke-Task -Description 'Downloading the latest cumulative update from the Microsoft Update Catalog...' -ScriptBlock {
         # The monthly LCU is titled e.g. "2026-07 Cumulative Update for Windows 11 Version 25H2 for
         # x64-based Systems (KB...)" and classified as a Security Update. Restrict the match to real
-        # cumulative updates and exclude the .NET / Dynamic Update entries the same query returns.
+        # cumulative updates and exclude the .NET / Dynamic Update entries the same query returns. The
+        # optional "Preview" word has to be allowed through here, because whether a preview is acceptable
+        # is -IncludePreview's decision to make, not this pattern's.
         $Query = "Cumulative Update for $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) for $CatalogArch-based Systems"
-        $Include = '(?i)cumulative update for (windows|microsoft server operating system)'
+        $Include = '(?i)cumulative update (preview )?for (windows|microsoft server operating system)'
         $Exclude = '(?i)\.net|dynamic update'
         $script:LcuUpToDate = $null
         $script:LcuSkippedBaselineOnly = $false
         $script:LcuReleaseDate = $null
-        $script:Lcu = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly -SelectedDate ([ref]$script:LcuReleaseDate)
+        $script:Lcu = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -AllowPreview:$IncludePreview -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly -SelectedDate ([ref]$script:LcuReleaseDate)
         if (-not $script:Lcu -and -not $script:LcuUpToDate -and -not $script:EffectiveServer) {
             # Retry with a looser query (some releases omit the "Version xxHx" token in the title). Server
             # media is excluded because its product name without the version matches every Server release.
             $Query2 = "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems"
             Write-HostTimestamp "  Retrying with a broader query: $Query2" -ForegroundColor Yellow
-            $script:Lcu = Get-LatestCatalogPackage -Query $Query2 -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly -SelectedDate ([ref]$script:LcuReleaseDate)
+            $script:Lcu = Get-LatestCatalogPackage -Query $Query2 -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -AllowPreview:$IncludePreview -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly -SelectedDate ([ref]$script:LcuReleaseDate)
         }
     }
     if ($script:Lcu) { $UpdateGroups.Add(@($script:Lcu)) }
@@ -4921,7 +4932,7 @@ else {
     if (-not $SkipDotNet) {
         Invoke-Task -Description 'Downloading the latest .NET cumulative update from the Microsoft Update Catalog...' -ScriptBlock {
             $Query = "Cumulative Update for .NET Framework $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) for $CatalogArch"
-            $script:DotNet = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update'
+            $script:DotNet = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update' -AllowPreview:$IncludePreview
         }
         if ($script:DotNet) { $UpdateGroups.Add(@($script:DotNet)) }
         else { Write-HostTimestamp '  No .NET cumulative update was integrated (none found).' -ForegroundColor Yellow }
@@ -4939,6 +4950,7 @@ else {
                 Query        = "Setup Dynamic Update $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) $CatalogArch"
                 DownloadDir  = $DlDir
                 TitleInclude = '(?i)setup dynamic update'
+                AllowPreview = $IncludePreview
             }
             if ($script:LcuReleaseDate) { $SetupDuArgs.NotAfter = $script:LcuReleaseDate }
             $script:SetupDu = Get-LatestCatalogPackage @SetupDuArgs
@@ -4964,6 +4976,7 @@ else {
                 DownloadDir  = $DlDir
                 TitleInclude = $SafeInclude
                 TitleExclude = '(?i)setup dynamic update'
+                AllowPreview = $IncludePreview
             }
             if ($script:LcuReleaseDate) { $SafeOsArgs.NotAfter = $script:LcuReleaseDate }
             $script:SafeOs = Get-LatestCatalogPackage @SafeOsArgs

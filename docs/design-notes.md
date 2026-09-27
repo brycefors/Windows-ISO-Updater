@@ -123,6 +123,16 @@ So they stay a post-install task. Left alone, Windows Update installs them on it
 
 Neither is worth doing in a gold image before sealing: definitions age out while the image sits in storage, so run them at deployment instead.
 
+## Why Preview Updates Are Left Out
+
+Late each month Microsoft publishes an optional *"Cumulative Update Preview"*, the same rollup that will ship as next month's Patch Tuesday update, released early for organisations that want to test it. The catalog returns it alongside the real one and it is always the newer entry, so picking newest-first would quietly grab it every time. The default is to pass it over.
+
+The reason is that media is not a test machine. An ISO built from a preview installs a build Windows Update will not offer anyone until the following Patch Tuesday, which puts the deployed machine ahead of the fleet it is joining and of whatever your patch baseline is measured against. A preview is also, by Microsoft's own description, not fully validated. It is the wrong thing to stamp into media that will be reused for months.
+
+`-IncludePreview` turns the filter off when testing a coming update against your image is the point. It applies to every catalog query the run makes rather than just the cumulative update, because a preview month is a state to test in, not a package to mix into an otherwise stable set. Because the flag changes what ends up inside the ISO, it is part of the build parameter set, so turning it on or off forces a rebuild rather than the next run deciding nothing has changed.
+
+The title filter that identifies a cumulative update deliberately accepts the "Preview" wording and lets the preview filter make the decision. Excluding previews by making the pattern fail to match them would work by accident, and it would mean `-IncludePreview` silently did nothing.
+
 ## Why Not Re-Update an ISO This Script Built
 
 Feeding last month's output back in as next month's input looks like it should save time. It doesn't, and it costs you things that are hard to get back. **Keep the original Microsoft ISO and rebuild from it every time.**
