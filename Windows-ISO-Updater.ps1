@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.26.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.26.4   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -284,7 +284,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.26.3'
+$ScriptVersion = '2026.09.26.4'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -455,6 +455,9 @@ $script:FinalImageLocale = $null
 $script:TattooServicing   = New-Object System.Collections.Generic.List[object]
 $script:TattooResidueMB   = 0
 $script:TattooResidueFound = New-Object System.Collections.Generic.List[string]
+# Sampled as the run goes, because winre.wim only exists while its edition is mounted and install.wim is
+# gone by the time the report runs, so neither can be measured after the fact.
+$script:WimSizes = New-Object System.Collections.Generic.List[psobject]
 # Keyed on WIM path and index, because reading a build costs a read-only mount and more than one caller wants it.
 $script:WimBuildCache = @{}
 # The -DriverPath set, resolved once during validation and reused by every image the run services.
@@ -3575,6 +3578,63 @@ function Show-FinalImageInfo {
     Write-HostTimestamp "Image locale  : $LocaleStr" -ForegroundColor Cyan
 }
 
+# Records how big an image is at this moment. The first sample under a label is kept as the starting size
+# and every later one replaces the finishing size, so a caller never has to know which stage it is in.
+function Add-WimSizeSample {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $Item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+    if (-not $Item) { return }
+    $Entry = $script:WimSizes | Where-Object { $_.Label -eq $Label } | Select-Object -First 1
+    if ($Entry) {
+        $Entry.After     = $Item.Length
+        $Entry.AfterName = $Item.Name
+        return
+    }
+    $script:WimSizes.Add([pscustomobject]@{
+        Label      = $Label
+        BeforeName = $Item.Name
+        AfterName  = $Item.Name
+        Before     = $Item.Length
+        After      = $Item.Length
+    })
+}
+
+# Shows what servicing did to the size of each image. Growth is the normal outcome and not a problem: a
+# cumulative update adds more than /StartComponentCleanup /ResetBase and the re-export can take back.
+function Show-WimSizeComparison {
+    if ($script:WimSizes.Count -eq 0) { return }
+
+    $Rows = @(foreach ($Wim in $script:WimSizes) {
+        # -CompressEsd renames install.wim on the way out, so show both names rather than a misleading one.
+        $Name = if ($Wim.AfterName -ne $Wim.BeforeName) { "$($Wim.Label) -> $($Wim.AfterName)" } else { $Wim.Label }
+        [pscustomobject]@{
+            Name   = $Name
+            Before = $Wim.Before / 1MB
+            After  = $Wim.After / 1MB
+            Delta  = ($Wim.After - $Wim.Before) / 1MB
+        }
+    })
+    $Rows += [pscustomobject]@{
+        Name   = 'Total'
+        Before = ($Rows | Measure-Object -Property Before -Sum).Sum
+        After  = ($Rows | Measure-Object -Property After -Sum).Sum
+        Delta  = ($Rows | Measure-Object -Property Delta -Sum).Sum
+    }
+
+    $NameWidth = ($Rows | ForEach-Object { $_.Name.Length } | Measure-Object -Maximum).Maximum
+    Write-Host ''
+    Write-HostTimestamp 'Image sizes, as extracted and as shipped:' -ForegroundColor Cyan
+    foreach ($Row in $Rows) {
+        if ($Row.Name -eq 'Total') { Write-Host ('  ' + ('-' * ($NameWidth + 42))) }
+        $Change = '{0}{1:N0} MB' -f $(if ($Row.Delta -ge 0) { '+' } else { '-' }), [math]::Abs($Row.Delta)
+        Write-Host ("  {0,-$NameWidth}  {1,9:N0} MB -> {2,9:N0} MB  {3,10}" -f $Row.Name, $Row.Before, $Row.After, $Change)
+    }
+}
+
 #endregion
 
 #region Build tattoo
@@ -4596,6 +4656,11 @@ if (-not (Test-Path -LiteralPath $InstallWimExtracted)) {
     exit 1
 }
 
+# The starting sizes for the comparison at the end. Taken after any install.esd conversion, because that
+# WIM is the one servicing actually works on.
+Add-WimSizeSample -Label 'install.wim' -Path $InstallWimExtracted
+Add-WimSizeSample -Label 'boot.wim' -Path $BootWim
+
 #endregion
 
 #region Determine the feature update / architecture from the image (for catalog searches)
@@ -4938,6 +5003,8 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
                     }
                     else {
                         $WinReMount = Join-Path $WorkRoot 'WinREMount'
+                        $WinReSizeLabel = "winre.wim (index $Index)"
+                        Add-WimSizeSample -Label $WinReSizeLabel -Path $WinReWim
                         Reset-MountDirectory -Path $WinReMount -ImagePath $WinReWim
                         try {
                             Set-ItemProperty -LiteralPath $WinReWim -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
@@ -4949,6 +5016,8 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
                             Remove-ImageResidue -MountDir $WinReMount
                             Dismount-WindowsImage -Path $WinReMount -Save -ErrorAction Stop | Out-Null
                             Optimize-WinReImage -WinReWim $WinReWim -ImageLabel $WinReLabel
+                            # Read before the edition is committed, since this file only exists while it is mounted.
+                            Add-WimSizeSample -Label $WinReSizeLabel -Path $WinReWim
                         }
                         catch {
                             # Deliberately not fatal. A recovery image that will not service must never cost
@@ -5104,6 +5173,10 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
             }
         }
 
+        # Sampled here rather than inside the re-export, so a boot.wim that was serviced but could not be
+        # re-exported still reports the size it is actually shipping at.
+        Add-WimSizeSample -Label 'boot.wim' -Path $BootWim
+
         # Push the serviced binaries onto the media so their versions match the serviced boot.wim.
         Invoke-Task -Description 'Updating the media Setup and boot manager files to match the serviced boot.wim...' -ScriptBlock {
             $StagedSetup = Join-Path $SetupStage 'setup.exe'
@@ -5197,6 +5270,9 @@ if (($UpdateGroups.Count -gt 0) -or $TrimNeeded -or $CompressEsd) {
     }
     Write-Host $LineBreak
 }
+
+# Reads $FinalInstallImage rather than install.wim, so -CompressEsd is measured against what ships.
+Add-WimSizeSample -Label 'install.wim' -Path $FinalInstallImage
 
 #endregion
 
@@ -5505,6 +5581,7 @@ Invoke-Task -Description 'Reading the final image details...' -ScriptBlock {
     $FallbackBuild = if ($FeatureName) { "$ImageVersionText ($FeatureName)" } else { $ImageVersionText }
     Show-FinalImageInfo -WimPath $FinalInstallImage -FallbackBuildString $FallbackBuild
 }
+Show-WimSizeComparison
 
 #endregion
 

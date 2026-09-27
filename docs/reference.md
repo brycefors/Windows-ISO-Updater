@@ -83,7 +83,7 @@ flowchart TD
 8.  **Add the answer file.** If `-UnattendPath` was supplied, copies it to the root of the media as `autounattend.xml`. Then, if `-ExtraFilesPath` was supplied, copies that folder's contents over the media, listing every file that replaced one the media already had.
 9.  **Tattoo the media.** Writes a `\WISO-Build` folder onto the media describing the build, unless `-SkipTattoo` was passed. See [The Build Record on the ISO](#the-build-record-on-the-iso).
 10. **Recompile the ISO.** Uses `oscdimg` to build a new bootable ISO, preserving both the **BIOS (`etfsboot.com`)** and **UEFI (`efisys.bin`)** boot sectors so the media boots on legacy and modern PCs alike. The ISO is given a volume label describing its contents, e.g. `WIN11_ENTPRO_X64_ENGB_26100_4652`, which is what File Explorer shows and what Rufus and Ventoy copy onto the USB stick. Override it with `-VolumeLabel`.
-11. **Clean up.** Removes the extracted working files, leaving the finished ISO.
+11. **Clean up.** Removes the extracted working files, leaving the finished ISO. Before they go, the run prints what each image it touched (`install.wim`, `boot.wim` and every `winre.wim` it serviced) weighed as extracted and as shipped, so the cost of the month's updates is visible rather than inferred from the ISO size.
 
 ## The Build Record on the ISO
 
