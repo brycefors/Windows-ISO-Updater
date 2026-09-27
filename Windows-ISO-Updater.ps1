@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.26.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.26.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -284,7 +284,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.26.2'
+$ScriptVersion = '2026.09.26.3'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1951,9 +1951,12 @@ function Get-ExpectedUpdateSet {
     }
     if (-not $SkipWinRE) {
         # Server media labels the Safe OS package plain "Dynamic Update", so the Setup one is excluded by
-        # name instead of the Safe OS one being required by name.
+        # name instead of the Safe OS one being required by name. Bounded by the LCU's date for the same
+        # reason the Setup DU is, so a stamp comparison agrees with what the download step would pick.
         $SafeInclude = if ($script:EffectiveServer) { '(?i)dynamic update' } else { '(?i)safe os dynamic update' }
-        $SafeOs = Get-CatalogLatestEntry -Query "Safe OS Dynamic Update $Product $CatalogArch" -TitleInclude $SafeInclude -TitleExclude '(?i)setup dynamic update'
+        $SafeOsArgs = @{ Query = "Safe OS Dynamic Update $Product $CatalogArch"; TitleInclude = $SafeInclude; TitleExclude = '(?i)setup dynamic update' }
+        if ($Lcu.LastUpdated) { $SafeOsArgs.NotAfter = $Lcu.LastUpdated }
+        $SafeOs = Get-CatalogLatestEntry @SafeOsArgs
         $Set.Add("SafeOS=$(Get-CatalogEntryTag -Entry $SafeOs)")
     }
     return @($Set)
@@ -4783,7 +4786,16 @@ else {
             # Server media labels the Safe OS package plain "Dynamic Update", so the Setup one is excluded
             # by name instead of the Safe OS one being required by name.
             $SafeInclude = if ($script:EffectiveServer) { '(?i)dynamic update' } else { '(?i)safe os dynamic update' }
-            $script:SafeOs = Get-LatestCatalogPackage -Query "Safe OS Dynamic Update $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) $CatalogArch" -DownloadDir $DlDir -TitleInclude $SafeInclude -TitleExclude '(?i)setup dynamic update'
+            # Bounded by the LCU's release date for the same reason the Setup DU is: a Safe OS package
+            # published later targets a servicing stack this month's LCU has not put in the image yet.
+            $SafeOsArgs = @{
+                Query        = "Safe OS Dynamic Update $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) $CatalogArch"
+                DownloadDir  = $DlDir
+                TitleInclude = $SafeInclude
+                TitleExclude = '(?i)setup dynamic update'
+            }
+            if ($script:LcuReleaseDate) { $SafeOsArgs.NotAfter = $script:LcuReleaseDate }
+            $script:SafeOs = Get-LatestCatalogPackage @SafeOsArgs
         }
         if ($script:SafeOs) {
             $SafeOsGroup = @($script:SafeOs)
