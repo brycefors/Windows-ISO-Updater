@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.26.4   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.26.5   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -284,7 +284,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.26.4'
+$ScriptVersion = '2026.09.26.5'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -458,6 +458,12 @@ $script:TattooResidueFound = New-Object System.Collections.Generic.List[string]
 # Sampled as the run goes, because winre.wim only exists while its edition is mounted and install.wim is
 # gone by the time the report runs, so neither can be measured after the fact.
 $script:WimSizes = New-Object System.Collections.Generic.List[psobject]
+# The recovery image serviced for the first edition, with the hash of the source it was made from, so the
+# editions that ship the same one can take a copy instead of repeating the work.
+$script:WinReCachePath = $null
+$script:WinReCacheHash = $null
+# What recovery environment each edition carries, sampled while its install.wim index is mounted.
+$script:WinReVersions = New-Object System.Collections.Generic.List[psobject]
 # Keyed on WIM path and index, because reading a build costs a read-only mount and more than one caller wants it.
 $script:WimBuildCache = @{}
 # The -DriverPath set, resolved once during validation and reused by every image the run services.
@@ -3410,6 +3416,67 @@ function Optimize-WinReImage {
     }
 }
 
+# Every edition on one medium normally ships the same recovery image (winre.wim is WinPE, nothing in it is
+# edition-specific), so the mount, the Safe OS DU, the /ResetBase and the re-export only have to happen for
+# the first one. Keyed on the source hash rather than assumed, because media that really does carry a
+# different recovery image per edition has to keep being serviced properly.
+function Copy-CachedWinReImage {
+    param(
+        [Parameter(Mandatory)][string]$WinReWim,
+        [string]$SourceHash
+    )
+    if (-not $SourceHash -or $SourceHash -ne $script:WinReCacheHash) { return $false }
+    if (-not $script:WinReCachePath -or -not (Test-Path -LiteralPath $script:WinReCachePath)) { return $false }
+    try {
+        Set-ItemProperty -LiteralPath $WinReWim -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath $script:WinReCachePath -Destination $WinReWim -Force -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-HostTimestamp "    The serviced recovery image could not be reused here: $($_.Exception.Message). This edition's own copy will be serviced instead." -ForegroundColor Yellow
+        return $false
+    }
+}
+
+# Keeps the serviced recovery image where the next edition can pick it up. Staged outside the mount,
+# because the source lives inside a DISM projection that is about to be committed and torn down.
+function Save-ServicedWinReImage {
+    param(
+        [Parameter(Mandatory)][string]$WinReWim,
+        [string]$SourceHash
+    )
+    if (-not $SourceHash) { return }
+    $Cache = Join-Path -Path $WorkRoot -ChildPath 'winre_serviced.wim'
+    try {
+        Copy-Item -LiteralPath $WinReWim -Destination $Cache -Force -ErrorAction Stop
+        $script:WinReCachePath = $Cache
+        $script:WinReCacheHash = $SourceHash
+    }
+    catch {
+        # Not fatal, the remaining editions just each do the work themselves.
+        Write-HostTimestamp "      The serviced recovery image could not be kept for the other editions: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+}
+
+# The build a recovery image is at, read straight from the WIM header so nothing has to be mounted.
+# Trustworthy here in a way it is not for install.wim: winre.wim is rebuilt and re-stamped by the Safe OS
+# Dynamic Update rather than patched in place, so its header follows what is actually inside it.
+function Get-WinReVersion {
+    param([Parameter(Mandatory)][string]$WinReWim)
+
+    $Info = try { Get-WindowsImage -ImagePath $WinReWim -Index 1 -ErrorAction Stop } catch { $null }
+    if (-not $Info) { return $null }
+    $Build = [int]$Info.Build
+    $Ubr   = [int]$Info.SPBuild
+    # Some media leaves Build and SPBuild empty and fills only the combined version string.
+    if ($Build -le 0 -and "$($Info.Version)" -match '^\d+\.\d+\.(\d+)\.(\d+)$') {
+        $Build = [int]$Matches[1]
+        $Ubr   = [int]$Matches[2]
+    }
+    if ($Build -le 0) { return $null }
+    return [pscustomobject]@{ Build = $Build; Ubr = $Ubr; Version = "10.0.$Build.$Ubr" }
+}
+
 # Answers "is servicing this recovery image going to change anything" WITHOUT mounting it, which is the
 # whole point: the mount, the /ResetBase and the re-export are the expensive part, not the update itself.
 # Returns $true only when it can positively prove the image is already there, because wrongly skipping
@@ -3417,7 +3484,8 @@ function Optimize-WinReImage {
 function Test-WinReAlreadyCurrent {
     param(
         [Parameter(Mandatory)][string]$WinReWim,
-        [string]$KbNumber
+        [string]$KbNumber,
+        [psobject]$Version
     )
     if (-not $KbNumber) { return $false }
     # Cached because this runs once per serviced edition and the answer cannot change mid-build. An empty
@@ -3428,19 +3496,12 @@ function Test-WinReAlreadyCurrent {
     }
     if ($script:SafeOsTargets.Count -eq 0) { return $false }
 
-    $Info = try { Get-WindowsImage -ImagePath $WinReWim -Index 1 -ErrorAction Stop } catch { $null }
-    if (-not $Info) { return $false }
-    $Build = [int]$Info.Build
-    $Ubr   = [int]$Info.SPBuild
-    if ($Build -le 0 -and "$($Info.Version)" -match '^\d+\.\d+\.(\d+)\.(\d+)$') {
-        $Build = [int]$Matches[1]
-        $Ubr   = [int]$Matches[2]
-    }
-    if ($Build -le 0 -or $Ubr -le 0 -or -not $script:SafeOsTargets.ContainsKey($Build)) { return $false }
+    if (-not $Version) { $Version = Get-WinReVersion -WinReWim $WinReWim }
+    if (-not $Version -or $Version.Ubr -le 0 -or -not $script:SafeOsTargets.ContainsKey($Version.Build)) { return $false }
 
-    $TargetUbr = [int]$script:SafeOsTargets[$Build]
-    if ($TargetUbr -le 0 -or $Ubr -lt $TargetUbr) { return $false }
-    Write-HostTimestamp "    The recovery image is already at $Build.$Ubr and KB$KbNumber delivers $Build.$TargetUbr, so it is left as it is." -ForegroundColor Green
+    $TargetUbr = [int]$script:SafeOsTargets[$Version.Build]
+    if ($TargetUbr -le 0 -or $Version.Ubr -lt $TargetUbr) { return $false }
+    Write-HostTimestamp "    The recovery image is already at $($Version.Version) and KB$KbNumber delivers 10.0.$($Version.Build).$TargetUbr, so it is left as it is." -ForegroundColor Green
     return $true
 }
 #endregion
@@ -3632,6 +3693,37 @@ function Show-WimSizeComparison {
         if ($Row.Name -eq 'Total') { Write-Host ('  ' + ('-' * ($NameWidth + 42))) }
         $Change = '{0}{1:N0} MB' -f $(if ($Row.Delta -ge 0) { '+' } else { '-' }), [math]::Abs($Row.Delta)
         Write-Host ("  {0,-$NameWidth}  {1,9:N0} MB -> {2,9:N0} MB  {3,10}" -f $Row.Name, $Row.Before, $Row.After, $Change)
+    }
+}
+
+# Records the build of an edition's recovery image. As with the sizes, the first call under a label is
+# what it started at and every later one is where it ended up.
+function Add-WinReVersionSample {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [string]$Version
+    )
+
+    if (-not $Version) { return }
+    $Entry = $script:WinReVersions | Where-Object { $_.Label -eq $Label } | Select-Object -First 1
+    if ($Entry) {
+        $Entry.After = $Version
+        return
+    }
+    $script:WinReVersions.Add([pscustomobject]@{ Label = $Label; Before = $Version; After = $Version })
+}
+
+# What recovery environment the finished media ships, per edition. Worth stating outright: it is the one
+# part of a Windows image that stock media leaves years behind, and nothing else on the ISO records it.
+function Show-WinReVersions {
+    if ($script:WinReVersions.Count -eq 0) { return }
+
+    $NameWidth = ($script:WinReVersions | ForEach-Object { $_.Label.Length } | Measure-Object -Maximum).Maximum
+    Write-Host ''
+    Write-HostTimestamp 'Recovery image (WinRE) build, per edition:' -ForegroundColor Cyan
+    foreach ($Entry in $script:WinReVersions) {
+        $Change = if ($Entry.After -ne $Entry.Before) { "$($Entry.Before) -> $($Entry.After)" } else { "$($Entry.After) (unchanged)" }
+        Write-Host ("  {0,-$NameWidth}  {1}" -f $Entry.Label, $Change)
     }
 }
 
@@ -4992,39 +5084,65 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
 
                 # Per Microsoft, the recovery image inside this edition is patched with the Safe OS Dynamic
                 # Update and never with the LCU, so with no Safe OS package there is nothing to mount for.
+                $WinReWim = Join-Path $MountDir 'Windows\System32\Recovery\winre.wim'
+                $WinReLabel = "winre.wim (inside index $Index, $EditionName)"
+                $WinReSizeLabel = "winre.wim (index $Index)"
+                $WinReVersionLabel = "[$Index] $EditionName"
+                # Read from the WIM header, so which recovery environment this edition carries is on record
+                # even when -SkipWinRE means nothing is going to be done about it.
+                $WinReBefore = Get-WinReVersion -WinReWim $WinReWim
+                if ($WinReBefore) {
+                    Add-WinReVersionSample -Label $WinReVersionLabel -Version $WinReBefore.Version
+                    Write-HostTimestamp "    The recovery image is at $($WinReBefore.Version)." -ForegroundColor DarkGray
+                }
+
                 if (-not $SkipWinRE -and $SafeOsGroup) {
-                    $WinReWim = Join-Path $MountDir 'Windows\System32\Recovery\winre.wim'
-                    $WinReLabel = "winre.wim (inside index $Index, $EditionName)"
                     if (-not (Test-Path -LiteralPath $WinReWim)) {
                         Write-HostTimestamp '    This edition carries no winre.wim, so there is no recovery image to service.' -ForegroundColor DarkGray
                     }
-                    elseif (Test-WinReAlreadyCurrent -WinReWim $WinReWim -KbNumber $script:SafeOsKb) {
+                    elseif (Test-WinReAlreadyCurrent -WinReWim $WinReWim -KbNumber $script:SafeOsKb -Version $WinReBefore) {
                         Add-ServicingResult -Image $WinReLabel -Package "KB$($script:SafeOsKb)" -Result 'Skipped' -Detail 'Already at the build this Safe OS Dynamic Update delivers'
                     }
                     else {
-                        $WinReMount = Join-Path $WorkRoot 'WinREMount'
-                        $WinReSizeLabel = "winre.wim (index $Index)"
                         Add-WimSizeSample -Label $WinReSizeLabel -Path $WinReWim
-                        Reset-MountDirectory -Path $WinReMount -ImagePath $WinReWim
-                        try {
-                            Set-ItemProperty -LiteralPath $WinReWim -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
-                            Write-HostTimestamp '    Servicing the recovery image (winre.wim)...'
-                            Mount-WindowsImage -ImagePath $WinReWim -Index 1 -Path $WinReMount -ErrorAction Stop | Out-Null
-                            Add-UpdateGroup -MountDir $WinReMount -Group $SafeOsGroup -Label 'Safe OS Dynamic Update' -ImageLabel $WinReLabel | Out-Null
-                            Write-HostTimestamp '      Cleaning up the recovery image component store (/StartComponentCleanup /ResetBase)...'
-                            & dism.exe /Image:"$WinReMount" /Cleanup-Image /StartComponentCleanup /ResetBase | Out-Null
-                            Remove-ImageResidue -MountDir $WinReMount
-                            Dismount-WindowsImage -Path $WinReMount -Save -ErrorAction Stop | Out-Null
-                            Optimize-WinReImage -WinReWim $WinReWim -ImageLabel $WinReLabel
-                            # Read before the edition is committed, since this file only exists while it is mounted.
+                        # Seconds spent here buy skipping a whole mount, /ResetBase and re-export below.
+                        $WinReSourceHash = Get-Sha256 -Path $WinReWim
+                        if (Copy-CachedWinReImage -WinReWim $WinReWim -SourceHash $WinReSourceHash) {
+                            Write-HostTimestamp '    This edition ships the recovery image an earlier one was serviced from, so the serviced copy goes straight in.' -ForegroundColor Green
+                            Add-ServicingResult -Image $WinReLabel -Package "KB$($script:SafeOsKb)" -Result 'Applied' -Detail 'Reused the recovery image serviced for an earlier edition'
                             Add-WimSizeSample -Label $WinReSizeLabel -Path $WinReWim
+                            $WinReAfter = Get-WinReVersion -WinReWim $WinReWim
+                            if ($WinReAfter) { Add-WinReVersionSample -Label $WinReVersionLabel -Version $WinReAfter.Version }
                         }
-                        catch {
-                            # Deliberately not fatal. A recovery image that will not service must never cost
-                            # the user the ISO, so the edition keeps the winre.wim it shipped with.
-                            Write-HostTimestamp "      WinRE servicing failed: $($_.Exception.Message). This edition keeps the recovery image it shipped with." -ForegroundColor Yellow
-                            Add-ServicingResult -Image $WinReLabel -Package 'Safe OS Dynamic Update' -Result 'Failed' -Detail $_.Exception.Message
-                            Dismount-ImageDiscard -Path $WinReMount | Out-Null
+                        else {
+                            $WinReMount = Join-Path $WorkRoot 'WinREMount'
+                            Reset-MountDirectory -Path $WinReMount -ImagePath $WinReWim
+                            try {
+                                Set-ItemProperty -LiteralPath $WinReWim -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
+                                Write-HostTimestamp '    Servicing the recovery image (winre.wim)...'
+                                Mount-WindowsImage -ImagePath $WinReWim -Index 1 -Path $WinReMount -ErrorAction Stop | Out-Null
+                                Add-UpdateGroup -MountDir $WinReMount -Group $SafeOsGroup -Label 'Safe OS Dynamic Update' -ImageLabel $WinReLabel | Out-Null
+                                Write-HostTimestamp '      Cleaning up the recovery image component store (/StartComponentCleanup /ResetBase)...'
+                                & dism.exe /Image:"$WinReMount" /Cleanup-Image /StartComponentCleanup /ResetBase | Out-Null
+                                Remove-ImageResidue -MountDir $WinReMount
+                                Dismount-WindowsImage -Path $WinReMount -Save -ErrorAction Stop | Out-Null
+                                Optimize-WinReImage -WinReWim $WinReWim -ImageLabel $WinReLabel
+                                # Read before the edition is committed, since this file only exists while it is mounted.
+                                Add-WimSizeSample -Label $WinReSizeLabel -Path $WinReWim
+                                $WinReAfter = Get-WinReVersion -WinReWim $WinReWim
+                                if ($WinReAfter) {
+                                    Add-WinReVersionSample -Label $WinReVersionLabel -Version $WinReAfter.Version
+                                    Write-HostTimestamp "      The recovery image is now at $($WinReAfter.Version)." -ForegroundColor Green
+                                }
+                                Save-ServicedWinReImage -WinReWim $WinReWim -SourceHash $WinReSourceHash
+                            }
+                            catch {
+                                # Deliberately not fatal. A recovery image that will not service must never cost
+                                # the user the ISO, so the edition keeps the winre.wim it shipped with.
+                                Write-HostTimestamp "      WinRE servicing failed: $($_.Exception.Message). This edition keeps the recovery image it shipped with." -ForegroundColor Yellow
+                                Add-ServicingResult -Image $WinReLabel -Package 'Safe OS Dynamic Update' -Result 'Failed' -Detail $_.Exception.Message
+                                Dismount-ImageDiscard -Path $WinReMount | Out-Null
+                            }
                         }
                     }
                 }
@@ -5223,6 +5341,7 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
     }
 
     # 4) Re-export install.wim below (outside this block) to reclaim the space freed by the cleanup.
+    if ($script:WinReCachePath) { Remove-Item -LiteralPath $script:WinReCachePath -Force -ErrorAction SilentlyContinue }
     Remove-DirectoryForce -Path $MountDir | Out-Null
 }
 
@@ -5446,7 +5565,14 @@ if (-not $SkipTattoo) {
                 EditionsRemoved    = $RemovedNames
                 EditionsNotUpdated = $UnpatchedNames
                 AnswerFile         = if ($ResolvedUnattend) { "autounattend.xml (from $(Split-Path -Leaf $ResolvedUnattend), SHA-256 $(Format-ShortHash $script:UnattendHash))" } else { '' }
-                RecoveryImage      = if (-not $SkipWinRE) { 'winre.wim serviced with the Safe OS Dynamic Update, then cleaned and re-exported' } else { 'winre.wim left as it shipped (-SkipWinRE was used)' }
+                RecoveryImage      = [ordered]@{
+                    Servicing = if (-not $SkipWinRE) { 'winre.wim serviced with the Safe OS Dynamic Update, then cleaned and re-exported' } else { 'winre.wim left as it shipped (-SkipWinRE was used)' }
+                    # Read from each edition's winre.wim header while it was mounted. Nothing else on the
+                    # media says which recovery environment it will actually install.
+                    Builds    = @($script:WinReVersions | ForEach-Object {
+                        if ($_.After -ne $_.Before) { "$($_.Label) $($_.Before) -> $($_.After)" } else { "$($_.Label) $($_.After)" }
+                    })
+                }
             }
             Drivers     = if ($ResolvedDriverPath) {
                 [ordered]@{
@@ -5581,6 +5707,7 @@ Invoke-Task -Description 'Reading the final image details...' -ScriptBlock {
     $FallbackBuild = if ($FeatureName) { "$ImageVersionText ($FeatureName)" } else { $ImageVersionText }
     Show-FinalImageInfo -WimPath $FinalInstallImage -FallbackBuildString $FallbackBuild
 }
+Show-WinReVersions
 Show-WimSizeComparison
 
 #endregion
