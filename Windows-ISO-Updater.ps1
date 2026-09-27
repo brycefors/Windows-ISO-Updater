@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.26.5   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.26.6   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -284,7 +284,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.26.5'
+$ScriptVersion = '2026.09.26.6'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -366,6 +366,9 @@ $Host.UI.RawUI.WindowTitle = "Windows ISO Updater - Running as Administrator - $
 $WorkRoot   = if ($WorkPath) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($WorkPath) } else { Join-Path -Path $env:SystemDrive -ChildPath 'WISO-Work' }
 $ExtractDir = Join-Path -Path $WorkRoot -ChildPath 'ISO'
 $MountDir   = Join-Path -Path $WorkRoot -ChildPath 'Mount'
+# Where the serviced recovery image waits between editions. Its own folder because it outlives the step
+# that made it, unlike the re-export temporaries that come and go inside one, so it is one thing to delete.
+$WinReCacheDir = Join-Path -Path $WorkRoot -ChildPath 'WinRECache'
 # Where a standalone oscdimg.exe is cached if it has to be downloaded, so later runs reuse it.
 $OscdimgLocalPath = Join-Path -Path $WorkRoot -ChildPath 'Tools\oscdimg.exe'
 # Downloads and logs default under the work root - NOT the script folder, which may sit on a cloud-synced
@@ -3446,8 +3449,9 @@ function Save-ServicedWinReImage {
         [string]$SourceHash
     )
     if (-not $SourceHash) { return }
-    $Cache = Join-Path -Path $WorkRoot -ChildPath 'winre_serviced.wim'
+    $Cache = Join-Path -Path $WinReCacheDir -ChildPath 'winre_serviced.wim'
     try {
+        New-Item -ItemType Directory -Path $WinReCacheDir -Force -ErrorAction Stop | Out-Null
         Copy-Item -LiteralPath $WinReWim -Destination $Cache -Force -ErrorAction Stop
         $script:WinReCachePath = $Cache
         $script:WinReCacheHash = $SourceHash
@@ -3977,10 +3981,12 @@ if (-not $HaveRunMutex) {
 #endregion
 
 #region Clean up leftovers from an interrupted run
-# Add-UpdateGroup stages each package in its own pkgstage_* folder and deletes it in a finally block, but a
-# run that was killed outright never reaches that, leaving several GB behind. Cleared before the free space
-# check so the reading reflects what is really available.
-$StaleStages = @(Get-ChildItem -LiteralPath $WorkRoot -Directory -Filter 'pkgstage_*' -ErrorAction SilentlyContinue)
+# Add-UpdateGroup stages each package in its own pkgstage_* folder and the serviced recovery image waits in
+# WinRECache, both deleted when the step that made them finishes, but a run that was killed outright never
+# reaches that and leaves several GB behind. Cleared before the free space check so the reading reflects
+# what is really available.
+$StaleStages = @(Get-ChildItem -LiteralPath $WorkRoot -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like 'pkgstage_*' -or $_.Name -eq 'WinRECache' })
 if ($StaleStages.Count -gt 0) {
     $StageFreedMB = 0
     $StageRemoved = 0
@@ -3997,7 +4003,7 @@ if ($StaleStages.Count -gt 0) {
         }
     }
     if ($StageRemoved -gt 0) {
-        Write-HostTimestamp ('Removed {0} update staging folder(s) left behind by an interrupted run, freeing {1:N0} MB.' -f $StageRemoved, $StageFreedMB) -ForegroundColor DarkGray
+        Write-HostTimestamp ('Removed {0} staging folder(s) left behind by an interrupted run, freeing {1:N0} MB.' -f $StageRemoved, $StageFreedMB) -ForegroundColor DarkGray
         Write-Host $LineBreak
     }
 }
@@ -5341,7 +5347,7 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
     }
 
     # 4) Re-export install.wim below (outside this block) to reclaim the space freed by the cleanup.
-    if ($script:WinReCachePath) { Remove-Item -LiteralPath $script:WinReCachePath -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $WinReCacheDir -Recurse -Force -ErrorAction SilentlyContinue
     Remove-DirectoryForce -Path $MountDir | Out-Null
 }
 
