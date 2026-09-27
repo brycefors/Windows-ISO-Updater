@@ -9,7 +9,7 @@ Installing Windows from this updated media saves time by eliminating large post-
 * **Safe Execution**: All operations occur within an isolated temporary directory (`C:\WISO-Work` by default). The host system configuration remains untouched.
 * **No Manual ADK Setup Needed**: Automatically fetches a verified copy of `oscdimg.exe` from Microsoft servers to compile the media.
 * **Official Sources Only**: Downloads packages directly from Microsoft endpoints over HTTPS.
-* **Windows Server Support**: Compatible with Windows Server media using the `-Server` flag.
+* **Windows Server Support**: Compatible with Windows Server media, detected automatically from the image.
 
 ---
 
@@ -29,7 +29,7 @@ Installing Windows from this updated media saves time by eliminating large post-
 
 **Windows Server Build:**
 ```shell
-.\Run-Windows-ISO-Updater.bat -Server -IsoPath "C:\ISOs\Server2025.iso"
+.\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Server2025.iso"
 ```
 
 ---

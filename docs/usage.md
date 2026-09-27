@@ -32,17 +32,18 @@ The full list is in [Command-Line Parameters](parameters.md).
 
 ## Updating a Windows Server ISO
 
-Pass `-Server` to service Windows Server media (2016 through 2025). Everything else works the same way,
-but the ISO has to come from you: neither Fido nor the Media Creation Tool serves Server media, so
+Server media is serviced exactly like client media, with no switch to announce it: the script reads the
+edition out of the image and adapts the catalog search and the edition keep-list to what it finds. The ISO
+has to come from you, though, because neither Fido nor the Media Creation Tool serves Server media, so
 download it from the [Microsoft Evaluation Center](https://www.microsoft.com/evalcenter), your Volume
 Licensing Service Center, or a Visual Studio subscription first.
 
 ```shell
 :: Slipstream the latest Server cumulative update into your own Server 2025 ISO
-.\Run-Windows-ISO-Updater.bat -Server -IsoPath "C:\ISOs\Server2025.iso"
+.\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Server2025.iso"
 
 :: Or drop the ISO into the download folder and let it be picked up automatically
-.\Run-Windows-ISO-Updater.bat -Server
+.\Run-Windows-ISO-Updater.bat
 ```
 
 ## Updating a Windows 11 LTSC ISO
@@ -77,7 +78,7 @@ A few differences worth knowing:
   instead, or `-KeepAllEditions` to keep every edition the media carries.
 - Microsoft only publishes a **Setup Dynamic Update** for Server 2025 and newer, so on older Server media
   the script reports that none was found and refreshes the media Setup files from `boot.wim` alone.
-- `-Server` is only required pre-mount when no local ISO exists and none can be auto-downloaded (neither Fido nor the Media Creation Tool serves Server media). Once an ISO is mounted, the script auto-detects whether it is Server or client media by reading the edition from the image. If `-Server` was passed but the media is actually client, or omitted but the media is actually Server, the script prints a yellow console warning and continues with the detected media. The update selection and edition handling automatically adapt to what was found, so the build completes successfully.
+- `-Server` is **deprecated and no longer needed**. The image is the source of truth, so a Server ISO passed with `-IsoPath` or dropped into the download folder is recognised on its own, and a yellow line names what was found whenever it differs from what the run expected. The switch is still accepted so existing scheduled tasks and wrapper scripts keep running. Before any ISO is in hand the only thing that can tell Server from client is the last build stamp in the same working folder, which is what stops a scheduled Server run whose ISO went missing from downloading client media instead.
 - **Give Server its own working folder if you also build client ISOs.** See
   [Building Several Windows Versions Side by Side](#building-several-windows-versions-side-by-side).
 
@@ -99,7 +100,7 @@ else to configure.
 .\Run-Windows-ISO-Updater.bat -WindowsVersion 10 -Release 22H2 -WorkPath "D:\WISO\Win10"
 
 :: Windows Server, which needs an ISO you supply
-.\Run-Windows-ISO-Updater.bat -Server -IsoPath "C:\ISOs\Server2025.iso" -WorkPath "D:\WISO\Server2025"
+.\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Server2025.iso" -WorkPath "D:\WISO\Server2025"
 ```
 
 The same applies to two builds of the *same* Windows version that differ in a build-affecting way, such as
@@ -116,7 +117,7 @@ two versions share it:
 | `Downloads` | **The worst one.** With no `-IsoPath`, the script reuses the most recently modified `.iso` over 3 GB it finds here (or the largest with `-UseLargestIso`), and it does **not** check which Windows version that ISO is. A Windows 10 ISO left in the folder is picked up by a Windows 11 run. Split it with `-DownloadPath`, or always pass `-IsoPath`. |
 | `Stamps` | There is one `last-build.json` per stamp folder. Alternating versions overwrite each other's record, so every run decides it must rebuild and `-CheckOnly` always reports a rebuild is needed. Split it with `-StampPath`. |
 | `Downloads` (update packages) | `-AutoClean` deletes the `.msu`/`.cab` files recorded in stamp history that the newest build no longer uses, so it deletes the other version's cumulative update. Splitting `-DownloadPath` and `-StampPath` fixes this too. |
-| `Output` | Safe. Finished ISO names carry the version (`Win11_`, `Win10_`, `Server2025_`), so they coexist. Note that `-AutoClean` keeps the newest `-KeepIsoCount` (default 3) across **all** versions combined, not per version. |
+| `Output` | Safe. Finished ISO names carry the version (`Win11_`, `Win10_`, `WinSrv2025_`), so they coexist. Note that `-AutoClean` keeps the newest `-KeepIsoCount` (default 3) across **all** versions combined, not per version. |
 | `Logs` | Safe, but log rotation keeps the 30 most recent overall, so history is shorter the more versions you run. |
 | `ISO`, `Mount`, `Tools` | Safe between runs, since extraction wipes the `ISO` folder at the start of every build anyway. Not safe **during** a run, see below. |
 
@@ -155,7 +156,7 @@ one replaces the first.
   -WindowsVersion 11 -WorkPath "D:\WISO\Win11" -TaskName "Windows ISO Updater - Win11"
 
 .\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -Schedule PatchTuesday -ScheduleTime 20:30 -AutoClean ^
-  -Server -IsoPath "C:\ISOs\Server2025.iso" -WorkPath "D:\WISO\Server2025" -TaskName "Windows ISO Updater - Server2025"
+  -IsoPath "C:\ISOs\Server2025.iso" -WorkPath "D:\WISO\Server2025" -TaskName "Windows ISO Updater - Server2025"
 ```
 
 Both tasks run as SYSTEM, so every path has to be a local path SYSTEM can reach. See

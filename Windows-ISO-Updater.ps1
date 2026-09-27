@@ -1,9 +1,9 @@
 # Windows ISO Updater
-# Version: 2026.09.26.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.26.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
-# This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
-# Windows Server 2016-2025) installation ISO.
+# This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
+# 2016-2025 installation ISO.
 # It downloads the latest official Microsoft ISO, downloads the latest cumulative update(s) from the
 # Microsoft Update Catalog, integrates those updates directly into the Windows images inside the ISO,
 # and then recompiles a brand-new, bootable ISO that already contains this month's patches.
@@ -19,8 +19,8 @@
 #      "Fido" helper (which queries Microsoft's own software-download servers), retrying blocked link
 #      requests with a backoff (-FidoRetryCount). -UseMct instead opens Microsoft's Media Creation Tool,
 #      which talks to different servers but has no headless mode, so you click through its last few pages
-#      yourself. Either way there is no automatic download for -Server, because neither source serves
-#      Windows Server media.
+#      yourself. Either way Windows Server media has to be supplied by hand, because neither source
+#      serves it. Server versus client is worked out from the image, so no switch announces it.
 #   2. Extracts the ISO to a writable working folder.
 #   3. Detects the Windows feature-update (e.g. 25H2) and architecture from the image, then downloads the
 #      latest combined Servicing Stack + Cumulative Update (LCU) - and the .NET cumulative update
@@ -83,7 +83,7 @@ param(
     [ValidateSet('10', '11')]
     [string]$WindowsVersion = '11',
 
-    [Parameter(HelpMessage = 'Service Windows Server media (2016 through 2025) instead of a client ISO. Only needed to skip the automatic download attempt, since neither Fido nor the Media Creation Tool serves Server media, so without this you must supply Server media yourself with -IsoPath or drop it into the download folder. Once an ISO is mounted, Server versus client is detected from the image itself, so -IsoPath pointed at Server media works without this switch too. -WindowsVersion, -Release and -Language are ignored once Server media is detected')]
+    [Parameter(HelpMessage = 'Deprecated and no longer needed. Server media (2016 through 2025) is detected from the image itself, so pointing -IsoPath at a Server ISO or dropping one into the download folder is enough, and -WindowsVersion, -Release and -Language are ignored once it is detected. Still accepted so existing scheduled tasks and wrapper scripts keep running, and before any ISO is in hand it is treated as a hint that no client ISO should be downloaded')]
     [switch]$Server,
 
     [Parameter(HelpMessage = 'Fido release to request (e.g. 25H2, 24H2) or "Latest". Defaults to Latest')]
@@ -284,7 +284,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.26.1'
+$ScriptVersion = '2026.09.26.2'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -474,9 +474,9 @@ $script:SourceLocalCopy = $null
 # mounted (or stamped) image's own build number is known, so an ISO that does not match -WindowsVersion
 # still gets the right catalog search.
 $script:EffectiveWindowsVersion = $WindowsVersion
-# Read the same way by every Server/client branch below. Starts as -Server, then corrected once the
-# mounted image is known to actually be Server or client media, so -IsoPath media that disagrees with
-# -Server still gets the right catalog family and edition keep-list.
+# Read the same way by every Server/client branch below. The image itself is the source of truth and
+# overwrites this the moment one is extracted, so the deprecated -Server switch and the last build stamp
+# only ever serve as a guess for the steps that have to run before any ISO is in hand.
 $script:EffectiveServer = [bool]$Server
 #endregion
 
@@ -1243,12 +1243,12 @@ function Get-CatalogProductQuery {
 function Get-ServerReleaseName {
     param([int]$Build)
     switch ($Build) {
-        26100  { 'Server2025'; break }
-        25398  { 'Server23H2'; break }
-        20348  { 'Server2022'; break }
-        17763  { 'Server2019'; break }
-        14393  { 'Server2016'; break }
-        default { 'Server' }
+        26100  { 'WinSrv2025'; break }
+        25398  { 'WinSrv23H2'; break }
+        20348  { 'WinSrv2022'; break }
+        17763  { 'WinSrv2019'; break }
+        14393  { 'WinSrv2016'; break }
+        default { 'WinSrv' }
     }
 }
 
@@ -1655,7 +1655,7 @@ function Get-UpdateFileRecords {
 # The parameters that change what ends up inside the ISO. Folder, logging and scheduling parameters are
 # deliberately left out: moving the working folder does not make last month's ISO wrong.
 $script:BuildAffectingParameters = @(
-    'WindowsVersion', 'Server', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
+    'WindowsVersion', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
     'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'SkipWinRE', 'BaselineOnly', 'SkipUpdates', 'SkipServicing', 'CompressEsd', 'FastCompression', 'VolumeLabel',
     'SkipTattoo', 'StripImageResidue', 'DriverPath', 'AllowUnsignedDrivers', 'ExtraFilesPath'
 )
@@ -1692,6 +1692,16 @@ function Read-BuildStamp {
         Write-HostTimestamp "  The stamp '$StampFile' could not be read ($($_.Exception.Message)), so this is treated as a first run." -ForegroundColor Yellow
         return $null
     }
+}
+
+# The stamp is wanted twice, once to guess Server versus client before an ISO exists and again by the
+# rebuild check, and reading it twice would report an unreadable stamp twice.
+function Get-PreviousBuildStamp {
+    if (-not $script:PreviousStampRead) {
+        $script:PreviousStamp = Read-BuildStamp
+        $script:PreviousStampRead = $true
+    }
+    return $script:PreviousStamp
 }
 
 # Every stamp still on disk, newest first. -AutoClean uses this to know which downloads and ISOs are ones
@@ -2068,8 +2078,9 @@ function Invoke-AutoClean {
         if ($Item -and -not $Item.PSIsContainer) { $Candidates[$Item.FullName.ToLowerInvariant()] = $Item }
     }
     # Must track every tag Get-DefaultIsoName can emit, including the Server release names and the
-    # optional locale tag between architecture and build.
-    $GeneratedName = '(Win10|Win11|Windows|Server[A-Za-z0-9]*)_[A-Za-z0-9]+_[A-Za-z0-9]+(_[A-Za-z0-9]+)?(_[\d.]+)?_\d{8}-\d{4}.*\.iso$'
+    # optional locale tag between architecture and build. The old Server* tags stay listed so ISOs from
+    # before the rename are still recognised as this script's own work.
+    $GeneratedName = '(Win10|Win11|Windows|WinSrv[A-Za-z0-9]*|Server[A-Za-z0-9]*)_[A-Za-z0-9]+_[A-Za-z0-9]+(_[A-Za-z0-9]+)?(_[\d.]+)?_\d{8}-\d{4}.*\.iso$'
     # When the output is a remote file path, $FinishedIsoDir is still the default local folder and any ISOs
     # there are orphans from earlier runs, not candidates for this remote-output run.
     if (-not $OutputIsRemote) {
@@ -2154,7 +2165,7 @@ function Get-ScheduledTaskArgumentString {
     $Excluded = @(
         'RegisterScheduledTask', 'UnregisterScheduledTask', 'Schedule', 'ScheduleTime', 'ScheduleDay',
         'TaskName', 'TaskUsername', 'TaskPassword', 'CheckOnly', 'Force', 'ListEditions', 'Unattended', 'SkipInteractive', 'Scheduled',
-        'ServiceWinRE'
+        'ServiceWinRE', 'Server'
     )
     # -Command keeps single-quoted string literals intact; -File strips quotes and misreads
     # hyphen-prefixed values (e.g. '-unattended') as switch names.
@@ -2645,7 +2656,8 @@ function Get-EditionShortName {
     $n = "$Name".ToLower()
     # Server names carry no "Server Core" marker: the bare name IS Server Core, the other is the GUI.
     if ($n -match 'datacenter|standard') {
-        if ($n -match 'datacenter') { return 'DC' } else { return 'Std' }
+        # Not "DC", which reads as domain controller on a file called WinSrv2025_DC_x64.
+        if ($n -match 'datacenter') { return 'Dtc' } else { return 'Std' }
     }
     # LTSC names all contain "enterprise" too, so this has to run before the plain Enterprise match below.
     if ($n -match 'ltsc') {
@@ -2661,7 +2673,7 @@ function Get-EditionShortName {
 
 # Builds the default output ISO name, e.g. Win11_Pro_x64_enGB_26100.4061_20260815-1332.iso. The build/UBR
 # comes from the serviced image when available (that is the only place the post-update revision is known),
-# otherwise from the source image's version. Multiple kept editions are joined into a compound tag such as EntPro or StdDC.
+# otherwise from the source image's version. Multiple kept editions are joined into a compound tag such as EntPro or StdDtc.
 function Get-DefaultIsoName {
     param(
         [object[]]$Images,
@@ -3685,6 +3697,15 @@ Write-HostTimestamp "Locale         : Thread culture $($script:CurrentCulture.Na
 if ($ServiceWinRE) {
     Write-HostTimestamp '-ServiceWinRE is deprecated and does nothing. The recovery image is serviced by default now, so pass -SkipWinRE to turn it off.' -ForegroundColor Yellow
 }
+if ($Server) {
+    Write-HostTimestamp '-Server is deprecated and no longer needed. Server media is detected from the image itself, so -IsoPath pointed at a Server ISO (or one dropped into the download folder) is enough.' -ForegroundColor Yellow
+}
+# With -Server gone, the last build here is the only thing that knows this is Server media before an ISO
+# has been found, which is what keeps a scheduled Server run from downloading client media by mistake.
+if (-not $script:EffectiveServer -and -not $NoStamp) {
+    $LastStamp = Get-PreviousBuildStamp
+    if ($LastStamp -and $LastStamp.Image) { $script:EffectiveServer = [bool]$LastStamp.Image.Server }
+}
 Write-Host $LineBreak
 
 #endregion
@@ -3757,7 +3778,7 @@ else {
 }
 if (-not $LocalIsoAvailable) {
     Write-HostTimestamp "Architecture   : $($WinInfo.Architecture)"
-    if ($Server) { Write-HostTimestamp 'Target         : Windows Server (whatever release the ISO you supply contains)' }
+    if ($script:EffectiveServer) { Write-HostTimestamp 'Target         : Windows Server (whatever release the ISO you supply contains)' }
     else { Write-HostTimestamp "Target         : Windows $WindowsVersion ($Release, $Language)" }
     Write-Host $LineBreak
 }
@@ -3769,7 +3790,7 @@ Write-Host "  Downloads        : $DlDir"
 if (-not $IsoPath) { Write-Host '                     (drop your own .iso here and it is used instead of downloading one)' -ForegroundColor DarkGray }
 Write-Host "  Logs             : $LogDir"
 if (-not $NoStamp) { Write-Host "  Build stamps     : $StampRoot" }
-$IsoNameBase = if ($Server) { 'Server2025_StandardGUI_x64_<build>.<UBR>_<date-time>' } else { 'Win11_EntPro_x64_<build>.<UBR>_<date-time>' }
+$IsoNameBase = if ($script:EffectiveServer) { 'WinSrv2025_Std_x64_<build>.<UBR>_<date-time>' } else { 'Win11_EntPro_x64_<build>.<UBR>_<date-time>' }
 $IsoNameExample = "$IsoNamePrefix$IsoNameBase$IsoNameSuffix.iso"
 Write-Host "  Finished ISO     : $(if ($OutputIsoPath) { $OutputIsoPath } else { Join-Path $FinishedIsoDir $IsoNameExample })"
 Write-Host ''
@@ -4053,7 +4074,7 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
     if ($IsoPath) {
         Write-Host "  - Use the ISO you provided: $IsoPath"
     }
-    elseif ($Server) {
+    elseif ($script:EffectiveServer) {
         Write-Host "  - Use the Windows Server ISO it finds in the download folder: $DlDir"
         Write-Host "      NOTE: Server media cannot be downloaded automatically, so drop the ISO in that folder" -ForegroundColor Yellow
         Write-Host "            or re-run with -IsoPath." -ForegroundColor Yellow
@@ -4082,7 +4103,7 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
         Write-Host "  - Keep ALL editions in the final ISO (-KeepAllEditions)"
     }
     else {
-        $EditionRule = if ($Server) { 'the most upgradeable edition (Standard over Datacenter, and the Desktop Experience over Server Core)' } else { 'Enterprise, Pro and Home, whichever of them this media carries' }
+        $EditionRule = if ($script:EffectiveServer) { 'the most upgradeable edition (Standard over Datacenter, and the Desktop Experience over Server Core)' } else { 'Enterprise, Pro and Home, whichever of them this media carries' }
         Write-Host "  - Keep ONLY $EditionRule to speed up the build. Use -KeepAllEditions to keep them all" -ForegroundColor Yellow
     }
     if (-not $SkipUpdates) {
@@ -4233,9 +4254,9 @@ else {
         Write-HostTimestamp "An ISO is already downloaded - reusing it: $ResolvedIso ($([math]::Round($ExistingIso.Length / 1GB, 2)) GB)" -ForegroundColor Green
     }
     else {
-        # Neither Fido nor the Media Creation Tool offers Windows Server media, so -Server has nowhere to
-        # download from and the run cannot go any further without an ISO from the user.
-        if ($Server) {
+        # Neither Fido nor the Media Creation Tool offers Windows Server media, so a run that is expecting
+        # it has nowhere to download from and cannot go any further without an ISO from the user.
+        if ($script:EffectiveServer) {
             Write-HostTimestamp 'No Windows Server ISO was found, and Server media cannot be downloaded automatically (neither Fido nor the Media Creation Tool serves it).' -ForegroundColor Red
             Write-HostTimestamp '  Get the ISO from the Microsoft Evaluation Center, your Volume Licensing Service Center, or a Visual Studio subscription, then re-run with -IsoPath "C:\path\to\Server.iso"' -ForegroundColor Yellow
             Write-HostTimestamp "  or drop the .iso into the download folder and re-run - it is picked up automatically: $DlDir" -ForegroundColor Yellow
@@ -4368,14 +4389,13 @@ if ($ListEditions) {
 # the stamp the last successful build left behind: the source ISO's hash, the build-affecting parameters,
 # and the newest packages the Microsoft Update Catalog is offering. If all of those still match and last
 # run's ISO is still on disk, there is nothing to gain from doing it again.
-$script:PreviousStamp      = $null
 $script:StampSourceHash    = $null
 $script:ExpectedUpdateSet  = $null
 $script:ExpectedUpdateFor  = $null
 $script:StampUpdateFiles   = @()
 if (-not $NoStamp) {
     Invoke-Task -Description 'Checking the build stamp to see whether anything has changed...' -ScriptBlock {
-        $script:PreviousStamp = Read-BuildStamp
+        $script:PreviousStamp = Get-PreviousBuildStamp
         $script:StampSourceHash = Get-SourceIsoHash -Path $ResolvedIso -Stamp $script:PreviousStamp
 
         # The catalog queries need the feature update and architecture of the image, and reading those
@@ -4386,7 +4406,7 @@ if (-not $NoStamp) {
             $StampArch    = "$($script:PreviousStamp.Image.CatalogArch)"
             # Same correction as below, taken from the last stamp's recorded build instead of a mount,
             # since that is the whole point of this pre-extraction check.
-            if (-not $Server) {
+            if (-not $script:EffectiveServer) {
                 $StampBuild = if ($script:PreviousStamp.Image.Build) { [int]$script:PreviousStamp.Image.Build } else { 0 }
                 $script:EffectiveWindowsVersion = if ($StampBuild -ge 22000) { '11' } elseif ($StampBuild -gt 0) { '10' } else { $WindowsVersion }
             }
@@ -4544,7 +4564,9 @@ if (-not (Test-Path -LiteralPath $InstallWimExtracted) -and (Test-Path -LiteralP
             if ($Resolved.Count -gt 0 -and -not $EsdUnmatched) { $Wanted = $Resolved }
         }
         elseif (-not $KeepAllEditions -and $Images.Count -gt 1) {
-            $Wanted = @(Select-DefaultEditions -Images $Images -ServerMedia:$script:EffectiveServer)
+            # The edition list is already in hand, so ask it rather than trusting the pre-extraction guess.
+            $EsdIsServer = [bool](@($Images | Where-Object { "$($_.ImageName)" -match '(?i)server' }).Count)
+            $Wanted = @(Select-DefaultEditions -Images $Images -ServerMedia:$EsdIsServer)
         }
 
         $Skipped = @($Images | Where-Object { $Wanted -notcontains [int]$_.ImageIndex })
@@ -4578,9 +4600,18 @@ $ImageInfo = $null
 try { $ImageInfo = Get-WindowsImage -ImagePath $InstallWimExtracted -Index 1 -ErrorAction Stop } catch { }
 $ImageBuild = 0
 if ($ImageInfo -and $ImageInfo.Version -match '^\d+\.\d+\.(\d+)') { $ImageBuild = [int]$Matches[1] }
+# The image is the source of truth for Server versus client, the same way catalog queries follow the
+# image's own build rather than -WindowsVersion. EditionId is not localised, so this holds on non-English
+# media too. Resolved before anything below reads it, because the catalog product name depends on it.
+$WasGuessedServer = $script:EffectiveServer
+$script:EffectiveServer = "$($ImageInfo.ImageName) $($ImageInfo.EditionId)" -match '(?i)server'
+if ($ImageInfo -and $script:EffectiveServer -ne $WasGuessedServer) {
+    $Actual = if ($script:EffectiveServer) { 'Windows Server' } else { 'client' }
+    Write-HostTimestamp "This is $Actual media: $($ImageInfo.ImageName) (edition '$($ImageInfo.EditionId)'). Continuing as $Actual, since that is what the image actually is." -ForegroundColor Yellow
+}
 # Catalog searches for client media go by the image's own build, not -WindowsVersion, so an ISO supplied
 # with -IsoPath is queried correctly even when -WindowsVersion names the other family or was left default.
-if (-not $Server) {
+if (-not $script:EffectiveServer) {
     $script:EffectiveWindowsVersion = if ($ImageBuild -ge 22000) { '11' } elseif ($ImageBuild -gt 0) { '10' } else { $WindowsVersion }
 }
 # The WIM header carries the UBR as the "service pack build", so the image's exact patch level is known
@@ -4602,18 +4633,6 @@ if ($ImageUbr -and $ImageVersionText -match '^\d+\.\d+\.\d+$') { $ImageVersionTe
 
 Write-HostTimestamp "Image build    : $ImageVersionText$(if ($FeatureName) { " ($FeatureName)" })"
 Write-HostTimestamp "Image arch     : $ImageArch"
-
-# The image itself is now the source of truth for Server versus client, the same way catalog queries
-# already follow the mounted build rather than -WindowsVersion. EditionId is not localised, so this
-# holds on non-English media too.
-$ImageIsServer = "$($ImageInfo.ImageName) $($ImageInfo.EditionId)" -match '(?i)server'
-if ($ImageIsServer -and -not $Server) {
-    Write-HostTimestamp "This is Windows Server media, but -Server was not passed: $($ImageInfo.ImageName) (edition '$($ImageInfo.EditionId)'). Continuing as Windows Server, since that is what the image actually is." -ForegroundColor Yellow
-}
-elseif ($Server -and $ImageInfo -and -not $ImageIsServer) {
-    Write-HostTimestamp "-Server was passed, but this is client media, not Windows Server: $($ImageInfo.ImageName) (edition '$($ImageInfo.EditionId)'). Continuing as client media, since that is what was actually found." -ForegroundColor Yellow
-}
-$script:EffectiveServer = $ImageIsServer
 
 # DISM on a Windows 10 or later host cannot service a Vista, 7 or 8 era image, and Microsoft never
 # published cumulative updates for those releases either, so all that is possible on media that old is a
@@ -5535,6 +5554,9 @@ if (-not $NoStamp) {
                 FeatureUpdate = $FeatureName
                 Architecture  = $ImageArch
                 CatalogArch   = $CatalogArch
+                # The next run reads this back before extracting anything, since the catalog product name
+                # differs between Server and client and there is no image to ask yet at that point.
+                Server        = [bool]$script:EffectiveServer
                 FinalBuild    = $script:FinalBuildString
             }
             Updates         = [ordered]@{
