@@ -22,7 +22,13 @@ There are two more wins that come along for free.
 
 Sometimes the answer comes back that the image already has this month's cumulative update, and the script says so and skips it. That is not a wasted run. The cumulative update is the slowest thing a build does, but it is a long way from being most of what a build does.
 
-**Setup and recovery are patched separately from the OS.** Microsoft publishes the Setup Dynamic Update and the Safe OS Dynamic Update to the Update Catalog rather than into the media, on their own schedule, so no ISO is ever current on them no matter how recently it was cut. The Setup DU refreshes the loose Windows Setup files in the media's `sources` folder, and on Windows 11 24H2 and later, media without it can stop at a bare *"Windows 11 installation has failed"* before it gets anywhere near installing. The Setup Dynamic Update is selected from releases up to and including the LCU release date, so Setup files never get ahead of the OS they install. The Safe OS DU is the only supported way to patch `winre.wim`, which the cumulative update applied to `install.wim` does not touch at all, so a machine deployed from perfectly patched media routinely ends up with a recovery environment months behind the system it exists to repair. `-ServiceWinRE` closes that gap.
+**Setup and recovery are patched separately from the OS.** Microsoft publishes the Setup Dynamic Update and the Safe OS Dynamic Update to the Update Catalog rather than into the media, on their own schedule, so no ISO is ever current on them no matter how recently it was cut. The Setup DU refreshes the loose Windows Setup files in the media's `sources` folder, and on Windows 11 24H2 and later, media without it can stop at a bare *"Windows 11 installation has failed"* before it gets anywhere near installing. Both Dynamic Updates are selected from releases up to and including the LCU release date, so neither gets ahead of the OS they are being paired with. The Safe OS DU is the only supported way to patch `winre.wim`, which the cumulative update applied to `install.wim` does not touch at all, so a machine deployed from perfectly patched media routinely ends up with a recovery environment months behind the system it exists to repair. Windows does replace the on-disk recovery image eventually, but [only on some rollup updates](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/windows-recovery-environment--windows-re--technical-reference), and if the new image does not fit it shrinks the Windows partition or orphans the recovery partition to make room. Closing the gap on the media instead is deterministic and costs nothing at deployment time, which is why it is on by default and `-SkipWinRE` is the way out.
+
+Committing a serviced `winre.wim` appends the update rather than replacing what it supersedes, so the build also runs `/StartComponentCleanup /ResetBase` against the recovery image and re-exports it at maximum compression before it goes back into `install.wim`. Without that the recovery image ships hundreds of megabytes larger than it needs to be, which matters more here than anywhere else on the media: Setup sizes the recovery partition for it at install time, and a layout that hardcodes a small one has nowhere to put the difference. The work is skipped entirely when the recovery image is already at the build the Safe OS DU delivers, which is read from the WIM header without mounting anything.
+
+Every edition carries its own copy of `winre.wim`, so servicing one index leaves the others alone, but on a given medium they are normally the same image. Nothing inside a recovery environment is edition-specific, and the WIM stores the identical copies once. So the build hashes each edition's recovery image before touching it, does the real work for the first one, and drops that serviced result straight into every later edition whose source hashes the same. On three-edition client media that turns three mount, patch, clean and re-export cycles into one. Hashing rather than assuming is what makes it safe: media that really does ship a different recovery image per edition simply misses the cache and gets serviced properly.
+
+The build each recovery image is at gets read from its WIM header, which needs no mount and so happens even under `-SkipWinRE`, and it is reported per edition at the end of the run and written into the build record on the media. That header can be trusted here in a way `install.wim`'s cannot, because the Safe OS DU rebuilds and re-stamps the recovery image rather than patching it in place. It is the one number that says what a machine deployed from this ISO will actually boot into when Windows will not start.
 
 **.NET runs on its own calendar.** The .NET Framework cumulative update is a separate package with its own release cadence, so media that is current on the OS update is usually still behind on .NET.
 
@@ -117,6 +123,16 @@ So they stay a post-install task. Left alone, Windows Update installs them on it
 
 Neither is worth doing in a gold image before sealing: definitions age out while the image sits in storage, so run them at deployment instead.
 
+## Why Preview Updates Are Left Out
+
+Late each month Microsoft publishes an optional *"Cumulative Update Preview"*, the same rollup that will ship as next month's Patch Tuesday update, released early for organisations that want to test it. The catalog returns it alongside the real one and it is always the newer entry, so picking newest-first would quietly grab it every time. The default is to pass it over.
+
+The reason is that media is not a test machine. An ISO built from a preview installs a build Windows Update will not offer anyone until the following Patch Tuesday, which puts the deployed machine ahead of the fleet it is joining and of whatever your patch baseline is measured against. A preview is also, by Microsoft's own description, not fully validated. It is the wrong thing to stamp into media that will be reused for months.
+
+`-IncludePreview` turns the filter off when testing a coming update against your image is the point. It applies to every catalog query the run makes rather than just the cumulative update, because a preview month is a state to test in, not a package to mix into an otherwise stable set. Because the flag changes what ends up inside the ISO, it is part of the build parameter set, so turning it on or off forces a rebuild rather than the next run deciding nothing has changed.
+
+The title filter that identifies a cumulative update deliberately accepts the "Preview" wording and lets the preview filter make the decision. Excluding previews by making the pattern fail to match them would work by accident, and it would mean `-IncludePreview` silently did nothing.
+
 ## Why Not Re-Update an ISO This Script Built
 
 Feeding last month's output back in as next month's input looks like it should save time. It doesn't, and it costs you things that are hard to get back. **Keep the original Microsoft ISO and rebuild from it every time.**
@@ -140,6 +156,24 @@ The intended setup is a pristine ISO kept somewhere permanent, with its own work
 
 `-AutoClean` prunes old outputs and superseded update packages on its own, and because it only deletes files a stamp recorded, the source ISO is never touched.
 
+## Why Re-Exporting Shrinks the Image
+
+Every serviced image in the build gets exported to a new file afterwards, which looks like an expensive copy for nothing. It is the only step that actually makes the file smaller.
+
+A `.wim` is an append-only archive. It holds one shared pool of file resources plus a separate metadata index per image inside it, and DISM never rewrites that pool in place:
+
+- **Servicing appends.** Applying a cumulative update writes the new version of every changed file as a fresh resource at the end of the archive. The old versions are still sitting in the file, they have just stopped being referenced by the image metadata. This is why `install.wim` and `boot.wim` both *grow* during servicing, often well past what the update itself weighs.
+- **Deleting does not delete.** `/Cleanup-Image /ResetBase` strips superseded components from WinSxS, and dropping an edition with `-KeepEditions` removes an index. Both only unlink references. The bytes stay exactly where they were.
+
+`Export-WindowsImage` is what rebuilds the file. It reads the metadata for the index you asked for, copies only the resources that index actually points at into a brand new archive, and leaves everything unreferenced behind. That is the entire shrink. Without it, `/ResetBase` reclaims nothing you can measure and the finished ISO ships larger than the media you started from.
+
+Two things come along with the rebuild:
+
+- **Recompression.** The export writes at whatever compression you ask for, so an image that arrived as `Fast` comes out `Max`, or as `recovery` with `-CompressEsd`.
+- **Fresh single-instancing.** Resources shared by the remaining editions are stored once again rather than carried as whatever the old layout left behind. This is also why dropping editions saves less than you would expect: most of what you removed was shared with the editions you kept, so only the genuinely edition-specific files go away.
+
+The cost is that an export needs room for a full second copy of the image while it runs. The build checks free space before starting one and skips that particular export with a warning if the drive cannot take it, shipping the serviced but unshrunk image rather than failing the run. `winre.wim` gets the same treatment for a different reason: it has to stay small enough to live in the recovery partition, which servicing can easily push it past.
+
 ## Why Two Identical Builds Aren't the Same Size
 
 The finished ISO's SHA-256 changes on **every** build, even from the same source and the same update, because `oscdimg` writes timestamps into the ISO and the output file name embeds the build date and time. Byte-identical output was never a goal. Size, though, should be stable to within a few megabytes, and a bigger gap than that is worth explaining.
@@ -153,6 +187,8 @@ Offline servicing writes into the image as it works: `Windows\Logs\CBS`, `Window
 Windows recreates all of it on first boot. The same pass also removes `Windows.old`, `$WINDOWS.~BT`, `$WINDOWS.~WS`, `$Recycle.Bin`, `System Volume Information`, `pagefile.sys`, `hiberfil.sys` and `swapfile.sys`, and **warns** when it finds any of them, because none belong in clean Microsoft media. Finding one means the source ISO was built from a captured machine rather than downloaded from Microsoft, which is worth knowing on the first build rather than on the first deployed machine. DISM's default capture exclusion list does not exclude them, so a naive `/Capture-Image` carries them into every deployment.
 
 The switch is off by default because a build that touches nothing inside the image is the easier one to reason about when something goes wrong, and none of this residue affects whether the media installs. Turn it on when consistent ISO sizes matter more than that.
+
+It is still a switch that deletes things out of a Windows image, and the list above is a judgement about what is safe to remove rather than anything Microsoft documents as disposable. Not every file or folder that looks like leftover state is leftover. Some of it exists by design and is read again later by Setup, by first boot or by the recovery environment, and the failure from removing one of those does not show up at build time. It shows up on a machine. **Install once from an ISO built with this switch and confirm Setup, first boot and recovery all behave before deploying from it**, and re-test after a feature update changes what the media contains.
 
 What remains after that is genuine variance in what `/ResetBase` managed to reclaim, which depends on the component store's state at that moment. Running the cleanup more than once does not help, since a completed `/ResetBase` has already removed every superseded component and a second pass rescans the whole store to reclaim nothing. It also runs per edition, so repeating it is expensive.
 

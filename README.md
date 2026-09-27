@@ -9,7 +9,7 @@ Installing Windows from this updated media saves time by eliminating large post-
 * **Safe Execution**: All operations occur within an isolated temporary directory (`C:\WISO-Work` by default). The host system configuration remains untouched.
 * **No Manual ADK Setup Needed**: Automatically fetches a verified copy of `oscdimg.exe` from Microsoft servers to compile the media.
 * **Official Sources Only**: Downloads packages directly from Microsoft endpoints over HTTPS.
-* **Windows Server Support**: Compatible with Windows Server media using the `-Server` flag.
+* **Windows Server Support**: Compatible with Windows Server media, detected automatically from the image.
 
 ---
 
@@ -29,24 +29,35 @@ Installing Windows from this updated media saves time by eliminating large post-
 
 **Windows Server Build:**
 ```shell
-.\Run-Windows-ISO-Updater.bat -Server -IsoPath "C:\ISOs\Server2025.iso"
+.\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Server2025.iso"
 ```
 
 ---
 
-## Technical Considerations: Local Storage vs Network / Cloud Paths
+## Where to Keep the Working Folder
 
-* **Local Disk Requirement**: DISM mounting routines require local storage. Cloud-synced directories (OneDrive, Dropbox, Google Drive) introduce file-locking and sparse-file hydration issues that cause servicing errors, such as Unattend execution failures. Network shares (UNC paths and mapped drives) cannot host DISM scratch mounts.
-* **Alternative Perspective**: Storing source media and finished builds on remote network shares remains practical for pipeline workflows. The script accommodates this by copying a remote source ISO to a local working path before servicing, then uploading the finished image back to the remote target.
-* **Outcome**: Servicing operations will fail unless the primary working directory (`-WorkPath`) resides on a physical local disk. Keep the working directory local, and limit network paths strictly to input sources and final output destinations.
+DISM services an image by projecting it onto a folder, and that only works on a real local disk. Cloud-synced
+folders (OneDrive, Dropbox, Google Drive) hand back placeholder files that the sync client rehydrates on
+demand, which surfaces as servicing errors partway through a build. Network shares and mapped drives cannot
+host a DISM mount at all.
+
+Source media and finished ISOs are a different matter, and those are fine on a share. The script copies a
+remote source ISO to local disk before it mounts anything, then copies the finished ISO back out to the
+remote path at the end.
+
+So keep `-WorkPath` on a local disk, and save the network paths for `-IsoPath` and `-OutputIsoPath`.
 
 ---
 
-## Technical Considerations: Secure Boot and Media Creation
+## Secure Boot
 
-* **Stock Media Integrity**: The script produces standard ISOs preserving official Microsoft signatures. These boot cleanly under standard UEFI Secure Boot policies.
-* **Alternative Perspective**: Tools like Rufus provide deployment conveniences, such as injecting `autounattend.xml` or bypassing TPM hardware checks.
-* **Outcome**: Modifying installation binaries or loader paths invalidates the Microsoft signature chain. If a target machine enforces strict Secure Boot validation, use standard media flashing without third-party bypasses to prevent boot rejections.
+The ISO this script produces is stock media with Microsoft's boot files and signatures untouched, so it boots
+on a machine with Secure Boot enabled without any extra steps.
+
+Keep it that way when you write it to a USB stick. Flashing the ISO as it is preserves the signed boot loader,
+while anything that swaps in its own loader or patches the installer binaries breaks the signature chain, and
+a machine enforcing Secure Boot will refuse it. If you want an answer file on the media, use `-UnattendPath`
+so it goes on before the ISO is built rather than being added afterwards.
 
 ---
 

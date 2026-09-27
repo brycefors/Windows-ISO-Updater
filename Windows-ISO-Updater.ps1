@@ -1,9 +1,9 @@
 # Windows ISO Updater
-# Version: 2026.09.25.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.26.9   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
-# This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
-# Windows Server 2016-2025) installation ISO.
+# This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
+# 2016-2025 installation ISO.
 # It downloads the latest official Microsoft ISO, downloads the latest cumulative update(s) from the
 # Microsoft Update Catalog, integrates those updates directly into the Windows images inside the ISO,
 # and then recompiles a brand-new, bootable ISO that already contains this month's patches.
@@ -19,18 +19,21 @@
 #      "Fido" helper (which queries Microsoft's own software-download servers), retrying blocked link
 #      requests with a backoff (-FidoRetryCount). -UseMct instead opens Microsoft's Media Creation Tool,
 #      which talks to different servers but has no headless mode, so you click through its last few pages
-#      yourself. Either way there is no automatic download for -Server, because neither source serves
-#      Windows Server media.
+#      yourself. Either way Windows Server media has to be supplied by hand, because neither source
+#      serves it. Server versus client is worked out from the image, so no switch announces it.
 #   2. Extracts the ISO to a writable working folder.
 #   3. Detects the Windows feature-update (e.g. 25H2) and architecture from the image, then downloads the
 #      latest combined Servicing Stack + Cumulative Update (LCU) - and the .NET cumulative update
-#      (on by default, disable with -SkipDotNet) - from the Microsoft Update Catalog. You may
-#      instead point at your own .msu/.cab files with -UpdatePath.
+#      (on by default, disable with -SkipDotNet) - from the Microsoft Update Catalog. The optional
+#      preview updates released late in the month are passed over unless -IncludePreview says otherwise.
+#      You may instead point at your own .msu/.cab files with -UpdatePath.
 #   4. Integrates the update(s) offline with DISM into install.wim (by default the other editions are
 #      dropped and only the kept ones are serviced - on client media Enterprise, Pro and Home, whichever
 #      of them the media carries, or on Server media the most upgradeable one, Standard over Datacenter -
 #      so use -KeepAllEditions or -KeepEditions to change this), boot.wim (Windows Setup / WinPE), and
-#      optionally winre.wim (recovery). -DriverPath also injects a folder of .inf driver packages into
+#      winre.wim (recovery), which gets the Safe OS Dynamic Update rather than the cumulative update and
+#      is then re-exported so it stays small enough for the recovery partition (disable with -SkipWinRE).
+#      -DriverPath also injects a folder of .inf driver packages into
 #      every serviced edition and into boot.wim index 2, so Setup itself can see the hardware.
 #   5. Refreshes the loose Setup files on the media: first applies the Setup Dynamic Update to the
 #      sources folder (on by default, disable with -SkipSetupDU), then overwrites sources\setup.exe,
@@ -81,7 +84,7 @@ param(
     [ValidateSet('10', '11')]
     [string]$WindowsVersion = '11',
 
-    [Parameter(HelpMessage = 'Service Windows Server media (2016 through 2025) instead of a client ISO. Only needed to skip the automatic download attempt, since neither Fido nor the Media Creation Tool serves Server media, so without this you must supply Server media yourself with -IsoPath or drop it into the download folder. Once an ISO is mounted, Server versus client is detected from the image itself, so -IsoPath pointed at Server media works without this switch too. -WindowsVersion, -Release and -Language are ignored once Server media is detected')]
+    [Parameter(HelpMessage = 'Deprecated and no longer needed. Server media (2016 through 2025) is detected from the image itself, so pointing -IsoPath at a Server ISO or dropping one into the download folder is enough, and -WindowsVersion, -Release and -Language are ignored once it is detected. Still accepted so existing scheduled tasks and wrapper scripts keep running, and before any ISO is in hand it is treated as a hint that no client ISO should be downloaded')]
     [switch]$Server,
 
     [Parameter(HelpMessage = 'Fido release to request (e.g. 25H2, 24H2) or "Latest". Defaults to Latest')]
@@ -111,11 +114,17 @@ param(
     [Parameter(HelpMessage = 'Skip the Setup Dynamic Update that refreshes the loose Windows Setup files on the media. It is included by default, and without it the Windows 11 24H2+ Setup engine can fail with "Windows 11 installation has failed"')]
     [switch]$SkipSetupDU,
 
-    [Parameter(HelpMessage = 'Also service the recovery image (winre.wim). Off by default. The correct component for WinRE is the Safe OS Dynamic Update, which is fetched when available')]
+    [Parameter(HelpMessage = 'Skip servicing the recovery image (winre.wim). It is serviced by default with the Safe OS Dynamic Update, then cleaned and re-exported so it does not grow. Without it a deployed machine keeps whatever recovery environment the source media shipped, which Windows only replaces on some rollup updates')]
+    [switch]$SkipWinRE,
+
+    [Parameter(HelpMessage = 'Deprecated and ignored. Recovery image servicing is on by default now, so use -SkipWinRE to turn it off. Accepted so existing scheduled tasks and wrapper scripts that still pass it keep running')]
     [switch]$ServiceWinRE,
 
     [Parameter(HelpMessage = 'Skip the cumulative update in hotpatch non-baseline months (February, March, May, June, August, September, November, December). Use only for Windows 11 Enterprise 25H2 media enrolled in Intune or Azure Arc hotpatch. In baseline months (January, April, July, October) the cumulative update is integrated normally.')]
     [switch]$BaselineOnly,
+
+    [Parameter(HelpMessage = 'Allow the optional preview updates Microsoft publishes late in the month (titled "... Preview of Monthly Quality Rollup" or "Cumulative Update Preview") to be selected. They are excluded by default because they are next month''s fixes released early for testing, so they carry a higher build than anything Windows Update will offer the finished media. Useful for validating a coming update, not for production media')]
+    [switch]$IncludePreview,
 
     [Parameter(HelpMessage = 'Skip integrating updates entirely and simply extract and recompile the ISO (useful for testing the build pipeline)')]
     [switch]$SkipUpdates,
@@ -234,7 +243,7 @@ param(
     [Parameter(HelpMessage = 'After a successful build, delete the update packages this script downloaded for previous builds and all but the newest generated ISOs')]
     [switch]$AutoClean,
 
-    [Parameter(HelpMessage = 'Strip servicing residue from each image before committing it: DISM logs, temp files, and leftovers such as $Recycle.Bin that clean Microsoft media never contains. Off by default, so the images are committed exactly as DISM left them')]
+    [Parameter(HelpMessage = 'Strip servicing residue from each image before committing it: DISM logs, temp files, and leftovers such as $Recycle.Bin that clean Microsoft media never contains. Off by default, so the images are committed exactly as DISM left them. Not everything that looks like leftover state is, some of it is there by design, so test an ISO built with this switch by installing from it once before you deploy from it')]
     [switch]$StripImageResidue,
 
     [Parameter(HelpMessage = 'How many generated ISOs -AutoClean keeps (newest first). Defaults to 3')]
@@ -279,7 +288,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.25.1'
+$ScriptVersion = '2026.09.26.9'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -361,6 +370,9 @@ $Host.UI.RawUI.WindowTitle = "Windows ISO Updater - Running as Administrator - $
 $WorkRoot   = if ($WorkPath) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($WorkPath) } else { Join-Path -Path $env:SystemDrive -ChildPath 'WISO-Work' }
 $ExtractDir = Join-Path -Path $WorkRoot -ChildPath 'ISO'
 $MountDir   = Join-Path -Path $WorkRoot -ChildPath 'Mount'
+# Where the serviced recovery image waits between editions. Its own folder because it outlives the step
+# that made it, unlike the re-export temporaries that come and go inside one, so it is one thing to delete.
+$WinReCacheDir = Join-Path -Path $WorkRoot -ChildPath 'WinRECache'
 # Where a standalone oscdimg.exe is cached if it has to be downloaded, so later runs reuse it.
 $OscdimgLocalPath = Join-Path -Path $WorkRoot -ChildPath 'Tools\oscdimg.exe'
 # Downloads and logs default under the work root - NOT the script folder, which may sit on a cloud-synced
@@ -450,6 +462,15 @@ $script:FinalImageLocale = $null
 $script:TattooServicing   = New-Object System.Collections.Generic.List[object]
 $script:TattooResidueMB   = 0
 $script:TattooResidueFound = New-Object System.Collections.Generic.List[string]
+# Sampled as the run goes, because winre.wim only exists while its edition is mounted and install.wim is
+# gone by the time the report runs, so neither can be measured after the fact.
+$script:WimSizes = New-Object System.Collections.Generic.List[psobject]
+# The recovery image serviced for the first edition, with the hash of the source it was made from, so the
+# editions that ship the same one can take a copy instead of repeating the work.
+$script:WinReCachePath = $null
+$script:WinReCacheHash = $null
+# What recovery environment each edition carries, sampled while its install.wim index is mounted.
+$script:WinReVersions = New-Object System.Collections.Generic.List[psobject]
 # Keyed on WIM path and index, because reading a build costs a read-only mount and more than one caller wants it.
 $script:WimBuildCache = @{}
 # The -DriverPath set, resolved once during validation and reused by every image the run services.
@@ -469,9 +490,9 @@ $script:SourceLocalCopy = $null
 # mounted (or stamped) image's own build number is known, so an ISO that does not match -WindowsVersion
 # still gets the right catalog search.
 $script:EffectiveWindowsVersion = $WindowsVersion
-# Read the same way by every Server/client branch below. Starts as -Server, then corrected once the
-# mounted image is known to actually be Server or client media, so -IsoPath media that disagrees with
-# -Server still gets the right catalog family and edition keep-list.
+# Read the same way by every Server/client branch below. The image itself is the source of truth and
+# overwrites this the moment one is extracted, so the deprecated -Server switch and the last build stamp
+# only ever serve as a guess for the steps that have to run before any ISO is in hand.
 $script:EffectiveServer = [bool]$Server
 #endregion
 
@@ -1238,12 +1259,12 @@ function Get-CatalogProductQuery {
 function Get-ServerReleaseName {
     param([int]$Build)
     switch ($Build) {
-        26100  { 'Server2025'; break }
-        25398  { 'Server23H2'; break }
-        20348  { 'Server2022'; break }
-        17763  { 'Server2019'; break }
-        14393  { 'Server2016'; break }
-        default { 'Server' }
+        26100  { 'WinSrv2025'; break }
+        25398  { 'WinSrv23H2'; break }
+        20348  { 'WinSrv2022'; break }
+        17763  { 'WinSrv2019'; break }
+        14393  { 'WinSrv2016'; break }
+        default { 'WinSrv' }
     }
 }
 
@@ -1391,8 +1412,9 @@ function Test-IsHotpatchMonth {
     })
 }
 
-# Finds the newest, non-preview cumulative update in the catalog for a given search query, downloads it
-# to the download folder, and returns the local .msu path (or $null on failure).
+# Finds the newest cumulative update in the catalog for a given search query, downloads it to the download
+# folder, and returns the local .msu path (or $null on failure). Preview releases are left out unless
+# -AllowPreview says otherwise.
 function Get-LatestCatalogPackage {
     param(
         [Parameter(Mandatory)][string]$Query,
@@ -1554,8 +1576,16 @@ function Get-Sha256 {
     $Stream = $null
     try {
         $Length = (Get-Item -LiteralPath $Path -ErrorAction Stop).Length
-        # SHA256Cng is the hardware-accelerated provider, the base factory hands back the managed one.
-        $Algorithm = try { New-Object System.Security.Cryptography.SHA256Cng } catch { [System.Security.Cryptography.SHA256]::Create() }
+        # On .NET Framework the base factory hands back the managed implementation, so ask for the
+        # hardware-accelerated one by name. It does not exist on .NET, where the factory is already
+        # accelerated. Resolved with -as rather than try/catch, because the failed New-Object is a
+        # terminating error and PowerShell 7 records it in the transcript even though it is caught.
+        $Algorithm = if ('System.Security.Cryptography.SHA256Cng' -as [type]) {
+            New-Object System.Security.Cryptography.SHA256Cng
+        }
+        else {
+            [System.Security.Cryptography.SHA256]::Create()
+        }
         $Stream = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
             [System.IO.FileShare]::Read, $BufferSize, [System.IO.FileOptions]::SequentialScan)
         $Buffer = New-Object byte[] $BufferSize
@@ -1650,8 +1680,8 @@ function Get-UpdateFileRecords {
 # The parameters that change what ends up inside the ISO. Folder, logging and scheduling parameters are
 # deliberately left out: moving the working folder does not make last month's ISO wrong.
 $script:BuildAffectingParameters = @(
-    'WindowsVersion', 'Server', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
-    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'BaselineOnly', 'SkipUpdates', 'SkipServicing', 'CompressEsd', 'FastCompression', 'VolumeLabel',
+    'WindowsVersion', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
+    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'SkipWinRE', 'BaselineOnly', 'IncludePreview', 'SkipUpdates', 'SkipServicing', 'CompressEsd', 'FastCompression', 'VolumeLabel',
     'SkipTattoo', 'StripImageResidue', 'DriverPath', 'AllowUnsignedDrivers', 'ExtraFilesPath'
 )
 
@@ -1687,6 +1717,16 @@ function Read-BuildStamp {
         Write-HostTimestamp "  The stamp '$StampFile' could not be read ($($_.Exception.Message)), so this is treated as a first run." -ForegroundColor Yellow
         return $null
     }
+}
+
+# The stamp is wanted twice, once to guess Server versus client before an ISO exists and again by the
+# rebuild check, and reading it twice would report an unreadable stamp twice.
+function Get-PreviousBuildStamp {
+    if (-not $script:PreviousStampRead) {
+        $script:PreviousStamp = Read-BuildStamp
+        $script:PreviousStampRead = $true
+    }
+    return $script:PreviousStamp
 }
 
 # Every stamp still on disk, newest first. -AutoClean uses this to know which downloads and ISOs are ones
@@ -1852,6 +1892,7 @@ function Get-CatalogLatestEntry {
         [Parameter(Mandatory)][string]$Query,
         [string]$TitleInclude,
         [string]$TitleExclude,
+        [switch]$AllowPreview,
         [datetime]$NotAfter      # optional upper bound - packages released after this date are excluded
     )
     $Results = Search-UpdateCatalog -Query $Query
@@ -1859,7 +1900,7 @@ function Get-CatalogLatestEntry {
     $Filtered = $Results
     if ($TitleInclude) { $Filtered = $Filtered | Where-Object { $_.Title -match $TitleInclude } }
     if ($TitleExclude) { $Filtered = $Filtered | Where-Object { $_.Title -notmatch $TitleExclude } }
-    $Filtered = $Filtered | Where-Object { $_.Title -notmatch '(?i)preview' }
+    if (-not $AllowPreview) { $Filtered = $Filtered | Where-Object { $_.Title -notmatch '(?i)preview' } }
     if ($PSBoundParameters.ContainsKey('NotAfter')) {
         $Filtered = $Filtered | Where-Object { $_.LastUpdated -and ([datetime]$_.LastUpdated) -le $NotAfter }
     }
@@ -1901,14 +1942,14 @@ function Get-ExpectedUpdateSet {
     if ($script:EffectiveServer -and -not $FeatureName) { return $null }
 
     $Product = Get-CatalogProductQuery -FeatureUpdate $FeatureName
-    $Include = '(?i)cumulative update for (windows|microsoft server operating system)'
+    $Include = '(?i)cumulative update (preview )?for (windows|microsoft server operating system)'
     $Exclude = '(?i)\.net|dynamic update'
     $Set = New-Object System.Collections.Generic.List[string]
 
     # Same queries (including the broader fallback) the download step uses, so the two always agree.
-    $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $Product for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude
+    $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $Product for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude -AllowPreview:$IncludePreview
     if (-not $Lcu -and -not $script:EffectiveServer) {
-        $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude
+        $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude -AllowPreview:$IncludePreview
     }
     if (-not $Lcu) { return $null }
     if ($BaselineOnly -and $Lcu.LastUpdated) {
@@ -1923,22 +1964,25 @@ function Get-ExpectedUpdateSet {
     }
 
     if (-not $SkipDotNet) {
-        $DotNet = Get-CatalogLatestEntry -Query "Cumulative Update for .NET Framework $Product for $CatalogArch" -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update'
+        $DotNet = Get-CatalogLatestEntry -Query "Cumulative Update for .NET Framework $Product for $CatalogArch" -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update' -AllowPreview:$IncludePreview
         $Set.Add("DotNet=$(Get-CatalogEntryTag -Entry $DotNet)")
     }
     if (-not $SkipSetupDU) {
         # Bounds the Setup Dynamic Update by the LCU's own date so a stamp comparison always agrees with
         # what the download step would actually pick (see Get-LatestCatalogPackage's -NotAfter).
-        $SetupDuArgs = @{ Query = "Setup Dynamic Update $Product $CatalogArch"; TitleInclude = '(?i)setup dynamic update' }
+        $SetupDuArgs = @{ Query = "Setup Dynamic Update $Product $CatalogArch"; TitleInclude = '(?i)setup dynamic update'; AllowPreview = $IncludePreview }
         if ($Lcu.LastUpdated) { $SetupDuArgs.NotAfter = $Lcu.LastUpdated }
         $SetupDu = Get-CatalogLatestEntry @SetupDuArgs
         $Set.Add("SetupDU=$(Get-CatalogEntryTag -Entry $SetupDu)")
     }
-    if ($ServiceWinRE) {
+    if (-not $SkipWinRE) {
         # Server media labels the Safe OS package plain "Dynamic Update", so the Setup one is excluded by
-        # name instead of the Safe OS one being required by name.
+        # name instead of the Safe OS one being required by name. Bounded by the LCU's date for the same
+        # reason the Setup DU is, so a stamp comparison agrees with what the download step would pick.
         $SafeInclude = if ($script:EffectiveServer) { '(?i)dynamic update' } else { '(?i)safe os dynamic update' }
-        $SafeOs = Get-CatalogLatestEntry -Query "Safe OS Dynamic Update $Product $CatalogArch" -TitleInclude $SafeInclude -TitleExclude '(?i)setup dynamic update'
+        $SafeOsArgs = @{ Query = "Safe OS Dynamic Update $Product $CatalogArch"; TitleInclude = $SafeInclude; TitleExclude = '(?i)setup dynamic update'; AllowPreview = $IncludePreview }
+        if ($Lcu.LastUpdated) { $SafeOsArgs.NotAfter = $Lcu.LastUpdated }
+        $SafeOs = Get-CatalogLatestEntry @SafeOsArgs
         $Set.Add("SafeOS=$(Get-CatalogEntryTag -Entry $SafeOs)")
     }
     return @($Set)
@@ -2063,8 +2107,9 @@ function Invoke-AutoClean {
         if ($Item -and -not $Item.PSIsContainer) { $Candidates[$Item.FullName.ToLowerInvariant()] = $Item }
     }
     # Must track every tag Get-DefaultIsoName can emit, including the Server release names and the
-    # optional locale tag between architecture and build.
-    $GeneratedName = '(Win10|Win11|Windows|Server[A-Za-z0-9]*)_[A-Za-z0-9]+_[A-Za-z0-9]+(_[A-Za-z0-9]+)?(_[\d.]+)?_\d{8}-\d{4}.*\.iso$'
+    # optional locale tag between architecture and build. The old Server* tags stay listed so ISOs from
+    # before the rename are still recognised as this script's own work.
+    $GeneratedName = '(Win10|Win11|Windows|WinSrv[A-Za-z0-9]*|Server[A-Za-z0-9]*)_[A-Za-z0-9]+_[A-Za-z0-9]+(_[A-Za-z0-9]+)?(_[\d.]+)?_\d{8}-\d{4}.*\.iso$'
     # When the output is a remote file path, $FinishedIsoDir is still the default local folder and any ISOs
     # there are orphans from earlier runs, not candidates for this remote-output run.
     if (-not $OutputIsRemote) {
@@ -2148,7 +2193,8 @@ function Invoke-AutoClean {
 function Get-ScheduledTaskArgumentString {
     $Excluded = @(
         'RegisterScheduledTask', 'UnregisterScheduledTask', 'Schedule', 'ScheduleTime', 'ScheduleDay',
-        'TaskName', 'TaskUsername', 'TaskPassword', 'CheckOnly', 'Force', 'ListEditions', 'Unattended', 'SkipInteractive', 'Scheduled'
+        'TaskName', 'TaskUsername', 'TaskPassword', 'CheckOnly', 'Force', 'ListEditions', 'Unattended', 'SkipInteractive', 'Scheduled',
+        'ServiceWinRE', 'Server'
     )
     # -Command keeps single-quoted string literals intact; -File strips quotes and misreads
     # hyphen-prefixed values (e.g. '-unattended') as switch names.
@@ -2639,7 +2685,8 @@ function Get-EditionShortName {
     $n = "$Name".ToLower()
     # Server names carry no "Server Core" marker: the bare name IS Server Core, the other is the GUI.
     if ($n -match 'datacenter|standard') {
-        if ($n -match 'datacenter') { return 'DC' } else { return 'Std' }
+        # Not "DC", which reads as domain controller on a file called WinSrv2025_DC_x64.
+        if ($n -match 'datacenter') { return 'Dtc' } else { return 'Std' }
     }
     # LTSC names all contain "enterprise" too, so this has to run before the plain Enterprise match below.
     if ($n -match 'ltsc') {
@@ -2655,7 +2702,7 @@ function Get-EditionShortName {
 
 # Builds the default output ISO name, e.g. Win11_Pro_x64_enGB_26100.4061_20260815-1332.iso. The build/UBR
 # comes from the serviced image when available (that is the only place the post-update revision is known),
-# otherwise from the source image's version. Multiple kept editions are joined into a compound tag such as EntPro or StdDC.
+# otherwise from the source image's version. Multiple kept editions are joined into a compound tag such as EntPro or StdDtc.
 function Get-DefaultIsoName {
     param(
         [object[]]$Images,
@@ -3351,6 +3398,130 @@ function Remove-ImageResidue {
         if (-not $script:TattooResidueFound.Contains($Item)) { $script:TattooResidueFound.Add($Item) }
     }
 }
+
+# Committing a serviced winre.wim APPENDS the Safe OS delta instead of rebasing it, so the recovery image
+# grows by far more than the update is worth and can outgrow the recovery partition Setup sizes at install
+# time. Re-exporting rebuilds it from a single index, which is the only thing that reclaims that space.
+function Optimize-WinReImage {
+    param(
+        [Parameter(Mandatory)][string]$WinReWim,
+        [string]$ImageLabel = 'winre.wim'
+    )
+    if (-not (Test-RoomForExport -SourceImage $WinReWim -Label 'winre.wim')) { return }
+    # Staged outside the mounted install.wim so a failed export can never be committed into the edition.
+    $Temp = Join-Path -Path $WorkRoot -ChildPath 'winre_new.wim'
+    try {
+        if (Test-Path -LiteralPath $Temp) { Remove-Item -LiteralPath $Temp -Force -ErrorAction SilentlyContinue }
+        $BeforeMB = (Get-Item -LiteralPath $WinReWim).Length / 1MB
+        Write-HostTimestamp '      Re-exporting the recovery image to shrink it...'
+        # Always Max, never -FastCompression: this image has to fit a fixed recovery partition, and at a few
+        # hundred MB the compression time is irrelevant next to install.wim.
+        Export-WindowsImage -SourceImagePath $WinReWim -SourceIndex 1 -DestinationImagePath $Temp -CompressionType Max -ErrorAction Stop | Out-Null
+        Set-ItemProperty -LiteralPath $WinReWim -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
+        # Copied rather than moved, because the destination lives inside a DISM projection of install.wim.
+        Copy-Item -LiteralPath $Temp -Destination $WinReWim -Force -ErrorAction Stop
+        $AfterMB = (Get-Item -LiteralPath $WinReWim).Length / 1MB
+        Write-HostTimestamp ('      winre.wim: {0:N0} MB -> {1:N0} MB (saved {2:N0} MB).' -f $BeforeMB, $AfterMB, ($BeforeMB - $AfterMB)) -ForegroundColor Green
+        Add-ServicingResult -Image $ImageLabel -Package 'Re-export' -Result 'Applied' -Detail ('{0:N0} MB -> {1:N0} MB' -f $BeforeMB, $AfterMB)
+    }
+    catch {
+        Write-HostTimestamp "      The winre.wim re-export failed: $($_.Exception.Message). The serviced recovery image is used as it is." -ForegroundColor Yellow
+        Add-ServicingResult -Image $ImageLabel -Package 'Re-export' -Result 'Failed' -Detail $_.Exception.Message
+    }
+    finally {
+        Remove-Item -LiteralPath $Temp -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Every edition on one medium normally ships the same recovery image (winre.wim is WinPE, nothing in it is
+# edition-specific), so the mount, the Safe OS DU, the /ResetBase and the re-export only have to happen for
+# the first one. Keyed on the source hash rather than assumed, because media that really does carry a
+# different recovery image per edition has to keep being serviced properly.
+function Copy-CachedWinReImage {
+    param(
+        [Parameter(Mandatory)][string]$WinReWim,
+        [string]$SourceHash
+    )
+    if (-not $SourceHash -or $SourceHash -ne $script:WinReCacheHash) { return $false }
+    if (-not $script:WinReCachePath -or -not (Test-Path -LiteralPath $script:WinReCachePath)) { return $false }
+    try {
+        Set-ItemProperty -LiteralPath $WinReWim -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath $script:WinReCachePath -Destination $WinReWim -Force -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-HostTimestamp "    The serviced recovery image could not be reused here: $($_.Exception.Message). This edition's own copy will be serviced instead." -ForegroundColor Yellow
+        return $false
+    }
+}
+
+# Keeps the serviced recovery image where the next edition can pick it up. Staged outside the mount,
+# because the source lives inside a DISM projection that is about to be committed and torn down.
+function Save-ServicedWinReImage {
+    param(
+        [Parameter(Mandatory)][string]$WinReWim,
+        [string]$SourceHash
+    )
+    if (-not $SourceHash) { return }
+    $Cache = Join-Path -Path $WinReCacheDir -ChildPath 'winre_serviced.wim'
+    try {
+        New-Item -ItemType Directory -Path $WinReCacheDir -Force -ErrorAction Stop | Out-Null
+        Copy-Item -LiteralPath $WinReWim -Destination $Cache -Force -ErrorAction Stop
+        $script:WinReCachePath = $Cache
+        $script:WinReCacheHash = $SourceHash
+    }
+    catch {
+        # Not fatal, the remaining editions just each do the work themselves.
+        Write-HostTimestamp "      The serviced recovery image could not be kept for the other editions: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+}
+
+# The build a recovery image is at, read straight from the WIM header so nothing has to be mounted.
+# Trustworthy here in a way it is not for install.wim: winre.wim is rebuilt and re-stamped by the Safe OS
+# Dynamic Update rather than patched in place, so its header follows what is actually inside it.
+function Get-WinReVersion {
+    param([Parameter(Mandatory)][string]$WinReWim)
+
+    $Info = try { Get-WindowsImage -ImagePath $WinReWim -Index 1 -ErrorAction Stop } catch { $null }
+    if (-not $Info) { return $null }
+    $Build = [int]$Info.Build
+    $Ubr   = [int]$Info.SPBuild
+    # Some media leaves Build and SPBuild empty and fills only the combined version string.
+    if ($Build -le 0 -and "$($Info.Version)" -match '^\d+\.\d+\.(\d+)\.(\d+)$') {
+        $Build = [int]$Matches[1]
+        $Ubr   = [int]$Matches[2]
+    }
+    if ($Build -le 0) { return $null }
+    return [pscustomobject]@{ Build = $Build; Ubr = $Ubr; Version = "10.0.$Build.$Ubr" }
+}
+
+# Answers "is servicing this recovery image going to change anything" WITHOUT mounting it, which is the
+# whole point: the mount, the /ResetBase and the re-export are the expensive part, not the update itself.
+# Returns $true only when it can positively prove the image is already there, because wrongly skipping
+# would silently ship a stale recovery environment.
+function Test-WinReAlreadyCurrent {
+    param(
+        [Parameter(Mandatory)][string]$WinReWim,
+        [string]$KbNumber,
+        [psobject]$Version
+    )
+    if (-not $KbNumber) { return $false }
+    # Cached because this runs once per serviced edition and the answer cannot change mid-build. An empty
+    # table is the "asked and the page did not say" marker, so the lookup is not retried.
+    if ($null -eq $script:SafeOsTargets) {
+        $script:SafeOsTargets = Get-KbTargetBuilds -KbNumber $KbNumber
+        if (-not $script:SafeOsTargets) { $script:SafeOsTargets = @{} }
+    }
+    if ($script:SafeOsTargets.Count -eq 0) { return $false }
+
+    if (-not $Version) { $Version = Get-WinReVersion -WinReWim $WinReWim }
+    if (-not $Version -or $Version.Ubr -le 0 -or -not $script:SafeOsTargets.ContainsKey($Version.Build)) { return $false }
+
+    $TargetUbr = [int]$script:SafeOsTargets[$Version.Build]
+    if ($TargetUbr -le 0 -or $Version.Ubr -lt $TargetUbr) { return $false }
+    Write-HostTimestamp "    The recovery image is already at $($Version.Version) and KB$KbNumber delivers 10.0.$($Version.Build).$TargetUbr, so it is left as it is." -ForegroundColor Green
+    return $true
+}
 #endregion
 
 #region Image inspection and final report
@@ -3486,6 +3657,94 @@ function Show-FinalImageInfo {
     Write-HostTimestamp "Image locale  : $LocaleStr" -ForegroundColor Cyan
 }
 
+# Records how big an image is at this moment. The first sample under a label is kept as the starting size
+# and every later one replaces the finishing size, so a caller never has to know which stage it is in.
+function Add-WimSizeSample {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $Item = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+    if (-not $Item) { return }
+    $Entry = $script:WimSizes | Where-Object { $_.Label -eq $Label } | Select-Object -First 1
+    if ($Entry) {
+        $Entry.After     = $Item.Length
+        $Entry.AfterName = $Item.Name
+        return
+    }
+    $script:WimSizes.Add([pscustomobject]@{
+        Label      = $Label
+        BeforeName = $Item.Name
+        AfterName  = $Item.Name
+        Before     = $Item.Length
+        After      = $Item.Length
+    })
+}
+
+# Shows what servicing did to the size of each image. Growth is the normal outcome and not a problem: a
+# cumulative update adds more than /StartComponentCleanup /ResetBase and the re-export can take back.
+function Show-WimSizeComparison {
+    if ($script:WimSizes.Count -eq 0) { return }
+
+    $Rows = @(foreach ($Wim in $script:WimSizes) {
+        # -CompressEsd renames install.wim on the way out, so show both names rather than a misleading one.
+        $Name = if ($Wim.AfterName -ne $Wim.BeforeName) { "$($Wim.Label) -> $($Wim.AfterName)" } else { $Wim.Label }
+        [pscustomobject]@{
+            Name   = $Name
+            Before = $Wim.Before / 1MB
+            After  = $Wim.After / 1MB
+            Delta  = ($Wim.After - $Wim.Before) / 1MB
+        }
+    })
+    $Rows += [pscustomobject]@{
+        Name   = 'Total'
+        Before = ($Rows | Measure-Object -Property Before -Sum).Sum
+        After  = ($Rows | Measure-Object -Property After -Sum).Sum
+        Delta  = ($Rows | Measure-Object -Property Delta -Sum).Sum
+    }
+
+    $NameWidth = ($Rows | ForEach-Object { $_.Name.Length } | Measure-Object -Maximum).Maximum
+    Write-Host ''
+    Write-HostTimestamp 'Image sizes, as extracted and as shipped:' -ForegroundColor Cyan
+    foreach ($Row in $Rows) {
+        if ($Row.Name -eq 'Total') { Write-Host ('  ' + ('-' * ($NameWidth + 42))) }
+        $Change = '{0}{1:N0} MB' -f $(if ($Row.Delta -ge 0) { '+' } else { '-' }), [math]::Abs($Row.Delta)
+        Write-Host ("  {0,-$NameWidth}  {1,9:N0} MB -> {2,9:N0} MB  {3,10}" -f $Row.Name, $Row.Before, $Row.After, $Change)
+    }
+}
+
+# Records the build of an edition's recovery image. As with the sizes, the first call under a label is
+# what it started at and every later one is where it ended up.
+function Add-WinReVersionSample {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [string]$Version
+    )
+
+    if (-not $Version) { return }
+    $Entry = $script:WinReVersions | Where-Object { $_.Label -eq $Label } | Select-Object -First 1
+    if ($Entry) {
+        $Entry.After = $Version
+        return
+    }
+    $script:WinReVersions.Add([pscustomobject]@{ Label = $Label; Before = $Version; After = $Version })
+}
+
+# What recovery environment the finished media ships, per edition. Worth stating outright: it is the one
+# part of a Windows image that stock media leaves years behind, and nothing else on the ISO records it.
+function Show-WinReVersions {
+    if ($script:WinReVersions.Count -eq 0) { return }
+
+    $NameWidth = ($script:WinReVersions | ForEach-Object { $_.Label.Length } | Measure-Object -Maximum).Maximum
+    Write-Host ''
+    Write-HostTimestamp 'Recovery image (WinRE) build, per edition:' -ForegroundColor Cyan
+    foreach ($Entry in $script:WinReVersions) {
+        $Change = if ($Entry.After -ne $Entry.Before) { "$($Entry.Before) -> $($Entry.After)" } else { "$($Entry.After) (unchanged)" }
+        Write-Host ("  {0,-$NameWidth}  {1}" -f $Entry.Label, $Change)
+    }
+}
+
 #endregion
 
 #region Build tattoo
@@ -3608,6 +3867,18 @@ $script:CurrentCulture   = [System.Globalization.CultureInfo]::CurrentCulture
 $script:CurrentUICulture = [System.Globalization.CultureInfo]::CurrentUICulture
 $script:SystemLocale     = try { (Get-WinSystemLocale -ErrorAction Stop).Name } catch { 'unknown' }
 Write-HostTimestamp "Locale         : Thread culture $($script:CurrentCulture.Name), UI culture $($script:CurrentUICulture.Name), system locale $script:SystemLocale"
+if ($ServiceWinRE) {
+    Write-HostTimestamp '-ServiceWinRE is deprecated and does nothing. The recovery image is serviced by default now, so pass -SkipWinRE to turn it off.' -ForegroundColor Yellow
+}
+if ($Server) {
+    Write-HostTimestamp '-Server is deprecated and no longer needed. Server media is detected from the image itself, so -IsoPath pointed at a Server ISO (or one dropped into the download folder) is enough.' -ForegroundColor Yellow
+}
+# With -Server gone, the last build here is the only thing that knows this is Server media before an ISO
+# has been found, which is what keeps a scheduled Server run from downloading client media by mistake.
+if (-not $script:EffectiveServer -and -not $NoStamp) {
+    $LastStamp = Get-PreviousBuildStamp
+    if ($LastStamp -and $LastStamp.Image) { $script:EffectiveServer = [bool]$LastStamp.Image.Server }
+}
 Write-Host $LineBreak
 
 #endregion
@@ -3680,7 +3951,7 @@ else {
 }
 if (-not $LocalIsoAvailable) {
     Write-HostTimestamp "Architecture   : $($WinInfo.Architecture)"
-    if ($Server) { Write-HostTimestamp 'Target         : Windows Server (whatever release the ISO you supply contains)' }
+    if ($script:EffectiveServer) { Write-HostTimestamp 'Target         : Windows Server (whatever release the ISO you supply contains)' }
     else { Write-HostTimestamp "Target         : Windows $WindowsVersion ($Release, $Language)" }
     Write-Host $LineBreak
 }
@@ -3692,7 +3963,7 @@ Write-Host "  Downloads        : $DlDir"
 if (-not $IsoPath) { Write-Host '                     (drop your own .iso here and it is used instead of downloading one)' -ForegroundColor DarkGray }
 Write-Host "  Logs             : $LogDir"
 if (-not $NoStamp) { Write-Host "  Build stamps     : $StampRoot" }
-$IsoNameBase = if ($Server) { 'Server2025_StandardGUI_x64_<build>.<UBR>_<date-time>' } else { 'Win11_EntPro_x64_<build>.<UBR>_<date-time>' }
+$IsoNameBase = if ($script:EffectiveServer) { 'WinSrv2025_Std_x64_<build>.<UBR>_<date-time>' } else { 'Win11_EntPro_x64_<build>.<UBR>_<date-time>' }
 $IsoNameExample = "$IsoNamePrefix$IsoNameBase$IsoNameSuffix.iso"
 Write-Host "  Finished ISO     : $(if ($OutputIsoPath) { $OutputIsoPath } else { Join-Path $FinishedIsoDir $IsoNameExample })"
 Write-Host ''
@@ -3724,10 +3995,12 @@ if (-not $HaveRunMutex) {
 #endregion
 
 #region Clean up leftovers from an interrupted run
-# Add-UpdateGroup stages each package in its own pkgstage_* folder and deletes it in a finally block, but a
-# run that was killed outright never reaches that, leaving several GB behind. Cleared before the free space
-# check so the reading reflects what is really available.
-$StaleStages = @(Get-ChildItem -LiteralPath $WorkRoot -Directory -Filter 'pkgstage_*' -ErrorAction SilentlyContinue)
+# Add-UpdateGroup stages each package in its own pkgstage_* folder and the serviced recovery image waits in
+# WinRECache, both deleted when the step that made them finishes, but a run that was killed outright never
+# reaches that and leaves several GB behind. Cleared before the free space check so the reading reflects
+# what is really available.
+$StaleStages = @(Get-ChildItem -LiteralPath $WorkRoot -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like 'pkgstage_*' -or $_.Name -eq 'WinRECache' })
 if ($StaleStages.Count -gt 0) {
     $StageFreedMB = 0
     $StageRemoved = 0
@@ -3744,7 +4017,7 @@ if ($StaleStages.Count -gt 0) {
         }
     }
     if ($StageRemoved -gt 0) {
-        Write-HostTimestamp ('Removed {0} update staging folder(s) left behind by an interrupted run, freeing {1:N0} MB.' -f $StageRemoved, $StageFreedMB) -ForegroundColor DarkGray
+        Write-HostTimestamp ('Removed {0} staging folder(s) left behind by an interrupted run, freeing {1:N0} MB.' -f $StageRemoved, $StageFreedMB) -ForegroundColor DarkGray
         Write-Host $LineBreak
     }
 }
@@ -3976,7 +4249,7 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
     if ($IsoPath) {
         Write-Host "  - Use the ISO you provided: $IsoPath"
     }
-    elseif ($Server) {
+    elseif ($script:EffectiveServer) {
         Write-Host "  - Use the Windows Server ISO it finds in the download folder: $DlDir"
         Write-Host "      NOTE: Server media cannot be downloaded automatically, so drop the ISO in that folder" -ForegroundColor Yellow
         Write-Host "            or re-run with -IsoPath." -ForegroundColor Yellow
@@ -4005,7 +4278,7 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
         Write-Host "  - Keep ALL editions in the final ISO (-KeepAllEditions)"
     }
     else {
-        $EditionRule = if ($Server) { 'the most upgradeable edition (Standard over Datacenter, and the Desktop Experience over Server Core)' } else { 'Enterprise, Pro and Home, whichever of them this media carries' }
+        $EditionRule = if ($script:EffectiveServer) { 'the most upgradeable edition (Standard over Datacenter, and the Desktop Experience over Server Core)' } else { 'Enterprise, Pro and Home, whichever of them this media carries' }
         Write-Host "  - Keep ONLY $EditionRule to speed up the build. Use -KeepAllEditions to keep them all" -ForegroundColor Yellow
     }
     if (-not $SkipUpdates) {
@@ -4015,9 +4288,12 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
         else {
             Write-Host "  - Download the latest cumulative update(s)$(if (-not $SkipDotNet) { ' and the latest .NET cumulative update' }) from the Microsoft Update Catalog"
             Write-Host "      (the cumulative update is skipped entirely if the image already has that build)" -ForegroundColor DarkGray
+            if ($IncludePreview) {
+                Write-Host "  - Allow preview updates to be selected (-IncludePreview): the media can end up on a build Windows Update will not offer until next month" -ForegroundColor Yellow
+            }
             if (-not $SkipSetupDU) { Write-Host "  - Download the latest Setup Dynamic Update and apply it to the media's sources folder" }
         }
-        Write-Host "  - Integrate the update(s) into install.wim ($Edition), boot.wim$(if ($ServiceWinRE) { ', and winre.wim' })"
+        Write-Host "  - Integrate the update(s) into install.wim ($Edition), boot.wim$(if (-not $SkipWinRE) { ', and winre.wim' })"
         Write-Host "  - Clean up and re-export the images to shrink them"
     }
     else {
@@ -4025,6 +4301,9 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
     }
     if ($CompressEsd) {
         Write-Host "  - Export the image as install.esd with recovery compression (-CompressEsd): a much smaller ISO, but a slow export and the media cannot be serviced again afterwards" -ForegroundColor Yellow
+    }
+    if ($StripImageResidue) {
+        Write-Host "  - Strip the servicing residue out of each image (-StripImageResidue): not everything that looks like leftover state is, so install from this ISO once before you deploy from it" -ForegroundColor Yellow
     }
     if ($ResolvedDriverPath) {
         Write-Host "  - Inject $($script:DriverInfFiles.Count) driver package(s) from $ResolvedDriverPath into every serviced edition and into boot.wim index 2 (Windows Setup)" -ForegroundColor Yellow
@@ -4156,9 +4435,9 @@ else {
         Write-HostTimestamp "An ISO is already downloaded - reusing it: $ResolvedIso ($([math]::Round($ExistingIso.Length / 1GB, 2)) GB)" -ForegroundColor Green
     }
     else {
-        # Neither Fido nor the Media Creation Tool offers Windows Server media, so -Server has nowhere to
-        # download from and the run cannot go any further without an ISO from the user.
-        if ($Server) {
+        # Neither Fido nor the Media Creation Tool offers Windows Server media, so a run that is expecting
+        # it has nowhere to download from and cannot go any further without an ISO from the user.
+        if ($script:EffectiveServer) {
             Write-HostTimestamp 'No Windows Server ISO was found, and Server media cannot be downloaded automatically (neither Fido nor the Media Creation Tool serves it).' -ForegroundColor Red
             Write-HostTimestamp '  Get the ISO from the Microsoft Evaluation Center, your Volume Licensing Service Center, or a Visual Studio subscription, then re-run with -IsoPath "C:\path\to\Server.iso"' -ForegroundColor Yellow
             Write-HostTimestamp "  or drop the .iso into the download folder and re-run - it is picked up automatically: $DlDir" -ForegroundColor Yellow
@@ -4291,14 +4570,13 @@ if ($ListEditions) {
 # the stamp the last successful build left behind: the source ISO's hash, the build-affecting parameters,
 # and the newest packages the Microsoft Update Catalog is offering. If all of those still match and last
 # run's ISO is still on disk, there is nothing to gain from doing it again.
-$script:PreviousStamp      = $null
 $script:StampSourceHash    = $null
 $script:ExpectedUpdateSet  = $null
 $script:ExpectedUpdateFor  = $null
 $script:StampUpdateFiles   = @()
 if (-not $NoStamp) {
     Invoke-Task -Description 'Checking the build stamp to see whether anything has changed...' -ScriptBlock {
-        $script:PreviousStamp = Read-BuildStamp
+        $script:PreviousStamp = Get-PreviousBuildStamp
         $script:StampSourceHash = Get-SourceIsoHash -Path $ResolvedIso -Stamp $script:PreviousStamp
 
         # The catalog queries need the feature update and architecture of the image, and reading those
@@ -4309,7 +4587,7 @@ if (-not $NoStamp) {
             $StampArch    = "$($script:PreviousStamp.Image.CatalogArch)"
             # Same correction as below, taken from the last stamp's recorded build instead of a mount,
             # since that is the whole point of this pre-extraction check.
-            if (-not $Server) {
+            if (-not $script:EffectiveServer) {
                 $StampBuild = if ($script:PreviousStamp.Image.Build) { [int]$script:PreviousStamp.Image.Build } else { 0 }
                 $script:EffectiveWindowsVersion = if ($StampBuild -ge 22000) { '11' } elseif ($StampBuild -gt 0) { '10' } else { $WindowsVersion }
             }
@@ -4467,7 +4745,9 @@ if (-not (Test-Path -LiteralPath $InstallWimExtracted) -and (Test-Path -LiteralP
             if ($Resolved.Count -gt 0 -and -not $EsdUnmatched) { $Wanted = $Resolved }
         }
         elseif (-not $KeepAllEditions -and $Images.Count -gt 1) {
-            $Wanted = @(Select-DefaultEditions -Images $Images -ServerMedia:$script:EffectiveServer)
+            # The edition list is already in hand, so ask it rather than trusting the pre-extraction guess.
+            $EsdIsServer = [bool](@($Images | Where-Object { "$($_.ImageName)" -match '(?i)server' }).Count)
+            $Wanted = @(Select-DefaultEditions -Images $Images -ServerMedia:$EsdIsServer)
         }
 
         $Skipped = @($Images | Where-Object { $Wanted -notcontains [int]$_.ImageIndex })
@@ -4494,6 +4774,11 @@ if (-not (Test-Path -LiteralPath $InstallWimExtracted)) {
     exit 1
 }
 
+# The starting sizes for the comparison at the end. Taken after any install.esd conversion, because that
+# WIM is the one servicing actually works on.
+Add-WimSizeSample -Label 'install.wim' -Path $InstallWimExtracted
+Add-WimSizeSample -Label 'boot.wim' -Path $BootWim
+
 #endregion
 
 #region Determine the feature update / architecture from the image (for catalog searches)
@@ -4501,9 +4786,18 @@ $ImageInfo = $null
 try { $ImageInfo = Get-WindowsImage -ImagePath $InstallWimExtracted -Index 1 -ErrorAction Stop } catch { }
 $ImageBuild = 0
 if ($ImageInfo -and $ImageInfo.Version -match '^\d+\.\d+\.(\d+)') { $ImageBuild = [int]$Matches[1] }
+# The image is the source of truth for Server versus client, the same way catalog queries follow the
+# image's own build rather than -WindowsVersion. EditionId is not localised, so this holds on non-English
+# media too. Resolved before anything below reads it, because the catalog product name depends on it.
+$WasGuessedServer = $script:EffectiveServer
+$script:EffectiveServer = "$($ImageInfo.ImageName) $($ImageInfo.EditionId)" -match '(?i)server'
+if ($ImageInfo -and $script:EffectiveServer -ne $WasGuessedServer) {
+    $Actual = if ($script:EffectiveServer) { 'Windows Server' } else { 'client' }
+    Write-HostTimestamp "This is $Actual media: $($ImageInfo.ImageName) (edition '$($ImageInfo.EditionId)'). Continuing as $Actual, since that is what the image actually is." -ForegroundColor Yellow
+}
 # Catalog searches for client media go by the image's own build, not -WindowsVersion, so an ISO supplied
 # with -IsoPath is queried correctly even when -WindowsVersion names the other family or was left default.
-if (-not $Server) {
+if (-not $script:EffectiveServer) {
     $script:EffectiveWindowsVersion = if ($ImageBuild -ge 22000) { '11' } elseif ($ImageBuild -gt 0) { '10' } else { $WindowsVersion }
 }
 # The WIM header carries the UBR as the "service pack build", so the image's exact patch level is known
@@ -4525,18 +4819,6 @@ if ($ImageUbr -and $ImageVersionText -match '^\d+\.\d+\.\d+$') { $ImageVersionTe
 
 Write-HostTimestamp "Image build    : $ImageVersionText$(if ($FeatureName) { " ($FeatureName)" })"
 Write-HostTimestamp "Image arch     : $ImageArch"
-
-# The image itself is now the source of truth for Server versus client, the same way catalog queries
-# already follow the mounted build rather than -WindowsVersion. EditionId is not localised, so this
-# holds on non-English media too.
-$ImageIsServer = "$($ImageInfo.ImageName) $($ImageInfo.EditionId)" -match '(?i)server'
-if ($ImageIsServer -and -not $Server) {
-    Write-HostTimestamp "This is Windows Server media, but -Server was not passed: $($ImageInfo.ImageName) (edition '$($ImageInfo.EditionId)'). Continuing as Windows Server, since that is what the image actually is." -ForegroundColor Yellow
-}
-elseif ($Server -and $ImageInfo -and -not $ImageIsServer) {
-    Write-HostTimestamp "-Server was passed, but this is client media, not Windows Server: $($ImageInfo.ImageName) (edition '$($ImageInfo.EditionId)'). Continuing as client media, since that is what was actually found." -ForegroundColor Yellow
-}
-$script:EffectiveServer = $ImageIsServer
 
 # DISM on a Windows 10 or later host cannot service a Vista, 7 or 8 era image, and Microsoft never
 # published cumulative updates for those releases either, so all that is possible on media that old is a
@@ -4573,6 +4855,9 @@ if (-not $NoStamp -and $script:ExpectedUpdateFor -ne "$FeatureName|$CatalogArch"
 $UpdateGroups = New-Object System.Collections.Generic.List[object]
 $SafeOsGroup = $null
 $script:SetupDu = $null
+# The Safe OS KB and the builds it delivers, shared so the per-edition WinRE check asks the support page once.
+$script:SafeOsKb = $null
+$script:SafeOsTargets = $null
 
 if ($SkipUpdates -or $SkipServicing) {
     Write-HostTimestamp 'Skipping update integration (-SkipUpdates was specified).' -ForegroundColor Yellow
@@ -4613,20 +4898,22 @@ else {
     Invoke-Task -Description 'Downloading the latest cumulative update from the Microsoft Update Catalog...' -ScriptBlock {
         # The monthly LCU is titled e.g. "2026-07 Cumulative Update for Windows 11 Version 25H2 for
         # x64-based Systems (KB...)" and classified as a Security Update. Restrict the match to real
-        # cumulative updates and exclude the .NET / Dynamic Update entries the same query returns.
+        # cumulative updates and exclude the .NET / Dynamic Update entries the same query returns. The
+        # optional "Preview" word has to be allowed through here, because whether a preview is acceptable
+        # is -IncludePreview's decision to make, not this pattern's.
         $Query = "Cumulative Update for $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) for $CatalogArch-based Systems"
-        $Include = '(?i)cumulative update for (windows|microsoft server operating system)'
+        $Include = '(?i)cumulative update (preview )?for (windows|microsoft server operating system)'
         $Exclude = '(?i)\.net|dynamic update'
         $script:LcuUpToDate = $null
         $script:LcuSkippedBaselineOnly = $false
         $script:LcuReleaseDate = $null
-        $script:Lcu = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly -SelectedDate ([ref]$script:LcuReleaseDate)
+        $script:Lcu = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -AllowPreview:$IncludePreview -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly -SelectedDate ([ref]$script:LcuReleaseDate)
         if (-not $script:Lcu -and -not $script:LcuUpToDate -and -not $script:EffectiveServer) {
             # Retry with a looser query (some releases omit the "Version xxHx" token in the title). Server
             # media is excluded because its product name without the version matches every Server release.
             $Query2 = "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems"
             Write-HostTimestamp "  Retrying with a broader query: $Query2" -ForegroundColor Yellow
-            $script:Lcu = Get-LatestCatalogPackage -Query $Query2 -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly -SelectedDate ([ref]$script:LcuReleaseDate)
+            $script:Lcu = Get-LatestCatalogPackage -Query $Query2 -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -AllowPreview:$IncludePreview -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly -SelectedDate ([ref]$script:LcuReleaseDate)
         }
     }
     if ($script:Lcu) { $UpdateGroups.Add(@($script:Lcu)) }
@@ -4648,7 +4935,7 @@ else {
     if (-not $SkipDotNet) {
         Invoke-Task -Description 'Downloading the latest .NET cumulative update from the Microsoft Update Catalog...' -ScriptBlock {
             $Query = "Cumulative Update for .NET Framework $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) for $CatalogArch"
-            $script:DotNet = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update'
+            $script:DotNet = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update' -AllowPreview:$IncludePreview
         }
         if ($script:DotNet) { $UpdateGroups.Add(@($script:DotNet)) }
         else { Write-HostTimestamp '  No .NET cumulative update was integrated (none found).' -ForegroundColor Yellow }
@@ -4666,6 +4953,7 @@ else {
                 Query        = "Setup Dynamic Update $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) $CatalogArch"
                 DownloadDir  = $DlDir
                 TitleInclude = '(?i)setup dynamic update'
+                AllowPreview = $IncludePreview
             }
             if ($script:LcuReleaseDate) { $SetupDuArgs.NotAfter = $script:LcuReleaseDate }
             $script:SetupDu = Get-LatestCatalogPackage @SetupDuArgs
@@ -4679,14 +4967,30 @@ else {
         Write-Host $LineBreak
     }
 
-    if ($ServiceWinRE) {
+    if (-not $SkipWinRE) {
         Invoke-Task -Description 'Looking for a Safe OS Dynamic Update for the recovery image (WinRE)...' -ScriptBlock {
             # Server media labels the Safe OS package plain "Dynamic Update", so the Setup one is excluded
             # by name instead of the Safe OS one being required by name.
             $SafeInclude = if ($script:EffectiveServer) { '(?i)dynamic update' } else { '(?i)safe os dynamic update' }
-            $script:SafeOs = Get-LatestCatalogPackage -Query "Safe OS Dynamic Update $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) $CatalogArch" -DownloadDir $DlDir -TitleInclude $SafeInclude -TitleExclude '(?i)setup dynamic update'
+            # Bounded by the LCU's release date for the same reason the Setup DU is: a Safe OS package
+            # published later targets a servicing stack this month's LCU has not put in the image yet.
+            $SafeOsArgs = @{
+                Query        = "Safe OS Dynamic Update $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) $CatalogArch"
+                DownloadDir  = $DlDir
+                TitleInclude = $SafeInclude
+                TitleExclude = '(?i)setup dynamic update'
+                AllowPreview = $IncludePreview
+            }
+            if ($script:LcuReleaseDate) { $SafeOsArgs.NotAfter = $script:LcuReleaseDate }
+            $script:SafeOs = Get-LatestCatalogPackage @SafeOsArgs
         }
-        if ($script:SafeOs) { $SafeOsGroup = @($script:SafeOs) }
+        if ($script:SafeOs) {
+            $SafeOsGroup = @($script:SafeOs)
+            # Read off the package name so the per-edition check can ask the support page what build it delivers.
+            foreach ($File in $SafeOsGroup) {
+                if ((Split-Path -Leaf "$File") -match '(?i)kb(\d{6,})') { $script:SafeOsKb = $Matches[1]; break }
+            }
+        }
         else { Write-HostTimestamp '  No Safe OS Dynamic Update was found, so WinRE update integration will be skipped (per Microsoft, the LCU does not apply to WinRE).' -ForegroundColor Yellow }
         Write-Host $LineBreak
     }
@@ -4808,29 +5112,67 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
                 Write-HostTimestamp '    Mounting the image...'
                 Mount-WindowsImage -ImagePath $InstallWimExtracted -Index $Index -Path $MountDir -ErrorAction Stop | Out-Null
 
-                # Optionally service the recovery image (winre.wim) that lives inside this edition.
-                if ($ServiceWinRE) {
-                    $WinReWim = Join-Path $MountDir 'Windows\System32\Recovery\winre.wim'
-                    if (Test-Path -LiteralPath $WinReWim) {
-                        $WinReMount = Join-Path $WorkRoot 'WinREMount'
-                        Reset-MountDirectory -Path $WinReMount -ImagePath $WinReWim
-                        try {
-                            Set-ItemProperty -LiteralPath $WinReWim -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
-                            Write-HostTimestamp '    Servicing the recovery image (winre.wim)...'
-                            Mount-WindowsImage -ImagePath $WinReWim -Index 1 -Path $WinReMount -ErrorAction Stop | Out-Null
-                            # Per Microsoft, WinRE is serviced with the Safe OS Dynamic Update - NOT the LCU.
-                            if ($SafeOsGroup) {
-                                Add-UpdateGroup -MountDir $WinReMount -Group $SafeOsGroup -Label 'Safe OS Dynamic Update' -ImageLabel "winre.wim (inside index $Index, $EditionName)" | Out-Null
-                            }
-                            else {
-                                Write-HostTimestamp '      No Safe OS Dynamic Update available, so WinRE update integration is skipped.' -ForegroundColor DarkGray
-                            }
-                            Remove-ImageResidue -MountDir $WinReMount
-                            Dismount-WindowsImage -Path $WinReMount -Save -ErrorAction Stop | Out-Null
+                # Per Microsoft, the recovery image inside this edition is patched with the Safe OS Dynamic
+                # Update and never with the LCU, so with no Safe OS package there is nothing to mount for.
+                $WinReWim = Join-Path $MountDir 'Windows\System32\Recovery\winre.wim'
+                $WinReLabel = "winre.wim (inside index $Index, $EditionName)"
+                $WinReSizeLabel = "winre.wim (index $Index)"
+                $WinReVersionLabel = "[$Index] $EditionName"
+                # Read from the WIM header, so which recovery environment this edition carries is on record
+                # even when -SkipWinRE means nothing is going to be done about it.
+                $WinReBefore = Get-WinReVersion -WinReWim $WinReWim
+                if ($WinReBefore) {
+                    Add-WinReVersionSample -Label $WinReVersionLabel -Version $WinReBefore.Version
+                    Write-HostTimestamp "    The recovery image is at $($WinReBefore.Version)." -ForegroundColor DarkGray
+                }
+
+                if (-not $SkipWinRE -and $SafeOsGroup) {
+                    if (-not (Test-Path -LiteralPath $WinReWim)) {
+                        Write-HostTimestamp '    This edition carries no winre.wim, so there is no recovery image to service.' -ForegroundColor DarkGray
+                    }
+                    elseif (Test-WinReAlreadyCurrent -WinReWim $WinReWim -KbNumber $script:SafeOsKb -Version $WinReBefore) {
+                        Add-ServicingResult -Image $WinReLabel -Package "KB$($script:SafeOsKb)" -Result 'Skipped' -Detail 'Already at the build this Safe OS Dynamic Update delivers'
+                    }
+                    else {
+                        Add-WimSizeSample -Label $WinReSizeLabel -Path $WinReWim
+                        # Seconds spent here buy skipping a whole mount, /ResetBase and re-export below.
+                        $WinReSourceHash = Get-Sha256 -Path $WinReWim
+                        if (Copy-CachedWinReImage -WinReWim $WinReWim -SourceHash $WinReSourceHash) {
+                            Write-HostTimestamp '    This edition ships the recovery image an earlier one was serviced from, so the serviced copy goes straight in.' -ForegroundColor Green
+                            Add-ServicingResult -Image $WinReLabel -Package "KB$($script:SafeOsKb)" -Result 'Applied' -Detail 'Reused the recovery image serviced for an earlier edition'
+                            Add-WimSizeSample -Label $WinReSizeLabel -Path $WinReWim
+                            $WinReAfter = Get-WinReVersion -WinReWim $WinReWim
+                            if ($WinReAfter) { Add-WinReVersionSample -Label $WinReVersionLabel -Version $WinReAfter.Version }
                         }
-                        catch {
-                            Write-HostTimestamp "      WinRE servicing failed: $($_.Exception.Message)" -ForegroundColor Yellow
-                            Dismount-ImageDiscard -Path $WinReMount | Out-Null
+                        else {
+                            $WinReMount = Join-Path $WorkRoot 'WinREMount'
+                            Reset-MountDirectory -Path $WinReMount -ImagePath $WinReWim
+                            try {
+                                Set-ItemProperty -LiteralPath $WinReWim -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
+                                Write-HostTimestamp '    Servicing the recovery image (winre.wim)...'
+                                Mount-WindowsImage -ImagePath $WinReWim -Index 1 -Path $WinReMount -ErrorAction Stop | Out-Null
+                                Add-UpdateGroup -MountDir $WinReMount -Group $SafeOsGroup -Label 'Safe OS Dynamic Update' -ImageLabel $WinReLabel | Out-Null
+                                Write-HostTimestamp '      Cleaning up the recovery image component store (/StartComponentCleanup /ResetBase)...'
+                                & dism.exe /Image:"$WinReMount" /Cleanup-Image /StartComponentCleanup /ResetBase | Out-Null
+                                Remove-ImageResidue -MountDir $WinReMount
+                                Dismount-WindowsImage -Path $WinReMount -Save -ErrorAction Stop | Out-Null
+                                Optimize-WinReImage -WinReWim $WinReWim -ImageLabel $WinReLabel
+                                # Read before the edition is committed, since this file only exists while it is mounted.
+                                Add-WimSizeSample -Label $WinReSizeLabel -Path $WinReWim
+                                $WinReAfter = Get-WinReVersion -WinReWim $WinReWim
+                                if ($WinReAfter) {
+                                    Add-WinReVersionSample -Label $WinReVersionLabel -Version $WinReAfter.Version
+                                    Write-HostTimestamp "      The recovery image is now at $($WinReAfter.Version)." -ForegroundColor Green
+                                }
+                                Save-ServicedWinReImage -WinReWim $WinReWim -SourceHash $WinReSourceHash
+                            }
+                            catch {
+                                # Deliberately not fatal. A recovery image that will not service must never cost
+                                # the user the ISO, so the edition keeps the winre.wim it shipped with.
+                                Write-HostTimestamp "      WinRE servicing failed: $($_.Exception.Message). This edition keeps the recovery image it shipped with." -ForegroundColor Yellow
+                                Add-ServicingResult -Image $WinReLabel -Package 'Safe OS Dynamic Update' -Result 'Failed' -Detail $_.Exception.Message
+                                Dismount-ImageDiscard -Path $WinReMount | Out-Null
+                            }
                         }
                     }
                 }
@@ -4979,6 +5321,10 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
             }
         }
 
+        # Sampled here rather than inside the re-export, so a boot.wim that was serviced but could not be
+        # re-exported still reports the size it is actually shipping at.
+        Add-WimSizeSample -Label 'boot.wim' -Path $BootWim
+
         # Push the serviced binaries onto the media so their versions match the serviced boot.wim.
         Invoke-Task -Description 'Updating the media Setup and boot manager files to match the serviced boot.wim...' -ScriptBlock {
             $StagedSetup = Join-Path $SetupStage 'setup.exe'
@@ -5025,6 +5371,7 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
     }
 
     # 4) Re-export install.wim below (outside this block) to reclaim the space freed by the cleanup.
+    Remove-Item -LiteralPath $WinReCacheDir -Recurse -Force -ErrorAction SilentlyContinue
     Remove-DirectoryForce -Path $MountDir | Out-Null
 }
 
@@ -5072,6 +5419,9 @@ if (($UpdateGroups.Count -gt 0) -or $TrimNeeded -or $CompressEsd) {
     }
     Write-Host $LineBreak
 }
+
+# Reads $FinalInstallImage rather than install.wim, so -CompressEsd is measured against what ships.
+Add-WimSizeSample -Label 'install.wim' -Path $FinalInstallImage
 
 #endregion
 
@@ -5245,7 +5595,14 @@ if (-not $SkipTattoo) {
                 EditionsRemoved    = $RemovedNames
                 EditionsNotUpdated = $UnpatchedNames
                 AnswerFile         = if ($ResolvedUnattend) { "autounattend.xml (from $(Split-Path -Leaf $ResolvedUnattend), SHA-256 $(Format-ShortHash $script:UnattendHash))" } else { '' }
-                RecoveryImage      = if ($ServiceWinRE) { 'winre.wim serviced with the Safe OS Dynamic Update' } else { 'winre.wim left as it shipped (-ServiceWinRE was not used)' }
+                RecoveryImage      = [ordered]@{
+                    Servicing = if (-not $SkipWinRE) { 'winre.wim serviced with the Safe OS Dynamic Update, then cleaned and re-exported' } else { 'winre.wim left as it shipped (-SkipWinRE was used)' }
+                    # Read from each edition's winre.wim header while it was mounted. Nothing else on the
+                    # media says which recovery environment it will actually install.
+                    Builds    = @($script:WinReVersions | ForEach-Object {
+                        if ($_.After -ne $_.Before) { "$($_.Label) $($_.Before) -> $($_.After)" } else { "$($_.Label) $($_.After)" }
+                    })
+                }
             }
             Drivers     = if ($ResolvedDriverPath) {
                 [ordered]@{
@@ -5380,6 +5737,8 @@ Invoke-Task -Description 'Reading the final image details...' -ScriptBlock {
     $FallbackBuild = if ($FeatureName) { "$ImageVersionText ($FeatureName)" } else { $ImageVersionText }
     Show-FinalImageInfo -WimPath $FinalInstallImage -FallbackBuildString $FallbackBuild
 }
+Show-WinReVersions
+Show-WimSizeComparison
 
 #endregion
 
@@ -5441,6 +5800,9 @@ if (-not $NoStamp) {
                 FeatureUpdate = $FeatureName
                 Architecture  = $ImageArch
                 CatalogArch   = $CatalogArch
+                # The next run reads this back before extracting anything, since the catalog product name
+                # differs between Server and client and there is no image to ask yet at that point.
+                Server        = [bool]$script:EffectiveServer
                 FinalBuild    = $script:FinalBuildString
             }
             Updates         = [ordered]@{

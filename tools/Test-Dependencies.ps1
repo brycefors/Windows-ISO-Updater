@@ -7,8 +7,10 @@
     The main script pins a handful of external things it cannot control: a symbol-server URL and SHA-256
     for oscdimg.exe, a GitHub URL for the Fido helper plus a set of content checks it has to pass,
     Microsoft fwlinks for the Media Creation Tool and the ADK, and the HTML layout of the Microsoft Update
-    Catalog and the KB support pages, neither of which has a public API. Any of those can change without
-    warning, and the failure usually only shows up an hour into a build.
+    Catalog and the KB support pages, neither of which has a public API. The wording Microsoft gives an
+    update title counts too, because that is all the script has to tell a cumulative update apart from a
+    preview, a .NET update or a Dynamic Update. Any of those can change without warning, and the failure
+    usually only shows up an hour into a build, or in the Dynamic Update case never shows up at all.
 
     This tester exercises all of them and says, in plain terms, what in the script has to change.
 
@@ -184,6 +186,24 @@ function Get-ScriptFunctionText {
         }, $true)
     if (-not $Found -or $Found.Count -eq 0) { return $null }
     return $Found[0].Extent.Text
+}
+
+# Pulls a string literal assigned to $Name out of the script, e.g. the catalog title filters. Returns the
+# DISTINCT values, because the download step and the rebuild check each keep their own copy of those
+# filters and a build is only reproducible while the two agree.
+function Get-ScriptAssignedLiterals {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Match
+    )
+
+    $Found = $Ast.FindAll({
+            param($Node)
+            $Node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $Node.Left.Extent.Text -eq "`$$Name" -and
+            $Node.Right.Extent.Text -match $Match
+        }, $true)
+    return @($Found | ForEach-Object { $_.Right.Extent.Text.Trim("'") } | Select-Object -Unique)
 }
 
 $Borrowed = @(
@@ -488,6 +508,53 @@ try {
             }
         }
 
+        # --- Update title wording, which is what actually picks the package out of the results ---
+
+        Write-Section 'Catalog title wording (update selection)'
+
+        # A single match unrolls to a bare string on the way out of the function, and indexing a string
+        # hands back a character, so both of these have to be re-wrapped here.
+        $IncludePatterns = @(Get-ScriptAssignedLiterals -Name 'Include' -Match 'cumulative update')
+        $ExcludePatterns = @(Get-ScriptAssignedLiterals -Name 'Exclude' -Match 'dynamic update')
+        if ($IncludePatterns.Count -eq 0 -or $ExcludePatterns.Count -eq 0) {
+            Add-Result -Area 'Titles' -Status 'Fail' -Message 'Could not find the cumulative update title filters in the script.' -Action 'The $Include/$Exclude literals were renamed or moved. Update Get-ScriptAssignedLiterals in this tester to match, otherwise nothing is checking that the script can still recognise an LCU.'
+        }
+        elseif ($IncludePatterns.Count -gt 1 -or $ExcludePatterns.Count -gt 1) {
+            Add-Result -Area 'Titles' -Status 'Fail' -Message 'The download step and the rebuild check use different title filters.' -Action 'Get-ExpectedUpdateSet and the download step each define $Include/$Exclude and they have drifted apart. The stamp will report an update the build would never pick, so every scheduled run rebuilds. Make the two literals identical.'
+            $IncludePatterns + $ExcludePatterns | ForEach-Object { Write-Detail $_ }
+        }
+        else {
+            $Include = $IncludePatterns[0]
+            $Exclude = $ExcludePatterns[0]
+            Write-Detail "include: $Include"
+            Write-Detail "exclude: $Exclude"
+
+            $Wanted  = @($CatalogResults | Where-Object { $_.Title -match $Include -and $_.Title -notmatch $Exclude })
+            $Stable  = @($Wanted | Where-Object { $_.Title -notmatch '(?i)preview' })
+            $Preview = @($Wanted | Where-Object { $_.Title -match '(?i)preview' })
+
+            if ($Stable.Count -eq 0) {
+                Add-Result -Area 'Titles' -Status 'Fail' -Message 'No result matched the script''s cumulative update title filter.' -Action "Microsoft reworded the LCU title, so the script finds the update in the catalog and then discards it, reporting that nothing matched. Compare a real title against the pattern and update both copies of `$Include. Sample title: $($CatalogResults[0].Title)"
+            }
+            else {
+                Add-Result -Area 'Titles' -Status 'Pass' -Message "$($Stable.Count) result(s) still match the cumulative update title filter."
+            }
+
+            # -IncludePreview relies on the same filter admitting the word "Preview", and only the separate
+            # preview check deciding whether to keep it. Detected here without the script's own pattern, or
+            # a broken pattern would hide the very thing this is testing.
+            $LoosePreview = @($CatalogResults | Where-Object { $_.Title -match '(?i)preview' -and $_.Title -notmatch $Exclude })
+            if ($LoosePreview.Count -eq 0) {
+                Add-Result -Area 'Titles' -Status 'Warn' -Message 'This query returned no preview update, so -IncludePreview could not be exercised.' -Action 'Expected early in the month, since Microsoft publishes the preview in the last week. Re-run later, or pass a -CatalogQuery for a month that has one.'
+            }
+            elseif ($Preview.Count -eq 0) {
+                Add-Result -Area 'Titles' -Status 'Fail' -Message '-IncludePreview cannot select anything: the preview entries in these results do not match the title filter.' -Action "Microsoft reworded the preview title, so `$Include no longer admits it and -IncludePreview silently does nothing. Sample title: $($LoosePreview[0].Title)"
+            }
+            else {
+                Add-Result -Area 'Titles' -Status 'Pass' -Message "$($Preview.Count) preview result(s) match the filter, so -IncludePreview has something to select."
+            }
+        }
+
         # --- KB support page title, the bridge between a KB number and an OS build ---
 
         Write-Section 'KB support page (already-patched check)'
@@ -506,6 +573,60 @@ try {
         }
         else {
             Add-Result -Area 'KB page' -Status 'Warn' -Message 'The newest catalog result carries no KB number in its title, so the support page could not be checked.' -Action 'The script pulls the KB out of the catalog title the same way. If titles really stopped carrying "KBnnnnnnn", the already-patched check stops working.'
+        }
+    }
+
+    # --- Dynamic Update titles, the one catalog contract that breaks silently ---
+
+    Write-Section 'Dynamic Update titles (Setup and Safe OS)'
+
+    # Queried per feature update, so follow whatever -CatalogQuery names rather than pinning a release.
+    $DuProduct = if ($CatalogQuery -match '(?i)(windows\s+\d+\s+version\s+\d\dh\d)') { $Matches[1] } else { 'Windows 11' }
+    $DuArch = if ($CatalogQuery -match '(?i)\b(x64|arm64|x86)\b') { $Matches[1] } else { 'x64' }
+    Write-Detail "product: $DuProduct, architecture: $DuArch"
+
+    $ScriptText = Get-Content -LiteralPath $ScriptPath -Raw
+    $DuChecks = @(
+        [PSCustomObject]@{
+            Name    = 'Setup Dynamic Update'
+            Query   = "Setup Dynamic Update $DuProduct $DuArch"
+            Include = '(?i)setup dynamic update'
+            Exclude = $null
+            Cost    = 'the loose Setup files on the media are only refreshed from boot.wim, which can make Windows Setup fail on the finished ISO'
+        },
+        [PSCustomObject]@{
+            Name    = 'Safe OS Dynamic Update'
+            Query   = "Safe OS Dynamic Update $DuProduct $DuArch"
+            Include = '(?i)safe os dynamic update'
+            Exclude = '(?i)setup dynamic update'
+            Cost    = 'winre.wim is never serviced, so deployed machines keep the recovery environment the media shipped'
+        }
+    )
+
+    foreach ($Du in $DuChecks) {
+        # These filters sit inside splat hashtables rather than a named variable, so confirm the tester's
+        # copy is still the script's before trusting what a live query says about it.
+        $Patterns = @(@($Du.Include, $Du.Exclude) | Where-Object { $_ })
+        $Drifted = @($Patterns | Where-Object { $ScriptText -notmatch [regex]::Escape("'$_'") })
+        if ($Drifted.Count -gt 0) {
+            Add-Result -Area 'Dynamic DU' -Status 'Fail' -Message "$($Du.Name): the script no longer uses the title filter this tester checks." -Action "The TitleInclude/TitleExclude in the script changed, so this check is validating a filter nothing uses. Update `$DuChecks in this tester to match. Missing: $($Drifted -join ', ')"
+            continue
+        }
+
+        $DuResults = @(Search-UpdateCatalog -Query $Du.Query)
+        if ($DuResults.Count -eq 0) {
+            Add-Result -Area 'Dynamic DU' -Status 'Warn' -Message "$($Du.Name): the query returned no results at all, so the title could not be checked." -Action "Either the catalog is unreachable, or Microsoft has published none for $DuProduct. Not conclusive on its own, so re-run before acting on it."
+            continue
+        }
+
+        $DuMatched = @($DuResults | Where-Object { $_.Title -match $Du.Include })
+        if ($Du.Exclude) { $DuMatched = @($DuMatched | Where-Object { $_.Title -notmatch $Du.Exclude }) }
+        if ($DuMatched.Count -eq 0) {
+            Add-Result -Area 'Dynamic DU' -Status 'Fail' -Message "$($Du.Name): $($DuResults.Count) result(s) came back and none matched the title filter." -Action "Microsoft reworded the title, so $($Du.Cost). A run never reports this as a problem, because media that genuinely has no Dynamic Update is a normal condition. Sample title: $($DuResults[0].Title)"
+        }
+        else {
+            Write-Detail (($DuMatched | Sort-Object LastUpdated -Descending | Select-Object -First 1).Title)
+            Add-Result -Area 'Dynamic DU' -Status 'Pass' -Message "$($Du.Name): $($DuMatched.Count) result(s) still match the title filter."
         }
     }
 
