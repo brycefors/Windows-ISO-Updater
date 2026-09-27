@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.26.6   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.26.7   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -284,7 +284,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.26.6'
+$ScriptVersion = '2026.09.26.7'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1571,8 +1571,16 @@ function Get-Sha256 {
     $Stream = $null
     try {
         $Length = (Get-Item -LiteralPath $Path -ErrorAction Stop).Length
-        # SHA256Cng is the hardware-accelerated provider, the base factory hands back the managed one.
-        $Algorithm = try { New-Object System.Security.Cryptography.SHA256Cng } catch { [System.Security.Cryptography.SHA256]::Create() }
+        # On .NET Framework the base factory hands back the managed implementation, so ask for the
+        # hardware-accelerated one by name. It does not exist on .NET, where the factory is already
+        # accelerated. Resolved with -as rather than try/catch, because the failed New-Object is a
+        # terminating error and PowerShell 7 records it in the transcript even though it is caught.
+        $Algorithm = if ('System.Security.Cryptography.SHA256Cng' -as [type]) {
+            New-Object System.Security.Cryptography.SHA256Cng
+        }
+        else {
+            [System.Security.Cryptography.SHA256]::Create()
+        }
         $Stream = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
             [System.IO.FileShare]::Read, $BufferSize, [System.IO.FileOptions]::SequentialScan)
         $Buffer = New-Object byte[] $BufferSize
