@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.25.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.26.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11 (or Windows 10, or with -Server a
@@ -30,7 +30,9 @@
 #      dropped and only the kept ones are serviced - on client media Enterprise, Pro and Home, whichever
 #      of them the media carries, or on Server media the most upgradeable one, Standard over Datacenter -
 #      so use -KeepAllEditions or -KeepEditions to change this), boot.wim (Windows Setup / WinPE), and
-#      optionally winre.wim (recovery). -DriverPath also injects a folder of .inf driver packages into
+#      winre.wim (recovery), which gets the Safe OS Dynamic Update rather than the cumulative update and
+#      is then re-exported so it stays small enough for the recovery partition (disable with -SkipWinRE).
+#      -DriverPath also injects a folder of .inf driver packages into
 #      every serviced edition and into boot.wim index 2, so Setup itself can see the hardware.
 #   5. Refreshes the loose Setup files on the media: first applies the Setup Dynamic Update to the
 #      sources folder (on by default, disable with -SkipSetupDU), then overwrites sources\setup.exe,
@@ -111,7 +113,10 @@ param(
     [Parameter(HelpMessage = 'Skip the Setup Dynamic Update that refreshes the loose Windows Setup files on the media. It is included by default, and without it the Windows 11 24H2+ Setup engine can fail with "Windows 11 installation has failed"')]
     [switch]$SkipSetupDU,
 
-    [Parameter(HelpMessage = 'Also service the recovery image (winre.wim). Off by default. The correct component for WinRE is the Safe OS Dynamic Update, which is fetched when available')]
+    [Parameter(HelpMessage = 'Skip servicing the recovery image (winre.wim). It is serviced by default with the Safe OS Dynamic Update, then cleaned and re-exported so it does not grow. Without it a deployed machine keeps whatever recovery environment the source media shipped, which Windows only replaces on some rollup updates')]
+    [switch]$SkipWinRE,
+
+    [Parameter(HelpMessage = 'Deprecated and ignored. Recovery image servicing is on by default now, so use -SkipWinRE to turn it off. Accepted so existing scheduled tasks and wrapper scripts that still pass it keep running')]
     [switch]$ServiceWinRE,
 
     [Parameter(HelpMessage = 'Skip the cumulative update in hotpatch non-baseline months (February, March, May, June, August, September, November, December). Use only for Windows 11 Enterprise 25H2 media enrolled in Intune or Azure Arc hotpatch. In baseline months (January, April, July, October) the cumulative update is integrated normally.')]
@@ -279,7 +284,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.25.1'
+$ScriptVersion = '2026.09.26.1'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1651,7 +1656,7 @@ function Get-UpdateFileRecords {
 # deliberately left out: moving the working folder does not make last month's ISO wrong.
 $script:BuildAffectingParameters = @(
     'WindowsVersion', 'Server', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
-    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'ServiceWinRE', 'BaselineOnly', 'SkipUpdates', 'SkipServicing', 'CompressEsd', 'FastCompression', 'VolumeLabel',
+    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'SkipWinRE', 'BaselineOnly', 'SkipUpdates', 'SkipServicing', 'CompressEsd', 'FastCompression', 'VolumeLabel',
     'SkipTattoo', 'StripImageResidue', 'DriverPath', 'AllowUnsignedDrivers', 'ExtraFilesPath'
 )
 
@@ -1934,7 +1939,7 @@ function Get-ExpectedUpdateSet {
         $SetupDu = Get-CatalogLatestEntry @SetupDuArgs
         $Set.Add("SetupDU=$(Get-CatalogEntryTag -Entry $SetupDu)")
     }
-    if ($ServiceWinRE) {
+    if (-not $SkipWinRE) {
         # Server media labels the Safe OS package plain "Dynamic Update", so the Setup one is excluded by
         # name instead of the Safe OS one being required by name.
         $SafeInclude = if ($script:EffectiveServer) { '(?i)dynamic update' } else { '(?i)safe os dynamic update' }
@@ -2148,7 +2153,8 @@ function Invoke-AutoClean {
 function Get-ScheduledTaskArgumentString {
     $Excluded = @(
         'RegisterScheduledTask', 'UnregisterScheduledTask', 'Schedule', 'ScheduleTime', 'ScheduleDay',
-        'TaskName', 'TaskUsername', 'TaskPassword', 'CheckOnly', 'Force', 'ListEditions', 'Unattended', 'SkipInteractive', 'Scheduled'
+        'TaskName', 'TaskUsername', 'TaskPassword', 'CheckOnly', 'Force', 'ListEditions', 'Unattended', 'SkipInteractive', 'Scheduled',
+        'ServiceWinRE'
     )
     # -Command keeps single-quoted string literals intact; -File strips quotes and misreads
     # hyphen-prefixed values (e.g. '-unattended') as switch names.
@@ -3351,6 +3357,74 @@ function Remove-ImageResidue {
         if (-not $script:TattooResidueFound.Contains($Item)) { $script:TattooResidueFound.Add($Item) }
     }
 }
+
+# Committing a serviced winre.wim APPENDS the Safe OS delta instead of rebasing it, so the recovery image
+# grows by far more than the update is worth and can outgrow the recovery partition Setup sizes at install
+# time. Re-exporting rebuilds it from a single index, which is the only thing that reclaims that space.
+function Optimize-WinReImage {
+    param(
+        [Parameter(Mandatory)][string]$WinReWim,
+        [string]$ImageLabel = 'winre.wim'
+    )
+    if (-not (Test-RoomForExport -SourceImage $WinReWim -Label 'winre.wim')) { return }
+    # Staged outside the mounted install.wim so a failed export can never be committed into the edition.
+    $Temp = Join-Path -Path $WorkRoot -ChildPath 'winre_new.wim'
+    try {
+        if (Test-Path -LiteralPath $Temp) { Remove-Item -LiteralPath $Temp -Force -ErrorAction SilentlyContinue }
+        $BeforeMB = (Get-Item -LiteralPath $WinReWim).Length / 1MB
+        Write-HostTimestamp '      Re-exporting the recovery image to shrink it...'
+        # Always Max, never -FastCompression: this image has to fit a fixed recovery partition, and at a few
+        # hundred MB the compression time is irrelevant next to install.wim.
+        Export-WindowsImage -SourceImagePath $WinReWim -SourceIndex 1 -DestinationImagePath $Temp -CompressionType Max -ErrorAction Stop | Out-Null
+        Set-ItemProperty -LiteralPath $WinReWim -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
+        # Copied rather than moved, because the destination lives inside a DISM projection of install.wim.
+        Copy-Item -LiteralPath $Temp -Destination $WinReWim -Force -ErrorAction Stop
+        $AfterMB = (Get-Item -LiteralPath $WinReWim).Length / 1MB
+        Write-HostTimestamp ('      winre.wim: {0:N0} MB -> {1:N0} MB (saved {2:N0} MB).' -f $BeforeMB, $AfterMB, ($BeforeMB - $AfterMB)) -ForegroundColor Green
+        Add-ServicingResult -Image $ImageLabel -Package 'Re-export' -Result 'Applied' -Detail ('{0:N0} MB -> {1:N0} MB' -f $BeforeMB, $AfterMB)
+    }
+    catch {
+        Write-HostTimestamp "      The winre.wim re-export failed: $($_.Exception.Message). The serviced recovery image is used as it is." -ForegroundColor Yellow
+        Add-ServicingResult -Image $ImageLabel -Package 'Re-export' -Result 'Failed' -Detail $_.Exception.Message
+    }
+    finally {
+        Remove-Item -LiteralPath $Temp -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Answers "is servicing this recovery image going to change anything" WITHOUT mounting it, which is the
+# whole point: the mount, the /ResetBase and the re-export are the expensive part, not the update itself.
+# Returns $true only when it can positively prove the image is already there, because wrongly skipping
+# would silently ship a stale recovery environment.
+function Test-WinReAlreadyCurrent {
+    param(
+        [Parameter(Mandatory)][string]$WinReWim,
+        [string]$KbNumber
+    )
+    if (-not $KbNumber) { return $false }
+    # Cached because this runs once per serviced edition and the answer cannot change mid-build. An empty
+    # table is the "asked and the page did not say" marker, so the lookup is not retried.
+    if ($null -eq $script:SafeOsTargets) {
+        $script:SafeOsTargets = Get-KbTargetBuilds -KbNumber $KbNumber
+        if (-not $script:SafeOsTargets) { $script:SafeOsTargets = @{} }
+    }
+    if ($script:SafeOsTargets.Count -eq 0) { return $false }
+
+    $Info = try { Get-WindowsImage -ImagePath $WinReWim -Index 1 -ErrorAction Stop } catch { $null }
+    if (-not $Info) { return $false }
+    $Build = [int]$Info.Build
+    $Ubr   = [int]$Info.SPBuild
+    if ($Build -le 0 -and "$($Info.Version)" -match '^\d+\.\d+\.(\d+)\.(\d+)$') {
+        $Build = [int]$Matches[1]
+        $Ubr   = [int]$Matches[2]
+    }
+    if ($Build -le 0 -or $Ubr -le 0 -or -not $script:SafeOsTargets.ContainsKey($Build)) { return $false }
+
+    $TargetUbr = [int]$script:SafeOsTargets[$Build]
+    if ($TargetUbr -le 0 -or $Ubr -lt $TargetUbr) { return $false }
+    Write-HostTimestamp "    The recovery image is already at $Build.$Ubr and KB$KbNumber delivers $Build.$TargetUbr, so it is left as it is." -ForegroundColor Green
+    return $true
+}
 #endregion
 
 #region Image inspection and final report
@@ -3608,6 +3682,9 @@ $script:CurrentCulture   = [System.Globalization.CultureInfo]::CurrentCulture
 $script:CurrentUICulture = [System.Globalization.CultureInfo]::CurrentUICulture
 $script:SystemLocale     = try { (Get-WinSystemLocale -ErrorAction Stop).Name } catch { 'unknown' }
 Write-HostTimestamp "Locale         : Thread culture $($script:CurrentCulture.Name), UI culture $($script:CurrentUICulture.Name), system locale $script:SystemLocale"
+if ($ServiceWinRE) {
+    Write-HostTimestamp '-ServiceWinRE is deprecated and does nothing. The recovery image is serviced by default now, so pass -SkipWinRE to turn it off.' -ForegroundColor Yellow
+}
 Write-Host $LineBreak
 
 #endregion
@@ -4017,7 +4094,7 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
             Write-Host "      (the cumulative update is skipped entirely if the image already has that build)" -ForegroundColor DarkGray
             if (-not $SkipSetupDU) { Write-Host "  - Download the latest Setup Dynamic Update and apply it to the media's sources folder" }
         }
-        Write-Host "  - Integrate the update(s) into install.wim ($Edition), boot.wim$(if ($ServiceWinRE) { ', and winre.wim' })"
+        Write-Host "  - Integrate the update(s) into install.wim ($Edition), boot.wim$(if (-not $SkipWinRE) { ', and winre.wim' })"
         Write-Host "  - Clean up and re-export the images to shrink them"
     }
     else {
@@ -4573,6 +4650,9 @@ if (-not $NoStamp -and $script:ExpectedUpdateFor -ne "$FeatureName|$CatalogArch"
 $UpdateGroups = New-Object System.Collections.Generic.List[object]
 $SafeOsGroup = $null
 $script:SetupDu = $null
+# The Safe OS KB and the builds it delivers, shared so the per-edition WinRE check asks the support page once.
+$script:SafeOsKb = $null
+$script:SafeOsTargets = $null
 
 if ($SkipUpdates -or $SkipServicing) {
     Write-HostTimestamp 'Skipping update integration (-SkipUpdates was specified).' -ForegroundColor Yellow
@@ -4679,14 +4759,20 @@ else {
         Write-Host $LineBreak
     }
 
-    if ($ServiceWinRE) {
+    if (-not $SkipWinRE) {
         Invoke-Task -Description 'Looking for a Safe OS Dynamic Update for the recovery image (WinRE)...' -ScriptBlock {
             # Server media labels the Safe OS package plain "Dynamic Update", so the Setup one is excluded
             # by name instead of the Safe OS one being required by name.
             $SafeInclude = if ($script:EffectiveServer) { '(?i)dynamic update' } else { '(?i)safe os dynamic update' }
             $script:SafeOs = Get-LatestCatalogPackage -Query "Safe OS Dynamic Update $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) $CatalogArch" -DownloadDir $DlDir -TitleInclude $SafeInclude -TitleExclude '(?i)setup dynamic update'
         }
-        if ($script:SafeOs) { $SafeOsGroup = @($script:SafeOs) }
+        if ($script:SafeOs) {
+            $SafeOsGroup = @($script:SafeOs)
+            # Read off the package name so the per-edition check can ask the support page what build it delivers.
+            foreach ($File in $SafeOsGroup) {
+                if ((Split-Path -Leaf "$File") -match '(?i)kb(\d{6,})') { $script:SafeOsKb = $Matches[1]; break }
+            }
+        }
         else { Write-HostTimestamp '  No Safe OS Dynamic Update was found, so WinRE update integration will be skipped (per Microsoft, the LCU does not apply to WinRE).' -ForegroundColor Yellow }
         Write-Host $LineBreak
     }
@@ -4808,28 +4894,36 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
                 Write-HostTimestamp '    Mounting the image...'
                 Mount-WindowsImage -ImagePath $InstallWimExtracted -Index $Index -Path $MountDir -ErrorAction Stop | Out-Null
 
-                # Optionally service the recovery image (winre.wim) that lives inside this edition.
-                if ($ServiceWinRE) {
+                # Per Microsoft, the recovery image inside this edition is patched with the Safe OS Dynamic
+                # Update and never with the LCU, so with no Safe OS package there is nothing to mount for.
+                if (-not $SkipWinRE -and $SafeOsGroup) {
                     $WinReWim = Join-Path $MountDir 'Windows\System32\Recovery\winre.wim'
-                    if (Test-Path -LiteralPath $WinReWim) {
+                    $WinReLabel = "winre.wim (inside index $Index, $EditionName)"
+                    if (-not (Test-Path -LiteralPath $WinReWim)) {
+                        Write-HostTimestamp '    This edition carries no winre.wim, so there is no recovery image to service.' -ForegroundColor DarkGray
+                    }
+                    elseif (Test-WinReAlreadyCurrent -WinReWim $WinReWim -KbNumber $script:SafeOsKb) {
+                        Add-ServicingResult -Image $WinReLabel -Package "KB$($script:SafeOsKb)" -Result 'Skipped' -Detail 'Already at the build this Safe OS Dynamic Update delivers'
+                    }
+                    else {
                         $WinReMount = Join-Path $WorkRoot 'WinREMount'
                         Reset-MountDirectory -Path $WinReMount -ImagePath $WinReWim
                         try {
                             Set-ItemProperty -LiteralPath $WinReWim -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
                             Write-HostTimestamp '    Servicing the recovery image (winre.wim)...'
                             Mount-WindowsImage -ImagePath $WinReWim -Index 1 -Path $WinReMount -ErrorAction Stop | Out-Null
-                            # Per Microsoft, WinRE is serviced with the Safe OS Dynamic Update - NOT the LCU.
-                            if ($SafeOsGroup) {
-                                Add-UpdateGroup -MountDir $WinReMount -Group $SafeOsGroup -Label 'Safe OS Dynamic Update' -ImageLabel "winre.wim (inside index $Index, $EditionName)" | Out-Null
-                            }
-                            else {
-                                Write-HostTimestamp '      No Safe OS Dynamic Update available, so WinRE update integration is skipped.' -ForegroundColor DarkGray
-                            }
+                            Add-UpdateGroup -MountDir $WinReMount -Group $SafeOsGroup -Label 'Safe OS Dynamic Update' -ImageLabel $WinReLabel | Out-Null
+                            Write-HostTimestamp '      Cleaning up the recovery image component store (/StartComponentCleanup /ResetBase)...'
+                            & dism.exe /Image:"$WinReMount" /Cleanup-Image /StartComponentCleanup /ResetBase | Out-Null
                             Remove-ImageResidue -MountDir $WinReMount
                             Dismount-WindowsImage -Path $WinReMount -Save -ErrorAction Stop | Out-Null
+                            Optimize-WinReImage -WinReWim $WinReWim -ImageLabel $WinReLabel
                         }
                         catch {
-                            Write-HostTimestamp "      WinRE servicing failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                            # Deliberately not fatal. A recovery image that will not service must never cost
+                            # the user the ISO, so the edition keeps the winre.wim it shipped with.
+                            Write-HostTimestamp "      WinRE servicing failed: $($_.Exception.Message). This edition keeps the recovery image it shipped with." -ForegroundColor Yellow
+                            Add-ServicingResult -Image $WinReLabel -Package 'Safe OS Dynamic Update' -Result 'Failed' -Detail $_.Exception.Message
                             Dismount-ImageDiscard -Path $WinReMount | Out-Null
                         }
                     }
@@ -5245,7 +5339,7 @@ if (-not $SkipTattoo) {
                 EditionsRemoved    = $RemovedNames
                 EditionsNotUpdated = $UnpatchedNames
                 AnswerFile         = if ($ResolvedUnattend) { "autounattend.xml (from $(Split-Path -Leaf $ResolvedUnattend), SHA-256 $(Format-ShortHash $script:UnattendHash))" } else { '' }
-                RecoveryImage      = if ($ServiceWinRE) { 'winre.wim serviced with the Safe OS Dynamic Update' } else { 'winre.wim left as it shipped (-ServiceWinRE was not used)' }
+                RecoveryImage      = if (-not $SkipWinRE) { 'winre.wim serviced with the Safe OS Dynamic Update, then cleaned and re-exported' } else { 'winre.wim left as it shipped (-SkipWinRE was used)' }
             }
             Drivers     = if ($ResolvedDriverPath) {
                 [ordered]@{
