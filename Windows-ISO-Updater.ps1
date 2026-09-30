@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.26.9   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.29.4   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -125,6 +125,12 @@ param(
 
     [Parameter(HelpMessage = 'Allow the optional preview updates Microsoft publishes late in the month (titled "... Preview of Monthly Quality Rollup" or "Cumulative Update Preview") to be selected. They are excluded by default because they are next month''s fixes released early for testing, so they carry a higher build than anything Windows Update will offer the finished media. Useful for validating a coming update, not for production media')]
     [switch]$IncludePreview,
+
+    [Parameter(HelpMessage = 'Mount the image read-only and read its real patch level from the registry before deciding whether the cumulative update is needed. By default the build recorded in the WIM header is trusted, which is instant but is wrong on some media (UUP-built and Media Creation Tool images can report an old revision while being fully patched, or the reverse). Costs a few minutes')]
+    [switch]$VerifyPatchLevel,
+
+    [Parameter(HelpMessage = 'Integrate every update even when the image already carries the latest cumulative update. By default media that is already current is left exactly as Microsoft shipped it, with no .NET update, Dynamic Update or boot.wim servicing. The build stamp still applies, so this rebuilds once and then only when something changes. WARNING: enabling this may leave the Setup binaries on the media mismatched with the ones inside boot.wim, which can stop Windows 11 Setup Dynamic Update from completing when imaging a computer with Windows 11')]
+    [switch]$ReapplyUpdates,
 
     [Parameter(HelpMessage = 'Skip integrating updates entirely and simply extract and recompile the ISO (useful for testing the build pipeline)')]
     [switch]$SkipUpdates,
@@ -288,7 +294,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.26.9'
+$ScriptVersion = '2026.09.29.4'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -421,7 +427,8 @@ try {
     $LogDir = $LogDirWanted
 }
 catch {
-    Write-Warning "Could not use the log folder '$LogDirWanted': $($_.Exception.Message). Falling back to the script folder."
+    $script:LogDirProblem = "Could not use the log folder '$LogDirWanted': $($_.Exception.Message). Falling back to the script folder."
+    Write-Warning $script:LogDirProblem
 }
 $LogStamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 # The .log is the one to open, written in the format CMTrace parses. The transcript beside it keeps the raw
@@ -457,6 +464,8 @@ $script:StepTimings = [System.Collections.Generic.List[psobject]]::new()
 $script:FinalBuildString = $null
 # Same idea as FinalBuildString, but the shipped display language, read from the offline SYSTEM hive.
 $script:FinalImageLocale = $null
+# The source media's installation language, the fallback whenever no image was mounted to read the hive.
+$script:MediaLanguage = $null
 # Filled in as servicing happens, because by the time the tattoo is written the images are already
 # dismounted and DISM's own log is the only other record of which package landed on which image.
 $script:TattooServicing   = New-Object System.Collections.Generic.List[object]
@@ -565,13 +574,30 @@ function Write-HostTimestamp {
     # Get the current timestamp and combine it with the user's message.
     # The output is then sent to the console using Write-Host with the specified color.
     Write-Host "$(Get-TimeStamp) $Message" -ForegroundColor $ForegroundColor
-    # Red and Yellow already mean fatal and warning throughout this script, so CMTrace's severity comes free.
-    $LogType = switch ("$ForegroundColor") {
-        'Red' { 3 }
-        'Yellow' { 2 }
-        default { 1 }
+    Write-CMTraceLog -Message $Message -Type (Get-LogSeverity -Color "$ForegroundColor") -Line $MyInvocation.ScriptLineNumber
+}
+
+# Red and Yellow already mean fatal and warning throughout this script, so CMTrace's severity comes free.
+function Get-LogSeverity {
+    param([string]$Color)
+    switch -Regex ($Color) {
+        '^(Dark)?Red$'    { return 3 }
+        '^(Dark)?Yellow$' { return 2 }
+        default           { return 1 }
     }
-    Write-CMTraceLog -Message $Message -Type $LogType -Line $MyInvocation.ScriptLineNumber
+}
+
+# For tables and lists, where a timestamp on every row would break the columns but the .log still needs the rows.
+function Write-HostLog {
+    param (
+        [string]$Message,
+        [consolecolor]$ForegroundColor = $(try { ((Get-Host).ui.rawui.ForegroundColor) } catch { 'White' })
+    )
+
+    Write-Host $Message -ForegroundColor $ForegroundColor
+    if ("$Message".Trim()) {
+        Write-CMTraceLog -Message $Message -Type (Get-LogSeverity -Color "$ForegroundColor") -Line $MyInvocation.ScriptLineNumber
+    }
 }
 
 function Invoke-Task {
@@ -587,6 +613,11 @@ function Invoke-Task {
     $StepStart = Get-Date
     try {
         & $ScriptBlock
+    }
+    catch {
+        # PowerShell prints an uncaught error to the console only, so without this the .log just stops.
+        Write-CMTraceLog -Message "$Description failed: $($_.Exception.Message)" -Type 3 -Line $_.InvocationInfo.ScriptLineNumber
+        throw
     }
     finally {
         # Recorded in a finally block so a step that throws still contributes to the timing summary.
@@ -1109,29 +1140,29 @@ function Get-IsoViaMct {
 
     Write-Host ''
     if ($MctPreselect) {
-        Write-Host 'The Media Creation Tool is about to open with your choices pre-selected:' -ForegroundColor Cyan
-        Write-Host "  Windows $Version, $MctArch, $LangCode, $(if ($MctEdition) { $MctEdition } else { 'all editions' })"
+        Write-HostLog 'The Media Creation Tool is about to open with your choices pre-selected:' -ForegroundColor Cyan
+        Write-HostLog "  Windows $Version, $MctArch, $LangCode, $(if ($MctEdition) { $MctEdition } else { 'all editions' })"
         Write-Host ''
-        Write-Host 'If it asks for a product key, enter one of Microsoft''s published generic edition-selection' -ForegroundColor Yellow
-        Write-Host 'keys (Pro is VK7JG-NPHTM-C97JM-9MPGT-3V66T), or re-run without -MctPreselect to get the' -ForegroundColor Yellow
-        Write-Host 'ordinary wizard, which never asks for one.' -ForegroundColor Yellow
+        Write-HostLog 'If it asks for a product key, enter one of Microsoft''s published generic edition-selection' -ForegroundColor Yellow
+        Write-HostLog 'keys (Pro is VK7JG-NPHTM-C97JM-9MPGT-3V66T), or re-run without -MctPreselect to get the' -ForegroundColor Yellow
+        Write-HostLog 'ordinary wizard, which never asks for one.' -ForegroundColor Yellow
         Write-Host ''
     }
     else {
-        Write-Host 'The Media Creation Tool is about to open. Asked for these in its window:' -ForegroundColor Cyan
-        Write-Host "  Windows $Version, $MctArch, $LangCode, all editions"
+        Write-HostLog 'The Media Creation Tool is about to open. Asked for these in its window:' -ForegroundColor Cyan
+        Write-HostLog "  Windows $Version, $MctArch, $LangCode, all editions"
         Write-Host ''
     }
-    Write-Host 'It cannot be automated any further - Microsoft provides no switch to pick ISO output or a' -ForegroundColor Yellow
-    Write-Host 'save location - so in its window please:' -ForegroundColor Yellow
-    Write-Host '  1. Accept the licence terms if prompted.'
-    Write-Host '  2. Choose "Create installation media (USB flash drive, DVD, or ISO file) for another PC".'
-    Write-Host "  3. Set the language and architecture ($LangCode, $MctArch), or leave the recommended options ticked."
-    Write-Host '  4. Choose "ISO file".'
-    Write-Host "  5. Save it into this folder: $DownloadDir" -ForegroundColor Green
-    Write-Host '  6. Let the download finish, then click Finish.'
+    Write-HostLog 'It cannot be automated any further - Microsoft provides no switch to pick ISO output or a' -ForegroundColor Yellow
+    Write-HostLog 'save location - so in its window please:' -ForegroundColor Yellow
+    Write-HostLog '  1. Accept the licence terms if prompted.'
+    Write-HostLog '  2. Choose "Create installation media (USB flash drive, DVD, or ISO file) for another PC".'
+    Write-HostLog "  3. Set the language and architecture ($LangCode, $MctArch), or leave the recommended options ticked."
+    Write-HostLog '  4. Choose "ISO file".'
+    Write-HostLog "  5. Save it into this folder: $DownloadDir" -ForegroundColor Green
+    Write-HostLog '  6. Let the download finish, then click Finish.'
     Write-Host ''
-    Write-Host 'This script waits until the Media Creation Tool closes, then continues on its own.' -ForegroundColor Cyan
+    Write-HostLog 'This script waits until the Media Creation Tool closes, then continues on its own.' -ForegroundColor Cyan
     Write-Host ''
     if ($Unattended -or $SkipInteractive) {
         Write-HostTimestamp '  Note: the Media Creation Tool has no unattended ISO mode, so this step needs someone at the keyboard.' -ForegroundColor Yellow
@@ -1191,10 +1222,41 @@ function Find-SourceIso {
 #endregion
 
 #region Identifying the media
+# The media's installation language. DISM's image object has no DefaultLanguage property (it exposes a
+# Languages list plus DefaultLanguageIndex, and that list is often empty on Microsoft media), so
+# sources\lang.ini, which Setup itself reads, is the fallback. Returns a culture name or $null.
+function Get-MediaLanguage {
+    param(
+        $ImageInfo,
+        [string]$MediaRoot
+    )
+
+    if ($ImageInfo -and $ImageInfo.Languages -and $ImageInfo.Languages.Count -gt 0) {
+        $Index = [int]$ImageInfo.DefaultLanguageIndex
+        if ($Index -lt 0 -or $Index -ge $ImageInfo.Languages.Count) { $Index = 0 }
+        $Lang = "$($ImageInfo.Languages[$Index])".Trim()
+        if ($Lang) { return $Lang }
+    }
+
+    if ($MediaRoot) {
+        $LangIni = Join-Path -Path $MediaRoot -ChildPath 'sources\lang.ini'
+        if (Test-Path -LiteralPath $LangIni -PathType Leaf) {
+            $InSection = $false
+            foreach ($Line in (Get-Content -LiteralPath $LangIni -ErrorAction SilentlyContinue)) {
+                $Trimmed = $Line.Trim()
+                if ($Trimmed -match '^\[(.+)\]$') { $InSection = ($Matches[1] -eq 'Available UI Languages'); continue }
+                if ($InSection -and $Trimmed -match '^([A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})+)\s*=') { return $Matches[1] }
+            }
+        }
+    }
+    return $null
+}
+
 # Maps a Windows build number to its marketing feature-update name (used to build catalog search queries).
 function Get-FeatureUpdateName {
     param([Parameter(Mandatory)][int]$Build)
     switch ($Build) {
+        26300  { '26H2'; break }
         26200  { '25H2'; break }
         26100  { '24H2'; break }   # also Windows Server 2025
         25398  { '23H2'; break }   # Windows Server, version 23H2
@@ -1423,8 +1485,10 @@ function Get-LatestCatalogPackage {
         [string]$TitleExclude,   # regex the title must NOT match (e.g. ".net", "dynamic")
         [switch]$AllowPreview,
         [int]$CurrentBuild,      # OS build already in the image - set to enable the up-to-date check
-        [int]$CurrentUbr,        # UBR from the WIM header (only a hint - it is confirmed before use)
-        [string]$VerifyWimPath,  # WIM to mount read-only to confirm that UBR before anything is skipped
+        [int]$CurrentUbr,        # UBR from the WIM header, trusted unless -VerifyPatchLevel is set
+        [string]$VerifyWimPath,  # WIM to read the real UBR out of when the header is not trusted
+        [switch]$VerifyPatchLevel,
+        [switch]$Reapply,        # download and return the package even when the image already has it
         [ref]$AlreadyCurrent,    # receives the image's confirmed build when the update is not needed
         [switch]$BaselineOnly,
         [datetime]$NotAfter,     # optional upper bound - packages released after this date are excluded
@@ -1474,21 +1538,47 @@ function Get-LatestCatalogPackage {
 
     # If the image is already at (or past) the build this KB delivers, there is nothing to gain from
     # downloading and integrating it - that is the hour-long part of the run.
-    if ($CurrentBuild -gt 0 -and $CurrentUbr -gt 0 -and $PrimaryKb) {
-        $Targets = Get-KbTargetBuilds -KbNumber $PrimaryKb
+    if ($CurrentBuild -gt 0 -and $PrimaryKb) {
+        # Newer catalog titles carry the build, e.g. "(KB5129195) (26300.9457)", and are there on release day
+        # when the support page often is not yet.
+        $Targets = @{}
+        foreach ($M in [regex]::Matches("$($Selected.Title)", '\((\d{5})\.(\d{1,5})\)')) {
+            $Targets[[int]$M.Groups[1].Value] = [int]$M.Groups[2].Value
+        }
+        if (-not $Targets.ContainsKey($CurrentBuild)) { $Targets = Get-KbTargetBuilds -KbNumber $PrimaryKb }
         $TargetUbr = if ($Targets -and $Targets.ContainsKey($CurrentBuild)) { [int]$Targets[$CurrentBuild] } else { 0 }
-        if ($TargetUbr -gt 0 -and $CurrentUbr -ge $TargetUbr) {
-            # The WIM header's UBR is stale on some Microsoft media, and wrongly skipping the update would
-            # quietly ship an unpatched ISO, so confirm against the image's own SOFTWARE hive first.
-            Write-HostTimestamp "  The media claims to be at $CurrentBuild.$CurrentUbr already, and KB$PrimaryKb delivers $CurrentBuild.$TargetUbr. Confirming the image's real patch level before skipping it..."
-            $Confirmed = if ($VerifyWimPath) { Get-WimBuildViaMount -WimPath $VerifyWimPath } else { $null }
+        if ($TargetUbr -eq 0) {
+            Write-HostTimestamp "  Neither the catalog title nor the KB$PrimaryKb support page says which $CurrentBuild build it delivers, so it cannot be checked against the image and will be integrated." -ForegroundColor Yellow
+        }
+        # A hive read already paid for this run (an unrecognised release name) is used for free.
+        $AlreadyRead = $VerifyWimPath -and $script:WimBuildCache -and $script:WimBuildCache.ContainsKey("$VerifyWimPath|1")
+        $CurrentAt = $null
+        $HeaderTrusted = $false
+        if ($TargetUbr -gt 0 -and $VerifyWimPath -and ($VerifyPatchLevel -or $AlreadyRead)) {
+            Write-HostTimestamp "  The media header says $CurrentBuild.$CurrentUbr and KB$PrimaryKb delivers $CurrentBuild.$TargetUbr. Reading the image's real patch level before deciding..."
+            $Confirmed = Get-WimBuildViaMount -WimPath $VerifyWimPath
             $ConfirmedUbr = if ("$Confirmed" -match '\b\d+\.\d+\.\d+\.(\d+)') { [int]$Matches[1] } else { 0 }
-            if ($ConfirmedUbr -ge $TargetUbr) {
-                Write-HostTimestamp "  Confirmed: the image is at $Confirmed, so KB$PrimaryKb adds nothing - skipping the download and the integration." -ForegroundColor Green
-                if ($AlreadyCurrent) { $AlreadyCurrent.Value = $Confirmed }
+            if ($ConfirmedUbr -ge $TargetUbr) { $CurrentAt = $Confirmed }
+            else { Write-HostTimestamp "  The image is at $(if ($Confirmed) { $Confirmed } else { 'an unknown build' }), so KB$PrimaryKb is needed." -ForegroundColor Yellow }
+        }
+        elseif ($TargetUbr -gt 0 -and $CurrentUbr -ge $TargetUbr) {
+            $CurrentAt = "10.0.$CurrentBuild.$CurrentUbr"
+            $HeaderTrusted = $true
+        }
+        elseif ($TargetUbr -gt 0) {
+            Write-HostTimestamp "  The media header says $CurrentBuild.$CurrentUbr and KB$PrimaryKb delivers $CurrentBuild.$TargetUbr, so the update will be integrated."
+            Write-HostTimestamp '  If this media is already patched and the header is out of date, -VerifyPatchLevel reads the real level and can skip it.' -ForegroundColor DarkGray
+        }
+
+        if ($CurrentAt) {
+            if (-not $Reapply) {
+                Write-HostTimestamp "  The image is already at $CurrentAt and KB$PrimaryKb delivers $CurrentBuild.$TargetUbr, so it adds nothing - skipping the download and the integration." -ForegroundColor Green
+                if ($HeaderTrusted) { Write-HostTimestamp '  The header was trusted without mounting the image. Use -VerifyPatchLevel to confirm it against the registry.' -ForegroundColor DarkGray }
+                if ($AlreadyCurrent) { $AlreadyCurrent.Value = $CurrentAt }
                 return $null
             }
-            Write-HostTimestamp "  The image is really at $(if ($Confirmed) { $Confirmed } else { 'an unknown build' }), so the update is needed after all." -ForegroundColor Yellow
+            Write-HostTimestamp "  The image is already at $CurrentAt, which includes KB$PrimaryKb, but -ReapplyUpdates was specified, so it is integrated anyway." -ForegroundColor Yellow
+            $script:LcuReapplied = $true
         }
     }
 
@@ -1681,7 +1771,7 @@ function Get-UpdateFileRecords {
 # deliberately left out: moving the working folder does not make last month's ISO wrong.
 $script:BuildAffectingParameters = @(
     'WindowsVersion', 'Release', 'Language', 'Edition', 'KeepEditions', 'KeepAllEditions',
-    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'SkipWinRE', 'BaselineOnly', 'IncludePreview', 'SkipUpdates', 'SkipServicing', 'CompressEsd', 'FastCompression', 'VolumeLabel',
+    'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'SkipWinRE', 'BaselineOnly', 'IncludePreview', 'ReapplyUpdates', 'SkipUpdates', 'SkipServicing', 'CompressEsd', 'FastCompression', 'VolumeLabel',
     'SkipTattoo', 'StripImageResidue', 'DriverPath', 'AllowUnsignedDrivers', 'ExtraFilesPath'
 )
 
@@ -3229,7 +3319,7 @@ function Add-UpdateGroup {
         Write-HostTimestamp "      This package didn't apply (DISM exit code $ExitCode). Details are in C:\Windows\Logs\DISM\dism.log." -ForegroundColor DarkYellow
         Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Target) -Result 'Failed' -Detail "DISM /Add-Package returned exit code $ExitCode"
         $Output | Where-Object { $_ -match '(?i)error|0x[0-9a-f]{8}' } | Select-Object -Last 8 | ForEach-Object {
-            Write-Host "        $_" -ForegroundColor DarkGray
+            Write-HostLog "        $_" -ForegroundColor DarkGray
         }
         # Both failures mention "Unattend.xml", which is a red herring, so the error code decides the advice.
         if ($Output -match '0x800f0823') {
@@ -3641,7 +3731,7 @@ function Show-FinalImageInfo {
     }
 
     Write-HostTimestamp 'Editions (indexes) in the final ISO:' -ForegroundColor Cyan
-    foreach ($Img in $Images) { Write-Host ("    [{0}] {1}" -f $Img.ImageIndex, $Img.ImageName) }
+    foreach ($Img in $Images) { Write-HostLog ("    [{0}] {1}" -f $Img.ImageIndex, $Img.ImageName) }
 
     # Read the exact build (with UBR) from the first index's SOFTWARE hive.
     $BuildStr = if ($script:FinalBuildString) { $script:FinalBuildString }
@@ -3651,9 +3741,10 @@ function Show-FinalImageInfo {
     if ($BuildStr) { Write-HostTimestamp "Final OS build: $BuildStr" -ForegroundColor Cyan }
     else { Write-HostTimestamp "Final OS build: $($Images[0].Version) (revision unavailable)" -ForegroundColor Cyan }
 
-    # Same offline-read-else-WIM-metadata fallback already used for the ISO name and tattoo.
+    # Same offline-read-else-media-language fallback already used for the ISO name and tattoo.
     $LocaleStr = if ($script:FinalImageLocale) { $script:FinalImageLocale }
-                 else { "$($ImageInfo.DefaultLanguage) (from WIM metadata; offline read unavailable)" }
+                 elseif ($script:MediaLanguage) { "$script:MediaLanguage (media language, offline read unavailable)" }
+                 else { 'unknown' }
     Write-HostTimestamp "Image locale  : $LocaleStr" -ForegroundColor Cyan
 }
 
@@ -3708,9 +3799,9 @@ function Show-WimSizeComparison {
     Write-Host ''
     Write-HostTimestamp 'Image sizes, as extracted and as shipped:' -ForegroundColor Cyan
     foreach ($Row in $Rows) {
-        if ($Row.Name -eq 'Total') { Write-Host ('  ' + ('-' * ($NameWidth + 42))) }
+        if ($Row.Name -eq 'Total') { Write-HostLog ('  ' + ('-' * ($NameWidth + 42))) }
         $Change = '{0}{1:N0} MB' -f $(if ($Row.Delta -ge 0) { '+' } else { '-' }), [math]::Abs($Row.Delta)
-        Write-Host ("  {0,-$NameWidth}  {1,9:N0} MB -> {2,9:N0} MB  {3,10}" -f $Row.Name, $Row.Before, $Row.After, $Change)
+        Write-HostLog ("  {0,-$NameWidth}  {1,9:N0} MB -> {2,9:N0} MB  {3,10}" -f $Row.Name, $Row.Before, $Row.After, $Change)
     }
 }
 
@@ -3741,7 +3832,7 @@ function Show-WinReVersions {
     Write-HostTimestamp 'Recovery image (WinRE) build, per edition:' -ForegroundColor Cyan
     foreach ($Entry in $script:WinReVersions) {
         $Change = if ($Entry.After -ne $Entry.Before) { "$($Entry.Before) -> $($Entry.After)" } else { "$($Entry.After) (unchanged)" }
-        Write-Host ("  {0,-$NameWidth}  {1}" -f $Entry.Label, $Change)
+        Write-HostLog ("  {0,-$NameWidth}  {1}" -f $Entry.Label, $Change)
     }
 }
 
@@ -3873,6 +3964,8 @@ if ($ServiceWinRE) {
 if ($Server) {
     Write-HostTimestamp '-Server is deprecated and no longer needed. Server media is detected from the image itself, so -IsoPath pointed at a Server ISO (or one dropped into the download folder) is enough.' -ForegroundColor Yellow
 }
+# Raised before the log existed, so the console already showed it and only the .log still needs it.
+if ($script:LogDirProblem) { Write-CMTraceLog -Message $script:LogDirProblem -Type 2 }
 # With -Server gone, the last build here is the only thing that knows this is Server media before an ISO
 # has been found, which is what keeps a scheduled Server run from downloading client media by mistake.
 if (-not $script:EffectiveServer -and -not $NoStamp) {
@@ -3955,20 +4048,20 @@ if (-not $LocalIsoAvailable) {
     else { Write-HostTimestamp "Target         : Windows $WindowsVersion ($Release, $Language)" }
     Write-Host $LineBreak
 }
-Write-Host 'Everything this run writes goes under the working folder:' -ForegroundColor Cyan
-Write-Host "  Working folder   : $WorkRoot"
-Write-Host "    Extracted media: $ExtractDir"
-Write-Host "    DISM mount     : $MountDir"
-Write-Host "  Downloads        : $DlDir"
-if (-not $IsoPath) { Write-Host '                     (drop your own .iso here and it is used instead of downloading one)' -ForegroundColor DarkGray }
-Write-Host "  Logs             : $LogDir"
-if (-not $NoStamp) { Write-Host "  Build stamps     : $StampRoot" }
+Write-HostLog 'Everything this run writes goes under the working folder:' -ForegroundColor Cyan
+Write-HostLog "  Working folder   : $WorkRoot"
+Write-HostLog "    Extracted media: $ExtractDir"
+Write-HostLog "    DISM mount     : $MountDir"
+Write-HostLog "  Downloads        : $DlDir"
+if (-not $IsoPath) { Write-HostLog '                     (drop your own .iso here and it is used instead of downloading one)' -ForegroundColor DarkGray }
+Write-HostLog "  Logs             : $LogDir"
+if (-not $NoStamp) { Write-HostLog "  Build stamps     : $StampRoot" }
 $IsoNameBase = if ($script:EffectiveServer) { 'WinSrv2025_Std_x64_<build>.<UBR>_<date-time>' } else { 'Win11_EntPro_x64_<build>.<UBR>_<date-time>' }
 $IsoNameExample = "$IsoNamePrefix$IsoNameBase$IsoNameSuffix.iso"
-Write-Host "  Finished ISO     : $(if ($OutputIsoPath) { $OutputIsoPath } else { Join-Path $FinishedIsoDir $IsoNameExample })"
+Write-HostLog "  Finished ISO     : $(if ($OutputIsoPath) { $OutputIsoPath } else { Join-Path $FinishedIsoDir $IsoNameExample })"
 Write-Host ''
-Write-Host '  Nothing outside these folders is changed. -WorkPath moves all of it, and -DownloadPath, -LogPath' -ForegroundColor DarkGray
-Write-Host '  and -OutputIsoPath override the individual folders.' -ForegroundColor DarkGray
+Write-HostLog '  Nothing outside these folders is changed. -WorkPath moves all of it, and -DownloadPath, -LogPath' -ForegroundColor DarkGray
+Write-HostLog '  and -OutputIsoPath override the individual folders.' -ForegroundColor DarkGray
 Write-Host $LineBreak
 
 #endregion
@@ -4245,85 +4338,95 @@ if ($ExtraFilesPath) {
 
 #region Interactive confirmation
 if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -not $CheckOnly) {
-    Write-Host "This tool builds an updated Windows installation ISO. It will:"
+    Write-HostLog "This tool builds an updated Windows installation ISO. It will:"
     if ($IsoPath) {
-        Write-Host "  - Use the ISO you provided: $IsoPath"
+        Write-HostLog "  - Use the ISO you provided: $IsoPath"
     }
     elseif ($script:EffectiveServer) {
-        Write-Host "  - Use the Windows Server ISO it finds in the download folder: $DlDir"
-        Write-Host "      NOTE: Server media cannot be downloaded automatically, so drop the ISO in that folder" -ForegroundColor Yellow
-        Write-Host "            or re-run with -IsoPath." -ForegroundColor Yellow
+        Write-HostLog "  - Use the Windows Server ISO it finds in the download folder: $DlDir"
+        Write-HostLog "      NOTE: Server media cannot be downloaded automatically, so drop the ISO in that folder" -ForegroundColor Yellow
+        Write-HostLog "            or re-run with -IsoPath." -ForegroundColor Yellow
     }
     elseif ($UseFido) {
-        Write-Host "  - Download the matching official Windows $WindowsVersion ISO from Microsoft (~8 GB)"
-        Write-Host "      TIP: Microsoft can rate-limit/block repeated ISO downloads. The script retries, and can" -ForegroundColor Yellow
-        Write-Host "           then offer Microsoft's Media Creation Tool instead. To skip all that, download the" -ForegroundColor Yellow
-        Write-Host "           ISO yourself and re-run with -IsoPath." -ForegroundColor Yellow
+        Write-HostLog "  - Download the matching official Windows $WindowsVersion ISO from Microsoft (~8 GB)"
+        Write-HostLog "      TIP: Microsoft can rate-limit/block repeated ISO downloads. The script retries, and can" -ForegroundColor Yellow
+        Write-HostLog "           then offer Microsoft's Media Creation Tool instead. To skip all that, download the" -ForegroundColor Yellow
+        Write-HostLog "           ISO yourself and re-run with -IsoPath." -ForegroundColor Yellow
     }
     elseif ($UseMct) {
-        Write-Host "  - Open Microsoft's Media Creation Tool so you can download the ISO with it (~8 GB)"
-        Write-Host "      NOTE: MCT has no headless mode, so you click through its last few pages and save the" -ForegroundColor Yellow
-        Write-Host "            ISO into the download folder. The script waits, then picks it up." -ForegroundColor Yellow
+        Write-HostLog "  - Open Microsoft's Media Creation Tool so you can download the ISO with it (~8 GB)"
+        Write-HostLog "      NOTE: MCT has no headless mode, so you click through its last few pages and save the" -ForegroundColor Yellow
+        Write-HostLog "            ISO into the download folder. The script waits, then picks it up." -ForegroundColor Yellow
     }
     else {
-        Write-Host "  - Use the ISO it finds in the download folder: $DlDir"
-        Write-Host "      NOTE: no ISO is downloaded automatically. Drop one into that folder or re-run with" -ForegroundColor Yellow
-        Write-Host "            -IsoPath, or add -UseFido to have the script fetch one from Microsoft." -ForegroundColor Yellow
+        Write-HostLog "  - Use the ISO it finds in the download folder: $DlDir"
+        Write-HostLog "      NOTE: no ISO is downloaded automatically. Drop one into that folder or re-run with" -ForegroundColor Yellow
+        Write-HostLog "            -IsoPath, or add -UseFido to have the script fetch one from Microsoft." -ForegroundColor Yellow
     }
-    Write-Host "  - Extract it to $ExtractDir"
+    Write-HostLog "  - Extract it to $ExtractDir"
     if ($KeepEditions -and $KeepEditions.Count -gt 0) {
-        Write-Host "  - Keep ONLY these editions in the final ISO (remove the rest): $($KeepEditions -join ', ')" -ForegroundColor Yellow
+        Write-HostLog "  - Keep ONLY these editions in the final ISO (remove the rest): $($KeepEditions -join ', ')" -ForegroundColor Yellow
     }
     elseif ($KeepAllEditions) {
-        Write-Host "  - Keep ALL editions in the final ISO (-KeepAllEditions)"
+        Write-HostLog "  - Keep ALL editions in the final ISO (-KeepAllEditions)"
     }
     else {
         $EditionRule = if ($script:EffectiveServer) { 'the most upgradeable edition (Standard over Datacenter, and the Desktop Experience over Server Core)' } else { 'Enterprise, Pro and Home, whichever of them this media carries' }
-        Write-Host "  - Keep ONLY $EditionRule to speed up the build. Use -KeepAllEditions to keep them all" -ForegroundColor Yellow
+        Write-HostLog "  - Keep ONLY $EditionRule to speed up the build. Use -KeepAllEditions to keep them all" -ForegroundColor Yellow
     }
     if (-not $SkipUpdates) {
         if ($UpdatePath) {
-            Write-Host "  - Integrate the update packages found in: $UpdatePath"
+            Write-HostLog "  - Integrate the update packages found in: $UpdatePath"
         }
         else {
-            Write-Host "  - Download the latest cumulative update(s)$(if (-not $SkipDotNet) { ' and the latest .NET cumulative update' }) from the Microsoft Update Catalog"
-            Write-Host "      (the cumulative update is skipped entirely if the image already has that build)" -ForegroundColor DarkGray
-            if ($IncludePreview) {
-                Write-Host "  - Allow preview updates to be selected (-IncludePreview): the media can end up on a build Windows Update will not offer until next month" -ForegroundColor Yellow
+            Write-HostLog "  - Download the latest cumulative update(s)$(if (-not $SkipDotNet) { ' and the latest .NET cumulative update' }) from the Microsoft Update Catalog"
+            Write-HostLog "      (the cumulative update is skipped entirely if the image already has that build)" -ForegroundColor DarkGray
+            if ($ReapplyUpdates) {
+                Write-HostLog "  - Integrate every update even if the image already has it (-ReapplyUpdates)" -ForegroundColor Yellow
+                Write-HostLog "      WARNING: this may leave the media's Setup binaries mismatched with boot.wim, which can stop Windows 11 Setup Dynamic Update from completing" -ForegroundColor Yellow
             }
-            if (-not $SkipSetupDU) { Write-Host "  - Download the latest Setup Dynamic Update and apply it to the media's sources folder" }
+            else {
+                Write-HostLog "      (and if it does, the .NET update, Dynamic Updates and boot.wim are left untouched too)" -ForegroundColor DarkGray
+            }
+            if ($VerifyPatchLevel) {
+                Write-HostLog "  - Mount the image read-only to confirm its real patch level before deciding (-VerifyPatchLevel)"
+            }
+            if ($IncludePreview) {
+                Write-HostLog "  - Allow preview updates to be selected (-IncludePreview): the media can end up on a build Windows Update will not offer until next month" -ForegroundColor Yellow
+            }
+            if (-not $SkipSetupDU) { Write-HostLog "  - Download the latest Setup Dynamic Update and apply it to the media's sources folder" }
         }
-        Write-Host "  - Integrate the update(s) into install.wim ($Edition), boot.wim$(if (-not $SkipWinRE) { ', and winre.wim' })"
-        Write-Host "  - Clean up and re-export the images to shrink them"
+        Write-HostLog "  - Integrate the update(s) into install.wim ($Edition), boot.wim$(if (-not $SkipWinRE) { ', and winre.wim' })"
+        Write-HostLog "  - Clean up and re-export the images to shrink them"
     }
     else {
-        Write-Host "  - Skip update integration (-SkipUpdates) and just recompile the ISO"
+        Write-HostLog "  - Skip update integration (-SkipUpdates) and just recompile the ISO"
     }
     if ($CompressEsd) {
-        Write-Host "  - Export the image as install.esd with recovery compression (-CompressEsd): a much smaller ISO, but a slow export and the media cannot be serviced again afterwards" -ForegroundColor Yellow
+        Write-HostLog "  - Export the image as install.esd with recovery compression (-CompressEsd): a much smaller ISO, but a slow export and the media cannot be serviced again afterwards" -ForegroundColor Yellow
     }
     if ($StripImageResidue) {
-        Write-Host "  - Strip the servicing residue out of each image (-StripImageResidue): not everything that looks like leftover state is, so install from this ISO once before you deploy from it" -ForegroundColor Yellow
+        Write-HostLog "  - Strip the servicing residue out of each image (-StripImageResidue): not everything that looks like leftover state is, so install from this ISO once before you deploy from it" -ForegroundColor Yellow
     }
     if ($ResolvedDriverPath) {
-        Write-Host "  - Inject $($script:DriverInfFiles.Count) driver package(s) from $ResolvedDriverPath into every serviced edition and into boot.wim index 2 (Windows Setup)" -ForegroundColor Yellow
+        Write-HostLog "  - Inject $($script:DriverInfFiles.Count) driver package(s) from $ResolvedDriverPath into every serviced edition and into boot.wim index 2 (Windows Setup)" -ForegroundColor Yellow
     }
     if ($ResolvedUnattend) {
-        Write-Host "  - Place your answer file on the media as autounattend.xml, so Setup runs unattended: $ResolvedUnattend" -ForegroundColor Yellow
+        Write-HostLog "  - Place your answer file on the media as autounattend.xml, so Setup runs unattended: $ResolvedUnattend" -ForegroundColor Yellow
     }
     if ($ResolvedExtraFiles) {
-        Write-Host "  - Copy the contents of $ResolvedExtraFiles onto the root of the ISO, replacing anything the media already had at the same path" -ForegroundColor Yellow
+        Write-HostLog "  - Copy the contents of $ResolvedExtraFiles onto the root of the ISO, replacing anything the media already had at the same path" -ForegroundColor Yellow
     }
-    Write-Host "  - Recompile a new bootable ISO with oscdimg"
+    Write-HostLog "  - Recompile a new bootable ISO with oscdimg"
     if (-not $NoStamp) {
-        Write-Host "  - Record a stamp of the finished build in $StampRoot, so a later run can tell that nothing has changed" -ForegroundColor DarkGray
+        Write-HostLog "  - Record a stamp of the finished build in $StampRoot, so a later run can tell that nothing has changed" -ForegroundColor DarkGray
     }
     if ($AutoClean) {
-        Write-Host "  - DELETE the update packages earlier builds downloaded, and every generated ISO except the newest $KeepIsoCount (-AutoClean)" -ForegroundColor Yellow
+        Write-HostLog "  - DELETE the update packages earlier builds downloaded, and every generated ISO except the newest $KeepIsoCount (-AutoClean)" -ForegroundColor Yellow
     }
     Write-Host ""
-    Write-Host "With the default settings this normally takes an hour or two from start to finish." -ForegroundColor Yellow
-    Write-Host "This is disk- and time-intensive and needs a lot of free space. Nothing on this PC is changed." -ForegroundColor Yellow
+    Write-HostLog "With the default settings this normally takes an hour or two from start to finish." -ForegroundColor Yellow
+    Write-HostLog "This is disk- and time-intensive and needs a lot of free space. Nothing on this PC is changed." -ForegroundColor Yellow
     Write-Host ""
     $Confirm = Read-Host "Type 'Y' to continue, or anything else to cancel"
     if ($Confirm -notin @('Y', 'y', 'Yes', 'yes')) {
@@ -4546,11 +4649,11 @@ if ($ListEditions) {
 
         Write-HostTimestamp "Editions inside $(Split-Path -Leaf $ListImg):" -ForegroundColor Cyan
         Get-WindowsImage -ImagePath $ListImg -ErrorAction Stop | ForEach-Object {
-            Write-Host ("    [{0}] {1}" -f $_.ImageIndex, $_.ImageName)
+            Write-HostLog ("    [{0}] {1}" -f $_.ImageIndex, $_.ImageName)
         }
         Write-Host ''
-        Write-Host 'Use these with -Edition (which to service) or -KeepEditions (which to keep in the final ISO).'
-        Write-Host 'Example: -KeepEditions "Windows 11 Pro","Windows 11 Home"   or   -KeepEditions 6,1'
+        Write-HostLog 'Use these with -Edition (which to service) or -KeepEditions (which to keep in the final ISO).'
+        Write-HostLog 'Example: -KeepEditions "Windows 11 Pro","Windows 11 Home"   or   -KeepEditions 6,1'
     }
     catch {
         Write-HostTimestamp "Could not list the editions: $($_.Exception.Message)" -ForegroundColor Red
@@ -4784,6 +4887,7 @@ Add-WimSizeSample -Label 'boot.wim' -Path $BootWim
 #region Determine the feature update / architecture from the image (for catalog searches)
 $ImageInfo = $null
 try { $ImageInfo = Get-WindowsImage -ImagePath $InstallWimExtracted -Index 1 -ErrorAction Stop } catch { }
+$script:MediaLanguage = Get-MediaLanguage -ImageInfo $ImageInfo -MediaRoot $ExtractDir
 $ImageBuild = 0
 if ($ImageInfo -and $ImageInfo.Version -match '^\d+\.\d+\.(\d+)') { $ImageBuild = [int]$Matches[1] }
 # The image is the source of truth for Server versus client, the same way catalog queries follow the
@@ -4906,21 +5010,29 @@ else {
         $Exclude = '(?i)\.net|dynamic update'
         $script:LcuUpToDate = $null
         $script:LcuSkippedBaselineOnly = $false
+        $script:LcuReapplied = $false
         $script:LcuReleaseDate = $null
-        $script:Lcu = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -AllowPreview:$IncludePreview -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly -SelectedDate ([ref]$script:LcuReleaseDate)
+        $script:Lcu = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -AllowPreview:$IncludePreview -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -VerifyPatchLevel:$VerifyPatchLevel -Reapply:$ReapplyUpdates -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly -SelectedDate ([ref]$script:LcuReleaseDate)
         if (-not $script:Lcu -and -not $script:LcuUpToDate -and -not $script:EffectiveServer) {
             # Retry with a looser query (some releases omit the "Version xxHx" token in the title). Server
             # media is excluded because its product name without the version matches every Server release.
             $Query2 = "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems"
             Write-HostTimestamp "  Retrying with a broader query: $Query2" -ForegroundColor Yellow
-            $script:Lcu = Get-LatestCatalogPackage -Query $Query2 -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -AllowPreview:$IncludePreview -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly -SelectedDate ([ref]$script:LcuReleaseDate)
+            $script:Lcu = Get-LatestCatalogPackage -Query $Query2 -DownloadDir $DlDir -TitleInclude $Include -TitleExclude $Exclude -AllowPreview:$IncludePreview -CurrentBuild $ImageBuild -CurrentUbr $ImageUbr -VerifyWimPath $InstallWimExtracted -VerifyPatchLevel:$VerifyPatchLevel -Reapply:$ReapplyUpdates -AlreadyCurrent ([ref]$script:LcuUpToDate) -BaselineOnly:$BaselineOnly -SelectedDate ([ref]$script:LcuReleaseDate)
         }
     }
-    if ($script:Lcu) { $UpdateGroups.Add(@($script:Lcu)) }
+    if ($script:Lcu) {
+        $UpdateGroups.Add(@($script:Lcu))
+        if ($script:LcuReapplied) {
+            Write-HostTimestamp 'WARNING: -ReapplyUpdates is integrating updates into media that already carries them. This may leave the Setup binaries on the media mismatched with the ones inside boot.wim, which can stop Windows 11 Setup Dynamic Update from completing when imaging a computer with Windows 11.' -ForegroundColor Yellow
+        }
+    }
     elseif ($script:LcuUpToDate) {
         # Nothing will change the OS build now, so reuse the build already confirmed by the check.
         if (-not $script:FinalBuildString) { $script:FinalBuildString = $script:LcuUpToDate }
         Write-HostTimestamp "The image is already fully patched ($script:LcuUpToDate), so no cumulative update is needed." -ForegroundColor Green
+        Add-ServicingResult -Image 'install.wim, boot.wim, winre.wim and the media sources folder' -Package 'Cumulative, .NET, Setup and Safe OS Dynamic Updates' -Result 'Skipped' -Detail "The media is already at $script:LcuUpToDate, so it is left as it shipped"
+        Write-HostTimestamp '  The .NET update, both Dynamic Updates and boot.wim are left exactly as the media shipped them, so its Setup files stay matched to its images. Use -ReapplyUpdates to integrate everything anyway.' -ForegroundColor DarkGray
     }
     elseif ($script:LcuSkippedBaselineOnly) {
         Write-HostTimestamp '  Cumulative update skipped - image stays on prior baseline for hotpatch compatibility.' -ForegroundColor Yellow
@@ -4932,7 +5044,7 @@ else {
     }
     Write-Host $LineBreak
 
-    if (-not $SkipDotNet) {
+    if (-not $SkipDotNet -and -not $script:LcuUpToDate) {
         Invoke-Task -Description 'Downloading the latest .NET cumulative update from the Microsoft Update Catalog...' -ScriptBlock {
             $Query = "Cumulative Update for .NET Framework $(Get-CatalogProductQuery -FeatureUpdate $FeatureName) for $CatalogArch"
             $script:DotNet = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update' -AllowPreview:$IncludePreview
@@ -4945,7 +5057,7 @@ else {
     # The Setup Dynamic Update is NOT applied to an image - it is expanded over the media's sources
     # folder, which is what keeps the loose Setup binaries, compatibility database and component
     # manifests in step with the serviced boot.wim. It is therefore kept out of $UpdateGroups.
-    if (-not $SkipSetupDU) {
+    if (-not $SkipSetupDU -and -not $script:LcuUpToDate) {
         Invoke-Task -Description 'Downloading the latest Setup Dynamic Update from the Microsoft Update Catalog...' -ScriptBlock {
             # Bounded by the LCU's own release date, since a DU published after it can carry Setup logic
             # the LCU's servicing stack does not yet expect.
@@ -4967,7 +5079,7 @@ else {
         Write-Host $LineBreak
     }
 
-    if (-not $SkipWinRE) {
+    if (-not $SkipWinRE -and -not $script:LcuUpToDate) {
         Invoke-Task -Description 'Looking for a Safe OS Dynamic Update for the recovery image (WinRE)...' -ScriptBlock {
             # Server media labels the Safe OS package plain "Dynamic Update", so the Setup one is excluded
             # by name instead of the Safe OS one being required by name.
@@ -5031,14 +5143,14 @@ elseif ($KeepEditions -and $KeepEditions.Count -gt 0) {
         # deliberate "keep nothing", so fall back to every edition rather than a hard exit.
         Write-HostTimestamp "None of these -KeepEditions values matched any edition: $($KeepEditions -join ', '). Keeping all $($InstallImages.Count) editions instead." -ForegroundColor Yellow
         Write-HostTimestamp 'Available editions:' -ForegroundColor Yellow
-        $InstallImages | ForEach-Object { Write-Host "    [$($_.ImageIndex)] $($_.ImageName)" }
+        $InstallImages | ForEach-Object { Write-HostLog "    [$($_.ImageIndex)] $($_.ImageName)" }
         $KeepIndexes = @($InstallImages.ImageIndex)
         Write-Host $LineBreak
     }
     elseif ($KeepUnmatched -and $KeepUnmatched.Count -gt 0) {
         Write-HostTimestamp "These -KeepEditions values did not match any edition: $($KeepUnmatched -join ', ')" -ForegroundColor Red
         Write-HostTimestamp 'Available editions:' -ForegroundColor Yellow
-        $InstallImages | ForEach-Object { Write-Host "    [$($_.ImageIndex)] $($_.ImageName)" }
+        $InstallImages | ForEach-Object { Write-HostLog "    [$($_.ImageIndex)] $($_.ImageName)" }
         Stop-Transcript | Out-Null
         exit 1
     }
@@ -5076,7 +5188,7 @@ else {
     $EdIndexes = @(Resolve-EditionIndexes -Images $InstallImages -Tokens @($Edition) -Unmatched ([ref]$EdUnmatched))
     if ($EdIndexes.Count -eq 0) {
         Write-HostTimestamp "Edition '$Edition' was not found in the image. Available editions:" -ForegroundColor Red
-        $InstallImages | ForEach-Object { Write-Host "    [$($_.ImageIndex)] $($_.ImageName)" }
+        $InstallImages | ForEach-Object { Write-HostLog "    [$($_.ImageIndex)] $($_.ImageName)" }
         Stop-Transcript | Out-Null
         exit 1
     }
@@ -5130,7 +5242,7 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
                     if (-not (Test-Path -LiteralPath $WinReWim)) {
                         Write-HostTimestamp '    This edition carries no winre.wim, so there is no recovery image to service.' -ForegroundColor DarkGray
                     }
-                    elseif (Test-WinReAlreadyCurrent -WinReWim $WinReWim -KbNumber $script:SafeOsKb -Version $WinReBefore) {
+                    elseif (-not $ReapplyUpdates -and (Test-WinReAlreadyCurrent -WinReWim $WinReWim -KbNumber $script:SafeOsKb -Version $WinReBefore)) {
                         Add-ServicingResult -Image $WinReLabel -Package "KB$($script:SafeOsKb)" -Result 'Skipped' -Detail 'Already at the build this Safe OS Dynamic Update delivers'
                     }
                     else {
@@ -5512,7 +5624,7 @@ if ($ResolvedExtraFiles) {
 #region Decide the output ISO name and volume label
 # The name describes what the ISO actually contains: Win11_Pro_x64_enGB_26100.4061_20260815-1332.iso. It is
 # built even when -OutputIsoPath overrides the path, because the volume label is derived from it.
-$IsoLocale = if ($script:FinalImageLocale) { $script:FinalImageLocale } else { "$($ImageInfo.DefaultLanguage)" }
+$IsoLocale = if ($script:FinalImageLocale) { $script:FinalImageLocale } else { "$script:MediaLanguage" }
 $DefaultIsoName = Get-DefaultIsoName -Images $InstallImages -Indexes $KeepIndexes -BuildString $script:FinalBuildString -FallbackVersion $ImageInfo.Version -Architecture $ImageArch -Locale $IsoLocale
 if ($IsoNamePrefix -or $IsoNameSuffix) {
     $DefaultIsoName = "$IsoNamePrefix$([System.IO.Path]::GetFileNameWithoutExtension($DefaultIsoName))$IsoNameSuffix.iso"
@@ -5551,6 +5663,22 @@ if (-not $SkipTattoo) {
         $RemovedNames   = @($script:SourceMediaDropped) + @($InstallImages | Where-Object { $KeepIndexes -notcontains [int]$_.ImageIndex } | ForEach-Object { "$($_.ImageName)" })
         $UnpatchedNames = @($InstallImages | Where-Object { ($KeepIndexes -contains [int]$_.ImageIndex) -and ($ServiceIndexes -notcontains [int]$_.ImageIndex) } | ForEach-Object { "$($_.ImageName)" })
         $Failed         = @($script:TattooServicing | Where-Object { $_.Result -eq 'Failed' })
+        $WinReResults   = @($script:TattooServicing | Where-Object { "$($_.Image)" -like 'winre.wim*' })
+        $WinReApplied   = @($WinReResults | Where-Object { $_.Result -eq 'Applied' }).Count
+        $WinReFailed    = @($WinReResults | Where-Object { $_.Result -eq 'Failed' }).Count
+        $WinReSkipped   = @($WinReResults | Where-Object { $_.Result -eq 'Skipped' }).Count
+        $WinReServicing =
+            if ($SkipWinRE) { 'winre.wim left as it shipped (-SkipWinRE was used)' }
+            elseif ($SkipUpdates -or $SkipServicing) { 'winre.wim left as it shipped (no updates were integrated)' }
+            elseif ($UpdatePath) { 'winre.wim left as it shipped (-UpdatePath packages are applied to install.wim and boot.wim only)' }
+            elseif ($script:LcuUpToDate) { 'winre.wim left as it shipped, because the media already carries the latest cumulative update' }
+            elseif (-not $SafeOsGroup) { 'winre.wim left as it shipped, because no Safe OS Dynamic Update was available' }
+            elseif ($WinReApplied -gt 0) {
+                "winre.wim serviced with the Safe OS Dynamic Update (KB$($script:SafeOsKb)), then cleaned and re-exported$(if ($WinReFailed -gt 0) { ". It failed for $WinReFailed edition(s), which keep the recovery image they shipped with" })"
+            }
+            elseif ($WinReSkipped -gt 0 -and $WinReFailed -eq 0) { "winre.wim left as it shipped, because it is already at the build KB$($script:SafeOsKb) delivers" }
+            elseif ($WinReFailed -gt 0) { "winre.wim left as it shipped, because the Safe OS Dynamic Update (KB$($script:SafeOsKb)) failed to apply" }
+            else { 'winre.wim left as it shipped' }
 
         $TattooInfo = [ordered]@{
             Build       = [ordered]@{
@@ -5581,22 +5709,22 @@ if (-not $SkipTattoo) {
                 Version       = $ImageVersionText
                 FeatureUpdate = $FeatureName
                 Architecture  = $ImageArch
-                Language      = "$($ImageInfo.DefaultLanguage)"
+                Language      = if ($script:MediaLanguage) { $script:MediaLanguage } elseif ($script:FinalImageLocale) { "$script:FinalImageLocale (image locale, the media does not record a language)" } else { '' }
                 ImageCreated  = if ($ImageInfo.CreatedTime) { ([datetime]$ImageInfo.CreatedTime).ToString('yyyy-MM-dd') } else { '' }
                 Editions      = $SourceEditions
             }
             Contents    = [ordered]@{
                 FinalBuild         = if ($script:FinalBuildString) { $script:FinalBuildString } else { "$ImageVersionText (unchanged)" }
-                # Read from the offline SYSTEM hive while an edition was mounted to service it, since the
-                # WIM's own metadata (SourceMedia.Language, above) is only ever the value captured at build time.
-                ImageLocale        = if ($script:FinalImageLocale) { $script:FinalImageLocale } else { "$($ImageInfo.DefaultLanguage) (from WIM metadata; offline read unavailable)" }
+                # Read from the offline hive while an edition was mounted to service it, since the media's
+                # own language (SourceMedia.Language, above) is only what Setup offers, not what was captured.
+                ImageLocale        = if ($script:FinalImageLocale) { $script:FinalImageLocale } elseif ($script:MediaLanguage) { "$script:MediaLanguage (media language, offline read unavailable)" } else { '' }
                 InstallImage       = Split-Path -Leaf $FinalInstallImage
                 EditionsKept       = $KeptNames
                 EditionsRemoved    = $RemovedNames
                 EditionsNotUpdated = $UnpatchedNames
                 AnswerFile         = if ($ResolvedUnattend) { "autounattend.xml (from $(Split-Path -Leaf $ResolvedUnattend), SHA-256 $(Format-ShortHash $script:UnattendHash))" } else { '' }
                 RecoveryImage      = [ordered]@{
-                    Servicing = if (-not $SkipWinRE) { 'winre.wim serviced with the Safe OS Dynamic Update, then cleaned and re-exported' } else { 'winre.wim left as it shipped (-SkipWinRE was used)' }
+                    Servicing = $WinReServicing
                     # Read from each edition's winre.wim header while it was mounted. Nothing else on the
                     # media says which recovery environment it will actually install.
                     Builds    = @($script:WinReVersions | ForEach-Object {
@@ -5845,7 +5973,7 @@ if ($script:StepTimings.Count -gt 0) {
     if ($NameWidth -gt 70) { $NameWidth = 70 }
     foreach ($Step in $script:StepTimings) {
         $Label = if ($Step.Description.Length -gt $NameWidth) { $Step.Description.Substring(0, $NameWidth - 3) + '...' } else { $Step.Description }
-        Write-Host ("  {0,-$NameWidth}  {1,10}" -f $Label, (Format-Duration $Step.Duration))
+        Write-HostLog ("  {0,-$NameWidth}  {1,10}" -f $Label, (Format-Duration $Step.Duration))
     }
     $Slowest = $script:StepTimings | Sort-Object -Property Duration -Descending | Select-Object -First 1
     Write-Host ''
@@ -5864,7 +5992,7 @@ if ($script:ServicingFailures -gt 0) {
     Write-HostTimestamp "Note: the cumulative update didn't apply to $($script:ServicingFailures) edition(s), so they kept their original patch level. The ISO is still valid and bootable - see C:\Windows\Logs\DISM\dism.log if you want the details." -ForegroundColor DarkYellow
     Write-Host ''
 }
-Write-Host 'You can write it to a USB drive (e.g. with Rufus) or use it for a clean install or in-place upgrade.'
+Write-HostLog 'You can write it to a USB drive (e.g. with Rufus) or use it for a clean install or in-place upgrade.'
 Write-Host $LineBreak
 
 Write-HostTimestamp 'Windows ISO Updater script finished.' -ForegroundColor Green
