@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.29.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.29.4   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -294,7 +294,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.29.3'
+$ScriptVersion = '2026.09.29.4'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -5031,6 +5031,7 @@ else {
         # Nothing will change the OS build now, so reuse the build already confirmed by the check.
         if (-not $script:FinalBuildString) { $script:FinalBuildString = $script:LcuUpToDate }
         Write-HostTimestamp "The image is already fully patched ($script:LcuUpToDate), so no cumulative update is needed." -ForegroundColor Green
+        Add-ServicingResult -Image 'install.wim, boot.wim, winre.wim and the media sources folder' -Package 'Cumulative, .NET, Setup and Safe OS Dynamic Updates' -Result 'Skipped' -Detail "The media is already at $script:LcuUpToDate, so it is left as it shipped"
         Write-HostTimestamp '  The .NET update, both Dynamic Updates and boot.wim are left exactly as the media shipped them, so its Setup files stay matched to its images. Use -ReapplyUpdates to integrate everything anyway.' -ForegroundColor DarkGray
     }
     elseif ($script:LcuSkippedBaselineOnly) {
@@ -5662,6 +5663,22 @@ if (-not $SkipTattoo) {
         $RemovedNames   = @($script:SourceMediaDropped) + @($InstallImages | Where-Object { $KeepIndexes -notcontains [int]$_.ImageIndex } | ForEach-Object { "$($_.ImageName)" })
         $UnpatchedNames = @($InstallImages | Where-Object { ($KeepIndexes -contains [int]$_.ImageIndex) -and ($ServiceIndexes -notcontains [int]$_.ImageIndex) } | ForEach-Object { "$($_.ImageName)" })
         $Failed         = @($script:TattooServicing | Where-Object { $_.Result -eq 'Failed' })
+        $WinReResults   = @($script:TattooServicing | Where-Object { "$($_.Image)" -like 'winre.wim*' })
+        $WinReApplied   = @($WinReResults | Where-Object { $_.Result -eq 'Applied' }).Count
+        $WinReFailed    = @($WinReResults | Where-Object { $_.Result -eq 'Failed' }).Count
+        $WinReSkipped   = @($WinReResults | Where-Object { $_.Result -eq 'Skipped' }).Count
+        $WinReServicing =
+            if ($SkipWinRE) { 'winre.wim left as it shipped (-SkipWinRE was used)' }
+            elseif ($SkipUpdates -or $SkipServicing) { 'winre.wim left as it shipped (no updates were integrated)' }
+            elseif ($UpdatePath) { 'winre.wim left as it shipped (-UpdatePath packages are applied to install.wim and boot.wim only)' }
+            elseif ($script:LcuUpToDate) { 'winre.wim left as it shipped, because the media already carries the latest cumulative update' }
+            elseif (-not $SafeOsGroup) { 'winre.wim left as it shipped, because no Safe OS Dynamic Update was available' }
+            elseif ($WinReApplied -gt 0) {
+                "winre.wim serviced with the Safe OS Dynamic Update (KB$($script:SafeOsKb)), then cleaned and re-exported$(if ($WinReFailed -gt 0) { ". It failed for $WinReFailed edition(s), which keep the recovery image they shipped with" })"
+            }
+            elseif ($WinReSkipped -gt 0 -and $WinReFailed -eq 0) { "winre.wim left as it shipped, because it is already at the build KB$($script:SafeOsKb) delivers" }
+            elseif ($WinReFailed -gt 0) { "winre.wim left as it shipped, because the Safe OS Dynamic Update (KB$($script:SafeOsKb)) failed to apply" }
+            else { 'winre.wim left as it shipped' }
 
         $TattooInfo = [ordered]@{
             Build       = [ordered]@{
@@ -5707,7 +5724,7 @@ if (-not $SkipTattoo) {
                 EditionsNotUpdated = $UnpatchedNames
                 AnswerFile         = if ($ResolvedUnattend) { "autounattend.xml (from $(Split-Path -Leaf $ResolvedUnattend), SHA-256 $(Format-ShortHash $script:UnattendHash))" } else { '' }
                 RecoveryImage      = [ordered]@{
-                    Servicing = if (-not $SkipWinRE) { 'winre.wim serviced with the Safe OS Dynamic Update, then cleaned and re-exported' } else { 'winre.wim left as it shipped (-SkipWinRE was used)' }
+                    Servicing = $WinReServicing
                     # Read from each edition's winre.wim header while it was mounted. Nothing else on the
                     # media says which recovery environment it will actually install.
                     Builds    = @($script:WinReVersions | ForEach-Object {
