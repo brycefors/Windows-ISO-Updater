@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.29.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.29.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -294,7 +294,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.29.1'
+$ScriptVersion = '2026.09.29.2'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -464,6 +464,8 @@ $script:StepTimings = [System.Collections.Generic.List[psobject]]::new()
 $script:FinalBuildString = $null
 # Same idea as FinalBuildString, but the shipped display language, read from the offline SYSTEM hive.
 $script:FinalImageLocale = $null
+# The source media's installation language, the fallback whenever no image was mounted to read the hive.
+$script:MediaLanguage = $null
 # Filled in as servicing happens, because by the time the tattoo is written the images are already
 # dismounted and DISM's own log is the only other record of which package landed on which image.
 $script:TattooServicing   = New-Object System.Collections.Generic.List[object]
@@ -1220,6 +1222,36 @@ function Find-SourceIso {
 #endregion
 
 #region Identifying the media
+# The media's installation language. DISM's image object has no DefaultLanguage property (it exposes a
+# Languages list plus DefaultLanguageIndex, and that list is often empty on Microsoft media), so
+# sources\lang.ini, which Setup itself reads, is the fallback. Returns a culture name or $null.
+function Get-MediaLanguage {
+    param(
+        $ImageInfo,
+        [string]$MediaRoot
+    )
+
+    if ($ImageInfo -and $ImageInfo.Languages -and $ImageInfo.Languages.Count -gt 0) {
+        $Index = [int]$ImageInfo.DefaultLanguageIndex
+        if ($Index -lt 0 -or $Index -ge $ImageInfo.Languages.Count) { $Index = 0 }
+        $Lang = "$($ImageInfo.Languages[$Index])".Trim()
+        if ($Lang) { return $Lang }
+    }
+
+    if ($MediaRoot) {
+        $LangIni = Join-Path -Path $MediaRoot -ChildPath 'sources\lang.ini'
+        if (Test-Path -LiteralPath $LangIni -PathType Leaf) {
+            $InSection = $false
+            foreach ($Line in (Get-Content -LiteralPath $LangIni -ErrorAction SilentlyContinue)) {
+                $Trimmed = $Line.Trim()
+                if ($Trimmed -match '^\[(.+)\]$') { $InSection = ($Matches[1] -eq 'Available UI Languages'); continue }
+                if ($InSection -and $Trimmed -match '^([A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})+)\s*=') { return $Matches[1] }
+            }
+        }
+    }
+    return $null
+}
+
 # Maps a Windows build number to its marketing feature-update name (used to build catalog search queries).
 function Get-FeatureUpdateName {
     param([Parameter(Mandatory)][int]$Build)
@@ -3700,9 +3732,10 @@ function Show-FinalImageInfo {
     if ($BuildStr) { Write-HostTimestamp "Final OS build: $BuildStr" -ForegroundColor Cyan }
     else { Write-HostTimestamp "Final OS build: $($Images[0].Version) (revision unavailable)" -ForegroundColor Cyan }
 
-    # Same offline-read-else-WIM-metadata fallback already used for the ISO name and tattoo.
+    # Same offline-read-else-media-language fallback already used for the ISO name and tattoo.
     $LocaleStr = if ($script:FinalImageLocale) { $script:FinalImageLocale }
-                 else { "$($ImageInfo.DefaultLanguage) (from WIM metadata; offline read unavailable)" }
+                 elseif ($script:MediaLanguage) { "$script:MediaLanguage (media language, offline read unavailable)" }
+                 else { 'unknown' }
     Write-HostTimestamp "Image locale  : $LocaleStr" -ForegroundColor Cyan
 }
 
@@ -4845,6 +4878,7 @@ Add-WimSizeSample -Label 'boot.wim' -Path $BootWim
 #region Determine the feature update / architecture from the image (for catalog searches)
 $ImageInfo = $null
 try { $ImageInfo = Get-WindowsImage -ImagePath $InstallWimExtracted -Index 1 -ErrorAction Stop } catch { }
+$script:MediaLanguage = Get-MediaLanguage -ImageInfo $ImageInfo -MediaRoot $ExtractDir
 $ImageBuild = 0
 if ($ImageInfo -and $ImageInfo.Version -match '^\d+\.\d+\.(\d+)') { $ImageBuild = [int]$Matches[1] }
 # The image is the source of truth for Server versus client, the same way catalog queries follow the
@@ -5580,7 +5614,7 @@ if ($ResolvedExtraFiles) {
 #region Decide the output ISO name and volume label
 # The name describes what the ISO actually contains: Win11_Pro_x64_enGB_26100.4061_20260815-1332.iso. It is
 # built even when -OutputIsoPath overrides the path, because the volume label is derived from it.
-$IsoLocale = if ($script:FinalImageLocale) { $script:FinalImageLocale } else { "$($ImageInfo.DefaultLanguage)" }
+$IsoLocale = if ($script:FinalImageLocale) { $script:FinalImageLocale } else { "$script:MediaLanguage" }
 $DefaultIsoName = Get-DefaultIsoName -Images $InstallImages -Indexes $KeepIndexes -BuildString $script:FinalBuildString -FallbackVersion $ImageInfo.Version -Architecture $ImageArch -Locale $IsoLocale
 if ($IsoNamePrefix -or $IsoNameSuffix) {
     $DefaultIsoName = "$IsoNamePrefix$([System.IO.Path]::GetFileNameWithoutExtension($DefaultIsoName))$IsoNameSuffix.iso"
@@ -5649,15 +5683,15 @@ if (-not $SkipTattoo) {
                 Version       = $ImageVersionText
                 FeatureUpdate = $FeatureName
                 Architecture  = $ImageArch
-                Language      = "$($ImageInfo.DefaultLanguage)"
+                Language      = if ($script:MediaLanguage) { $script:MediaLanguage } elseif ($script:FinalImageLocale) { "$script:FinalImageLocale (image locale, the media does not record a language)" } else { '' }
                 ImageCreated  = if ($ImageInfo.CreatedTime) { ([datetime]$ImageInfo.CreatedTime).ToString('yyyy-MM-dd') } else { '' }
                 Editions      = $SourceEditions
             }
             Contents    = [ordered]@{
                 FinalBuild         = if ($script:FinalBuildString) { $script:FinalBuildString } else { "$ImageVersionText (unchanged)" }
-                # Read from the offline SYSTEM hive while an edition was mounted to service it, since the
-                # WIM's own metadata (SourceMedia.Language, above) is only ever the value captured at build time.
-                ImageLocale        = if ($script:FinalImageLocale) { $script:FinalImageLocale } else { "$($ImageInfo.DefaultLanguage) (from WIM metadata; offline read unavailable)" }
+                # Read from the offline hive while an edition was mounted to service it, since the media's
+                # own language (SourceMedia.Language, above) is only what Setup offers, not what was captured.
+                ImageLocale        = if ($script:FinalImageLocale) { $script:FinalImageLocale } elseif ($script:MediaLanguage) { "$script:MediaLanguage (media language, offline read unavailable)" } else { '' }
                 InstallImage       = Split-Path -Leaf $FinalInstallImage
                 EditionsKept       = $KeptNames
                 EditionsRemoved    = $RemovedNames
