@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.29.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.09.29.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -294,7 +294,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.29.2'
+$ScriptVersion = '2026.09.29.3'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -1539,8 +1539,17 @@ function Get-LatestCatalogPackage {
     # If the image is already at (or past) the build this KB delivers, there is nothing to gain from
     # downloading and integrating it - that is the hour-long part of the run.
     if ($CurrentBuild -gt 0 -and $PrimaryKb) {
-        $Targets = Get-KbTargetBuilds -KbNumber $PrimaryKb
+        # Newer catalog titles carry the build, e.g. "(KB5129195) (26300.9457)", and are there on release day
+        # when the support page often is not yet.
+        $Targets = @{}
+        foreach ($M in [regex]::Matches("$($Selected.Title)", '\((\d{5})\.(\d{1,5})\)')) {
+            $Targets[[int]$M.Groups[1].Value] = [int]$M.Groups[2].Value
+        }
+        if (-not $Targets.ContainsKey($CurrentBuild)) { $Targets = Get-KbTargetBuilds -KbNumber $PrimaryKb }
         $TargetUbr = if ($Targets -and $Targets.ContainsKey($CurrentBuild)) { [int]$Targets[$CurrentBuild] } else { 0 }
+        if ($TargetUbr -eq 0) {
+            Write-HostTimestamp "  Neither the catalog title nor the KB$PrimaryKb support page says which $CurrentBuild build it delivers, so it cannot be checked against the image and will be integrated." -ForegroundColor Yellow
+        }
         # A hive read already paid for this run (an unrecognised release name) is used for free.
         $AlreadyRead = $VerifyWimPath -and $script:WimBuildCache -and $script:WimBuildCache.ContainsKey("$VerifyWimPath|1")
         $CurrentAt = $null
