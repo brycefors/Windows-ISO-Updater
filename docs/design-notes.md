@@ -68,13 +68,16 @@ Integrating a cumulative update is the expensive part of a run (mount, apply, co
 
 The check has to bridge two things that don't reference each other: the image reports a **build and UBR** (for example `26100.4946`), while the Update Catalog reports a **KB number**. The bridge is the KB's own support page, whose title reads `... KB5062553 (OS Builds 26100.4652 and 26200.4652)`. That gives the UBR the update delivers, before anything is downloaded.
 
-Because a wrong "already patched" decision would quietly ship an unpatched ISO, the check is deliberately asymmetric:
+Two sources can answer "is the image already at that UBR", and they trade speed against certainty:
 
-- The WIM header's `SPBuild` is only a **hint**. It is stale on some Microsoft media, so it is used solely to decide whether the question is worth asking.
-- If the header suggests the image is current, the image is **mounted read-only** and its real build is read from the `SOFTWARE` hive. Only that confirmed value can trigger a skip.
+- **By default the WIM header decides.** Its `SPBuild` is read without mounting anything, so the check is instant. If it is at or past the update's UBR the update is skipped, otherwise it is integrated.
+- **`-VerifyPatchLevel` reads the image itself.** The image is mounted read-only and its real build is read from the `SOFTWARE` hive, which then decides in both directions. The header is wrong on some media (UUP-built and Media Creation Tool images can report `.1` while being fully patched, or a revision they never shipped with), so this is the switch to reach for when a run keeps re-integrating an update the image already has, or when the source ISO did not come straight from Microsoft.
+- If the hive was already read earlier in the run (a release the script had no name for), that read is reused for free and wins over the header even without the switch.
 - Anything unknown (support page unreachable, title format changed, hive unreadable, out-of-band release missing from the page) **fails open** and the update is downloaded and applied as usual.
 
-So the worst case is a few wasted minutes on a confirmation mount, and the update still gets applied. A skip only happens when the image's own registry proves it is already at or past the update's build.
+Re-applying an update the image already has only wastes time, since DISM reports it as not applicable. The risk worth knowing about is the other direction, a header that claims a newer revision than the image really carries, which the default trusts and `-VerifyPatchLevel` catches.
+
+When the image is already current, the rest of the media is left alone as well: no .NET update, no Setup or Safe OS Dynamic Update, and no `boot.wim` servicing. Media Microsoft published at the latest cumulative update is already internally consistent, with the loose Setup binaries in `sources` matching the ones inside `boot.wim`. Servicing only some of those parts is how the two drift apart, and Windows 11 Setup Dynamic Update can then fail partway through imaging. `-ReapplyUpdates` overrides this and integrates everything regardless, which is why it carries that warning. It is a build-affecting parameter, so turning it on forces exactly one rebuild and the build stamp then stops it repeating until something else changes.
 
 ## How a New Windows Release Is Recognised
 
@@ -86,7 +89,7 @@ So when the table has no answer, the script asks the media instead. Setup record
 
 The cost is one read-only mount, so it is arranged not to be paid twice:
 
-- Builds already in the table never mount at all.
+- Builds already in the table skip this lookup entirely and never mount for the sake of naming the release.
 - A run that makes no catalog queries (`-SkipUpdates`, or `-UpdatePath` supplying packages directly) never mounts either, because it has nothing to search for.
 - The result is cached for the run, so the already-patched check that follows reuses the same read rather than mounting a second time.
 
