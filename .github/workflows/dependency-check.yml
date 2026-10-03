@@ -1,5 +1,8 @@
 name: Dependency check
 
+# run-name has no date function or date context, so scheduled runs rely on the timestamp the Actions UI already shows.
+run-name: "${{ github.event_name == 'schedule' && 'Scheduled run' || format('Dependency check ({0} by {1})', github.event_name, github.actor) }}"
+
 on:
   schedule:
     # Cron is UTC only, so these are 08:00 Pacific during daylight time and 07:00 in winter.
