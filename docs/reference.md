@@ -155,6 +155,14 @@ that happens is one extra read.
 
 Dropping your own `.iso` into `Downloads\` is all it takes to skip the Microsoft download, with no `-IsoPath` needed. The finished ISO is written to `Output\` instead, so a previous build is never picked up as the source for the next one. `-DownloadPath`, `-LogPath` and `-OutputIsoPath` override the individual folders if you want them elsewhere. Nothing outside these folders is changed, because all servicing happens against files in the working folder, never against the running system.
 
+### Keep the working folder on a local disk
+
+DISM services an image by projecting it onto a folder, and that only works on a real local disk. Cloud-synced folders (OneDrive, Dropbox, Google Drive) hand back placeholder files that the sync client rehydrates on demand, which surfaces as servicing errors partway through a build. Network shares and mapped drives cannot host a DISM mount at all, so a `-WorkPath` on one is rejected before the build starts.
+
+Source media and finished ISOs are a different matter, and those are fine on a share. The script copies a remote source ISO to local disk before it mounts anything, then copies the finished ISO back out to the remote path at the end.
+
+So keep `-WorkPath` on a local disk, and save the network paths for `-IsoPath` and `-OutputIsoPath`.
+
 ## Microsoft Defender Exclusions
 
 Applying a cumulative update to a mounted image writes tens of thousands of files, and Defender's real-time protection scans each one as it lands. Excluding the folders where DISM does that work can make servicing noticeably faster. The script never changes Defender settings itself, so this is an optional step you take once, from an elevated prompt:
