@@ -9,10 +9,18 @@ repo_name: brycefors/Windows-ISO-Updater
 # Rooted at the repo so README.md is the home page and its docs/ links resolve unchanged.
 docs_dir: ..
 site_dir: ../site
+# The parent is matched with /* so the assets folder can be re-included.
+# LICENSE becomes a page through hooks.py, and its raw copy would collide with it on Windows.
 exclude_docs: |
-  /mkdocs/
+  /LICENSE
+  /mkdocs/*
+  !/mkdocs/assets/
   /site/
   /tools/
+
+# Reached from the README's license link rather than the sidebar.
+not_in_nav: |
+  /license.md
 
 nav:
   - Home: README.md
@@ -22,13 +30,14 @@ nav:
   - Unattended Installs: docs/unattended-installs.md
   - Technical Reference: docs/reference.md
   - Design Notes: docs/design-notes.md
+  - Releases: https://github.com/brycefors/Windows-ISO-Updater/releases
 
 theme:
   name: material
   # Segoe UI and Cascadia come from the stylesheet, so nothing is fetched from Google Fonts.
   font: false
-  logo: docs/assets/logo.svg
-  favicon: docs/assets/logo.svg
+  logo: mkdocs/assets/logo.svg
+  favicon: mkdocs/assets/logo.svg
   icon:
     repo: fontawesome/brands/github
   palette:
@@ -57,7 +66,17 @@ theme:
     - content.code.copy
 
 extra_css:
-  - docs/assets/windows.css
+  - mkdocs/assets/windows.css
+
+extra_javascript:
+  - mkdocs/assets/mermaid-maximize.js
+  - mkdocs/assets/nav-releases.js
+
+extra:
+  generator: false
+
+hooks:
+  - hooks.py
 
 plugins:
   - search

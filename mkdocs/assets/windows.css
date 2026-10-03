@@ -51,7 +51,12 @@ pre {
   --md-primary-bg-color--light: #ffffffb3;
   --md-default-bg-color: #202020;
   --md-default-bg-color--light: #202020b3;
+  /* Fluent dark text fills, since Material's translucent greys read as dim on #202020 */
+  --md-default-fg-color: #ffffff;
+  --md-default-fg-color--light: #ffffffc5;
+  --md-default-fg-color--lighter: #ffffff87;
   --md-default-fg-color--lightest: #ffffff1f;
+  --md-typeset-color: #ffffff;
   --md-typeset-a-color: #60cdff;
   --md-code-bg-color: #2b2b2b;
   --md-footer-bg-color: #1c1c1c;
@@ -70,6 +75,20 @@ pre {
   border-bottom: 2px solid #60cdff;
 }
 
+/* The flowchart's classDef fills are light pastels, so diagrams keep the light palette in dark mode */
+[data-md-color-scheme="slate"] .mermaid {
+  --md-mermaid-node-bg-color: #0078d41a;
+  --md-mermaid-node-fg-color: #0078d4;
+  --md-mermaid-edge-color: #36464e;
+  --md-mermaid-label-fg-color: #36464e;
+  --md-mermaid-label-bg-color: #f9f9f9;
+  --md-default-fg-color--lighter: #00000052;
+  --md-default-fg-color--lightest: #00000012;
+  padding: 0.8rem;
+  border-radius: 8px;
+  background: #f9f9f9;
+}
+
 /* Fluent corner radius */
 .md-typeset pre > code,
 .md-typeset .admonition,
@@ -83,9 +102,66 @@ pre {
   overflow: hidden;
 }
 
-/* Hide back-to-README links on the MkDocs site, keep in GitHub markdown */
-.md-content__inner > p:first-child:has(> a:only-child[href^=".."]),
-.md-content__inner > p:last-child:has(> a:only-child[href^=".."]) { display: none; }
-
 /* Prevent parameter names in the first column from wrapping mid-word */
 .md-typeset table:not([class]) td:first-child code { white-space: nowrap; }
+
+/* Releases is an external link, so nav-releases.js marks it to sit apart from the pages */
+.md-nav__item.wiso-nav-releases {
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--md-default-fg-color--lightest);
+}
+
+.wiso-nav-releases > .md-nav__link > svg {
+  flex-shrink: 0;
+  align-self: center;
+  width: 0.9rem;
+  height: 0.9rem;
+  fill: currentColor;
+}
+
+/* Maximize toggle added to each Mermaid diagram by mermaid-maximize.js */
+.wiso-diagram {
+  position: relative;
+}
+
+.wiso-diagram__toggle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 1;
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  cursor: pointer;
+  color: var(--md-default-fg-color--light);
+  background: var(--md-code-bg-color);
+}
+
+.wiso-diagram__toggle:hover,
+.wiso-diagram__toggle:focus-visible {
+  color: var(--md-accent-fg-color);
+}
+
+.wiso-diagram--max {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  overflow: auto;
+  padding: 3rem 1.5rem 1.5rem;
+  background: var(--md-default-bg-color);
+}
+
+.wiso-diagram--max > .wiso-diagram__toggle {
+  position: fixed;
+  top: 1rem;
+  right: 1.5rem;
+}
+
+.wiso-diagram--max > .mermaid {
+  margin: 0 auto;
+}
+
+html.wiso-noscroll {
+  overflow: hidden;
+}

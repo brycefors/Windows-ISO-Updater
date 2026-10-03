@@ -16,7 +16,7 @@ Installing Windows from this updated media saves time by eliminating large post-
 
 ## Quick Start
 
-1. Place `Run-Windows-ISO-Updater.bat` and `Windows-ISO-Updater.ps1` in the same directory.
+1. Place [`Run-Windows-ISO-Updater.bat`](https://github.com/brycefors/Windows-ISO-Updater/releases) and [`Windows-ISO-Updater.ps1`](https://github.com/brycefors/Windows-ISO-Updater/releases) in the same directory.
 2. Put an official Windows ISO in `C:\WISO-Work\Downloads` or specify its location with `-IsoPath`.
 3. Right-click `Run-Windows-ISO-Updater.bat` and select **Run as administrator**.
 4. Confirm the build settings displayed in the console prompt.
@@ -48,12 +48,20 @@ Installing Windows from this updated media saves time by eliminating large post-
 
 ## Documentation Links
 
+<!-- github-only -->
+For search and easier navigation, read the documentation at [brycefors.github.io/Windows-ISO-Updater](https://brycefors.github.io/Windows-ISO-Updater/).
+
+<!-- /github-only -->
 * [Usage Guide](docs/usage.md)
 * [Command-Line Parameters](docs/parameters.md)
 * [Scheduled Automation](docs/scheduled-runs.md)
 * [Unattended Setups](docs/unattended-installs.md)
 * [Architecture and Design Details](docs/design-notes.md)
 * [Technical Reference](docs/reference.md)
+
+## Reporting Issues
+
+For any problem with this tool, please [submit a GitHub issue](https://github.com/brycefors/Windows-ISO-Updater/issues).
 
 ## License
 
