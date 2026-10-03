@@ -11,7 +11,7 @@ Pages. Nothing in this folder is published itself, apart from `assets/`.
 | --- | --- |
 | `mkdocs.yml` | Site configuration: navigation, theme, plugins, and which files are excluded |
 | `requirements-docs.txt` | Pinned versions of MkDocs, the theme, and the plugins |
-| `hooks.py` | Build hook that removes GitHub-only content from each page before it is rendered |
+| `hooks.py` | Build hook that removes GitHub-only content from each page and publishes `LICENSE` as a page |
 | `assets/windows.css` | Windows-style colors and fonts (Segoe UI and Cascadia, so no web fonts are fetched) |
 | `assets/logo.svg` | Logo and favicon |
 | `assets/mermaid-maximize.js` | Adds a **Maximize** button to each Mermaid diagram, which opens it full-window at natural size |
@@ -36,6 +36,10 @@ The site is rooted at the repo (`docs_dir: ..`), so `README.md` becomes the home
   this site.
 - Any line that is exactly `[← Back to README](../README.md)`, since the site navigation already leads
   home.
+
+It also publishes the repo's `LICENSE` as a `license/` page that is left out of the sidebar, and points
+the README's license link at it. Without that, a file with no `.md` extension is only copied as a raw
+download.
 
 ## Building locally
 

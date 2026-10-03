@@ -10,11 +10,17 @@ repo_name: brycefors/Windows-ISO-Updater
 docs_dir: ..
 site_dir: ../site
 # The parent is matched with /* so the assets folder can be re-included.
+# LICENSE becomes a page through hooks.py, and its raw copy would collide with it on Windows.
 exclude_docs: |
+  /LICENSE
   /mkdocs/*
   !/mkdocs/assets/
   /site/
   /tools/
+
+# Reached from the README's license link rather than the sidebar.
+not_in_nav: |
+  /license.md
 
 nav:
   - Home: README.md
