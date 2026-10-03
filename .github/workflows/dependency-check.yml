@@ -2,14 +2,21 @@ name: Dependency check
 
 on:
   schedule:
-    # Cron is UTC only, so this is 08:00 Pacific during daylight time and 07:00 in winter.
-    - cron: '0 15 * * *'
+    # Cron is UTC only, so these are 08:00 Pacific during daylight time and 07:00 in winter.
+    # Days 2-31 so the 1st gets only the deep run, not both.
+    - cron: '0 15 2-31 * *'
+    # The deep run also downloads the MCT and ADK installers to check their signatures. Matched by text below.
+    - cron: '0 15 1 * *'
   workflow_dispatch:
     inputs:
       catalogQuery:
         description: 'Catalog search used to test update title matching'
         required: false
         default: 'Cumulative Update for Windows 11 Version 26H2 x64'
+      deep:
+        description: 'Also download the MCT and ADK installers and verify their signatures'
+        type: boolean
+        default: false
   push:
     paths:
       - 'Windows-ISO-Updater.ps1'
@@ -24,7 +31,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Windows PowerShell 5.1, the edition the script targets, rather than the runner's pwsh 7.
       - name: Run Test-Dependencies
@@ -32,8 +39,11 @@ jobs:
         # Passed through the environment, never spliced into the script, so a typed input cannot inject commands.
         env:
           CATALOG_QUERY: ${{ inputs.catalogQuery || 'Cumulative Update for Windows 11 Version 26H2 x64' }}
+          DEEP: ${{ github.event.schedule == '0 15 1 * *' || inputs.deep == true }}
         run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Test-Dependencies.ps1 -Deep -CatalogQuery $env:CATALOG_QUERY
+          $TestArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '.\tools\Test-Dependencies.ps1', '-CatalogQuery', $env:CATALOG_QUERY)
+          if ($env:DEEP -eq 'true') { $TestArgs += '-Deep' }
+          powershell.exe @TestArgs
           $Code = $LASTEXITCODE
           if ($Code -eq 2) {
               Write-Output '::warning title=Test-Dependencies::Warnings only. Read the log, nothing is known to be broken.'
