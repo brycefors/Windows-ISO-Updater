@@ -1,0 +1,84 @@
+/* Windows 11 Fluent palette, values taken from the WinUI default accent and Mica surfaces. */
+
+:root {
+  --md-text-font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --md-code-font-family: "Cascadia Code", "Cascadia Mono", Consolas, monospace;
+}
+
+body,
+input {
+  font-family: var(--md-text-font-family);
+}
+
+code,
+kbd,
+pre {
+  font-family: var(--md-code-font-family);
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-header__title {
+  font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  font-weight: 600;
+}
+
+/* Light: Windows blue header on a Mica-grey page */
+[data-md-color-scheme="default"][data-md-color-primary="custom"] {
+  --md-primary-fg-color: #005fb8;
+  --md-primary-fg-color--light: #0078d4;
+  --md-primary-fg-color--dark: #003e92;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: #ffffffb3;
+  --md-default-bg-color: #f9f9f9;
+  --md-typeset-a-color: #005fb8;
+  --md-code-bg-color: #f3f3f3;
+}
+
+[data-md-color-scheme="default"][data-md-color-accent="custom"] {
+  --md-accent-fg-color: #0078d4;
+  --md-accent-fg-color--transparent: #0078d41a;
+  --md-accent-bg-color: #ffffff;
+}
+
+/* Dark: Windows 11 dark title bar and surfaces with the light-blue dark-mode accent */
+[data-md-color-scheme="slate"][data-md-color-primary="custom"] {
+  --md-primary-fg-color: #1c1c1c;
+  --md-primary-fg-color--light: #2b2b2b;
+  --md-primary-fg-color--dark: #141414;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: #ffffffb3;
+  --md-default-bg-color: #202020;
+  --md-default-bg-color--light: #202020b3;
+  --md-default-fg-color--lightest: #ffffff1f;
+  --md-typeset-a-color: #60cdff;
+  --md-code-bg-color: #2b2b2b;
+  --md-footer-bg-color: #1c1c1c;
+  --md-footer-bg-color--dark: #141414;
+}
+
+[data-md-color-scheme="slate"][data-md-color-accent="custom"] {
+  --md-accent-fg-color: #99ebff;
+  --md-accent-fg-color--transparent: #60cdff1a;
+  --md-accent-bg-color: #000000;
+}
+
+/* The dark header gets an accent underline so it still reads as Windows blue */
+[data-md-color-scheme="slate"] .md-header,
+[data-md-color-scheme="slate"] .md-tabs {
+  border-bottom: 2px solid #60cdff;
+}
+
+/* Fluent corner radius */
+.md-typeset pre > code,
+.md-typeset .admonition,
+.md-typeset details,
+.md-typeset table:not([class]),
+.md-search__form {
+  border-radius: 8px;
+}
+
+.md-typeset table:not([class]) {
+  overflow: hidden;
+}

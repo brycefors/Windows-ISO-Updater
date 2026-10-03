@@ -1,0 +1,83 @@
+name: Docs
+
+on:
+  push:
+    paths:
+      - 'README.md'
+      - 'docs/**'
+      - 'Examples/**'
+      - 'mkdocs.yml'
+      - 'requirements-docs.txt'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'README.md'
+      - 'docs/**'
+      - 'Examples/**'
+      - 'mkdocs.yml'
+      - 'requirements-docs.txt'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: 'Publish this branch to GitHub Pages, replacing the live site'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+
+      - name: Install MkDocs
+        run: pip install -r requirements-docs.txt
+
+      # --strict turns broken links and bad nav entries into a failed run on every branch.
+      - name: Build site
+        env:
+          # mkdocs-same-dir pulls in ProperDocs, which prints a banner about MkDocs 2 on every build.
+          DISABLE_MKDOCS_2_WARNING: 'true'
+        run: mkdocs build --strict
+
+      # Download from the run summary, then serve the folder (python -m http.server) to browse it.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docs-site
+          path: site/
+          retention-days: 7
+
+      - if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || inputs.deploy
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site/
+
+  deploy:
+    needs: build
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || inputs.deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Only this job writes, so the elevated scopes stay off the build job.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    # Queue deployments rather than cancel one halfway through publishing.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

@@ -1,0 +1,78 @@
+# pip install -r requirements-docs.txt
+# then: mkdocs serve
+site_name: Windows ISO Updater
+site_description: Download, service and rebuild an up-to-date Windows ISO with DISM and oscdimg.
+repo_url: https://github.com/brycefors/Windows-ISO-Updater
+repo_name: brycefors/Windows-ISO-Updater
+
+# Rooted at the repo so README.md is the home page and its docs/ links resolve unchanged.
+docs_dir: .
+site_dir: site
+exclude_docs: |
+  /site/
+  /tools/
+
+nav:
+  - Home: README.md
+  - Usage Guide: docs/usage.md
+  - Command-Line Parameters: docs/parameters.md
+  - Scheduled Runs: docs/scheduled-runs.md
+  - Unattended Installs: docs/unattended-installs.md
+  - Technical Reference: docs/reference.md
+  - Design Notes: docs/design-notes.md
+
+theme:
+  name: material
+  # Segoe UI and Cascadia come from the stylesheet, so nothing is fetched from Google Fonts.
+  font: false
+  icon:
+    logo: fontawesome/brands/windows
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+
+extra_css:
+  - docs/assets/windows.css
+
+plugins:
+  - search
+  - same-dir
+  - gh-admonitions
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
