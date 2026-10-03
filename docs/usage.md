@@ -264,7 +264,7 @@ Read-only attributes inherited from the source ISO do not block the copy, they a
 
 The ISO this script produces is stock media with Microsoft's boot files and signatures untouched, so it boots on a machine with Secure Boot enabled without any extra steps.
 
-Keep it that way when you write it to a USB stick. Flashing the ISO as it is preserves the signed boot loader, while anything that swaps in its own loader or patches the installer binaries breaks the signature chain, and a machine enforcing Secure Boot will refuse it. If you want an answer file on the media, use `-UnattendPath` so it goes on before the ISO is built rather than being added afterwards.
+Keep it that way when you write it to a USB stick. Flashing the ISO as it is preserves the signed boot loader, while anything that swaps in its own loader or patches the installer binaries breaks the signature chain, and a machine enforcing Secure Boot will refuse it. If you use Rufus to write the ISO, decline its Windows customization options (the Windows User Experience dialog and any option to swap the boot loader or patch the installer), as those may require disabling Secure Boot. If you want an answer file on the media, use `-UnattendPath` so it goes on before the ISO is built rather than being added afterwards.
 
 
 [← Back to README](../README.md)
