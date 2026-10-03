@@ -65,4 +65,4 @@ For any problem with this tool, please [submit a GitHub issue](https://github.co
 
 ## License
 
-Distributed under the [MIT License](LICENSE). Third-party utilities and Microsoft updates fetched during runtime remain governed by their respective vendor terms.
+Distributed under the [MIT License](https://github.com/brycefors/Windows-ISO-Updater/blob/main/LICENSE). Third-party utilities and Microsoft updates fetched during runtime remain governed by their respective vendor terms.

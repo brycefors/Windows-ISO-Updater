@@ -105,6 +105,21 @@ pre {
 /* Prevent parameter names in the first column from wrapping mid-word */
 .md-typeset table:not([class]) td:first-child code { white-space: nowrap; }
 
+/* Releases is an external link, so nav-releases.js marks it to sit apart from the pages */
+.md-nav__item.wiso-nav-releases {
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--md-default-fg-color--lightest);
+}
+
+.wiso-nav-releases > .md-nav__link > svg {
+  flex-shrink: 0;
+  align-self: center;
+  width: 0.9rem;
+  height: 0.9rem;
+  fill: currentColor;
+}
+
 /* Maximize toggle added to each Mermaid diagram by mermaid-maximize.js */
 .wiso-diagram {
   position: relative;

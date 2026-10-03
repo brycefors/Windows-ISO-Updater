@@ -15,6 +15,7 @@ Pages. Nothing in this folder is published itself, apart from `assets/`.
 | `assets/windows.css` | Windows-style colors and fonts (Segoe UI and Cascadia, so no web fonts are fetched) |
 | `assets/logo.svg` | Logo and favicon |
 | `assets/mermaid-maximize.js` | Adds a **Maximize** button to each Mermaid diagram, which opens it full-window at natural size |
+| `assets/nav-releases.js` | Separates the **Releases** link from the docs pages in the sidebar and gives it the GitHub icon |
 
 ## How the pages are sourced
 
