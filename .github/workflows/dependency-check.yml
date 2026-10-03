@@ -43,6 +43,8 @@ jobs:
         shell: powershell
         # Passed through the environment, never spliced into the script, so a typed input cannot inject commands.
         env:
+          # Lets the informational actions/checkout release lookup avoid the shared-IP anonymous API rate limit.
+          GITHUB_TOKEN: ${{ github.token }}
           CATALOG_QUERY: ${{ inputs.catalogQuery || 'Cumulative Update for Windows 11 Version 26H2 x64' }}
           DEEP: ${{ github.event.schedule == '0 15 1 * *' || inputs.deep == true }}
         run: |

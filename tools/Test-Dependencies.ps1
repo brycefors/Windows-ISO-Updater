@@ -79,7 +79,7 @@ $Results = New-Object System.Collections.Generic.List[object]
 function Add-Result {
     param(
         [Parameter(Mandatory)][string]$Area,
-        [Parameter(Mandatory)][ValidateSet('Pass', 'Warn', 'Fail')][string]$Status,
+        [Parameter(Mandatory)][ValidateSet('Pass', 'Warn', 'Fail', 'Info')][string]$Status,
         [Parameter(Mandatory)][string]$Message,
         [string]$Action
     )
@@ -92,7 +92,7 @@ function Add-Result {
         })
 
     if ($Quiet) { return }
-    $Color = switch ($Status) { 'Pass' { 'Green' } 'Warn' { 'Yellow' } default { 'Red' } }
+    $Color = switch ($Status) { 'Pass' { 'Green' } 'Warn' { 'Yellow' } 'Info' { 'Cyan' } default { 'Red' } }
     Write-Host ('  [{0}] {1}' -f $Status.ToUpper(), $Message) -ForegroundColor $Color
 }
 
@@ -797,6 +797,22 @@ try {
             }
         }
     }
+
+    # --- actions/checkout (informational) ---
+
+    Write-Section 'actions/checkout (informational)'
+
+    # Informational only: the workflow pins a commit SHA, so a newer release is a prompt to review, never a defect.
+    try {
+        $ApiHeaders = @{ 'User-Agent' = 'Windows-ISO-Updater-DepCheck'; Accept = 'application/vnd.github+json' }
+        if ($env:GITHUB_TOKEN) { $ApiHeaders['Authorization'] = "Bearer $env:GITHUB_TOKEN" }
+        $Release = Invoke-RestMethod -Uri 'https://api.github.com/repos/actions/checkout/releases/latest' -Headers $ApiHeaders -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop
+        $Published = [DateTimeOffset]::Parse("$($Release.published_at)", [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+        Add-Result -Area 'Checkout' -Status 'Info' -Message "Latest actions/checkout release is $($Release.tag_name), published $($Published.ToString('yyyy-MM-dd'))."
+    }
+    catch {
+        Add-Result -Area 'Checkout' -Status 'Info' -Message "Could not read the latest actions/checkout release: $($_.Exception.Message)"
+    }
 }
 finally {
     Remove-Item -LiteralPath $TempRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -807,6 +823,7 @@ finally {
 $All = $Results.ToArray()
 $Failed = @($All | Where-Object { $_.Status -eq 'Fail' })
 $Warned = @($All | Where-Object { $_.Status -eq 'Warn' })
+$Infos = @($All | Where-Object { $_.Status -eq 'Info' })
 
 Write-Host ''
 Write-Host ('-' * 78) -ForegroundColor DarkGray
@@ -834,6 +851,11 @@ else {
     }
 }
 
+foreach ($Item in $Infos) {
+    Write-Host ''
+    Write-Host "Info - $($Item.Area): $($Item.Message)" -ForegroundColor Cyan
+}
+
 Write-Host ''
 Write-Host ("$($Failed.Count) failure(s), $($Warned.Count) warning(s), $($All.Count) check(s) total.") -ForegroundColor DarkGray
 
@@ -843,6 +865,7 @@ if ($env:GITHUB_ACTIONS -eq 'true') {
     $EscapeData = { param($Text) "$Text".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A') }
     $EscapeProperty = { param($Text) (& $EscapeData $Text).Replace(':', '%3A').Replace(',', '%2C') }
     foreach ($Item in @($All | Where-Object { $_.Status -ne 'Pass' })) {
+        if ($Item.Status -eq 'Info') { continue }
         $Level = if ($Item.Status -eq 'Fail') { 'error' } else { 'warning' }
         $Body = if ($Item.Action) { "$($Item.Message) $($Item.Action)" } else { $Item.Message }
         Write-Output "::$Level title=$(& $EscapeProperty $Item.Area)::$(& $EscapeData $Body)"
@@ -864,6 +887,10 @@ if ($env:GITHUB_ACTIONS -eq 'true') {
             [void]$Md.AppendLine("| $(& $EscapeCell $_.Name) | $Worst |")
         }
         [void]$Md.AppendLine('')
+        foreach ($Item in $Infos) {
+            [void]$Md.AppendLine("Info: $(& $EscapeCell $Item.Message)")
+            [void]$Md.AppendLine('')
+        }
         if ($Actions.Count -eq 0) {
             [void]$Md.AppendLine('Nothing in Windows-ISO-Updater.ps1 needs updating.')
         }
