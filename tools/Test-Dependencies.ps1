@@ -831,6 +831,49 @@ else {
 Write-Host ''
 Write-Host ("$($Failed.Count) failure(s), $($Warned.Count) warning(s), $($All.Count) check(s) total.") -ForegroundColor DarkGray
 
+# On GitHub Actions the same findings go to the run page, so a new hash or a broken link is readable without opening the log.
+if ($env:GITHUB_ACTIONS -eq 'true') {
+    # Workflow commands treat these characters as syntax, so they are percent-encoded per GitHub's rules.
+    $EscapeData = { param($Text) "$Text".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A') }
+    $EscapeProperty = { param($Text) (& $EscapeData $Text).Replace(':', '%3A').Replace(',', '%2C') }
+    foreach ($Item in @($All | Where-Object { $_.Status -ne 'Pass' })) {
+        $Level = if ($Item.Status -eq 'Fail') { 'error' } else { 'warning' }
+        $Body = if ($Item.Action) { "$($Item.Message) $($Item.Action)" } else { $Item.Message }
+        Write-Output "::$Level title=$(& $EscapeProperty $Item.Area)::$(& $EscapeData $Body)"
+    }
+
+    if ($env:GITHUB_STEP_SUMMARY) {
+        $EscapeCell = { param($Text) "$Text".Replace('|', '\|').Replace("`r", ' ').Replace("`n", ' ') }
+        $Md = New-Object System.Text.StringBuilder
+        [void]$Md.AppendLine('## Dependency check')
+        [void]$Md.AppendLine('')
+        [void]$Md.AppendLine("$($Failed.Count) failure(s), $($Warned.Count) warning(s), $($All.Count) check(s) total.")
+        [void]$Md.AppendLine('')
+        [void]$Md.AppendLine('| Area | Result |')
+        [void]$Md.AppendLine('| --- | --- |')
+        $All | Group-Object Area | ForEach-Object {
+            $Worst = if (@($_.Group | Where-Object { $_.Status -eq 'Fail' }).Count -gt 0) { 'Fail' }
+            elseif (@($_.Group | Where-Object { $_.Status -eq 'Warn' }).Count -gt 0) { 'Warn' }
+            else { 'Pass' }
+            [void]$Md.AppendLine("| $(& $EscapeCell $_.Name) | $Worst |")
+        }
+        [void]$Md.AppendLine('')
+        if ($Actions.Count -eq 0) {
+            [void]$Md.AppendLine('Nothing in Windows-ISO-Updater.ps1 needs updating.')
+        }
+        else {
+            [void]$Md.AppendLine('### What needs updating')
+            [void]$Md.AppendLine('')
+            foreach ($Item in $Actions) {
+                [void]$Md.AppendLine("- **$($Item.Status): $(& $EscapeCell $Item.Area)** $(& $EscapeCell $Item.Message)")
+                [void]$Md.AppendLine("  $(& $EscapeCell $Item.Action)")
+            }
+        }
+        # No BOM, which Windows PowerShell's UTF8 encoding would otherwise put at the top of the summary.
+        [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, $Md.ToString(), (New-Object System.Text.UTF8Encoding $false))
+    }
+}
+
 if ($Failed.Count -gt 0) { exit 1 }
 if ($Warned.Count -gt 0) { exit 2 }
 exit 0

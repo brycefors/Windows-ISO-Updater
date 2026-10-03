@@ -44,9 +44,6 @@ jobs:
           $TestArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '.\tools\Test-Dependencies.ps1', '-CatalogQuery', $env:CATALOG_QUERY)
           if ($env:DEEP -eq 'true') { $TestArgs += '-Deep' }
           powershell.exe @TestArgs
-          $Code = $LASTEXITCODE
-          if ($Code -eq 2) {
-              Write-Output '::warning title=Test-Dependencies::Warnings only. Read the log, nothing is known to be broken.'
-              exit 0
-          }
-          exit $Code
+          # Warnings are already annotated by the tester, so only a failure turns the run red.
+          if ($LASTEXITCODE -eq 2) { exit 0 }
+          exit $LASTEXITCODE
