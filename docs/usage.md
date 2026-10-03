@@ -1,4 +1,4 @@
-[← Back to the README](../README.md)
+[← Back to README](../README.md)
 
 # How to Run This Script
 
