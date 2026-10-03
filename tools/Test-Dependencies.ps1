@@ -808,7 +808,47 @@ try {
         if ($env:GITHUB_TOKEN) { $ApiHeaders['Authorization'] = "Bearer $env:GITHUB_TOKEN" }
         $Release = Invoke-RestMethod -Uri 'https://api.github.com/repos/actions/checkout/releases/latest' -Headers $ApiHeaders -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop
         $Published = [DateTimeOffset]::Parse("$($Release.published_at)", [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
-        Add-Result -Area 'Checkout' -Status 'Info' -Message "Latest actions/checkout release is $($Release.tag_name), published $($Published.ToString('yyyy-MM-dd'))."
+        $Tag = "$($Release.tag_name)"
+        Add-Result -Area 'Checkout' -Status 'Info' -Message "Latest actions/checkout release is $Tag, published $($Published.ToString('yyyy-MM-dd'))."
+
+        $WorkflowDir = Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath '.github\workflows'
+        $Pins = @()
+        if (Test-Path -LiteralPath $WorkflowDir) {
+            foreach ($Wf in @(Get-ChildItem -LiteralPath $WorkflowDir -File | Where-Object { $_.Extension -in '.yml', '.yaml' })) {
+                foreach ($M in [regex]::Matches((Get-Content -LiteralPath $Wf.FullName -Raw), '(?m)^\s*-?\s*uses:\s*actions/checkout@([0-9a-fA-F]{40})[ \t]*(?:#[ \t]*(\S+))?')) {
+                    $Pins += [pscustomobject]@{ File = $Wf.Name; Sha = $M.Groups[1].Value.ToLowerInvariant(); Version = $M.Groups[2].Value }
+                }
+            }
+        }
+
+        if ($Pins.Count -eq 0) {
+            Add-Result -Area 'Checkout' -Status 'Info' -Message 'No SHA-pinned actions/checkout reference found in .github/workflows.'
+        }
+        else {
+            # Annotated tags point at a tag object, so dereference until the object is a commit.
+            $RefUri = "https://api.github.com/repos/actions/checkout/git/ref/tags/$([uri]::EscapeDataString($Tag))"
+            $Obj = (Invoke-RestMethod -Uri $RefUri -Headers $ApiHeaders -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop).object
+            $Hops = 0
+            while ($Obj.type -eq 'tag' -and $Hops -lt 5) {
+                $Obj = (Invoke-RestMethod -Uri $Obj.url -Headers $ApiHeaders -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop).object
+                $Hops++
+            }
+            if ($Obj.type -ne 'commit' -or "$($Obj.sha)" -notmatch '^[0-9a-fA-F]{40}$') {
+                Add-Result -Area 'Checkout' -Status 'Info' -Message "Could not resolve $Tag to a commit SHA (got object type '$($Obj.type)')."
+            }
+            else {
+                $NewSha = "$($Obj.sha)".ToLowerInvariant()
+                foreach ($Pin in $Pins) {
+                    $Label = if ($Pin.Version) { "$($Pin.Version) ($($Pin.Sha))" } else { $Pin.Sha }
+                    if ($Pin.Sha -eq $NewSha) {
+                        Add-Result -Area 'Checkout' -Status 'Info' -Message "$($Pin.File): actions/checkout is up to date at $Tag."
+                    }
+                    else {
+                        Add-Result -Area 'Checkout' -Status 'Info' -Message "$($Pin.File): actions/checkout is pinned to $Label, behind latest $Tag." -Action "Replace the pin with: uses: actions/checkout@$NewSha # $Tag"
+                    }
+                }
+            }
+        }
     }
     catch {
         Add-Result -Area 'Checkout' -Status 'Info' -Message "Could not read the latest actions/checkout release: $($_.Exception.Message)"
