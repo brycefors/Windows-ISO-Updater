@@ -1,5 +1,5 @@
-# pip install -r requirements-docs.txt
-# then: mkdocs serve
+# From the repo root: pip install -r mkdocs/requirements-docs.txt
+# then: mkdocs serve -f mkdocs/mkdocs.yml
 site_name: Windows ISO Updater
 site_description: Download, service and rebuild an up-to-date Windows ISO with DISM and oscdimg.
 site_url: https://brycefors.github.io/Windows-ISO-Updater/
@@ -7,9 +7,10 @@ repo_url: https://github.com/brycefors/Windows-ISO-Updater
 repo_name: brycefors/Windows-ISO-Updater
 
 # Rooted at the repo so README.md is the home page and its docs/ links resolve unchanged.
-docs_dir: .
-site_dir: site
+docs_dir: ..
+site_dir: ../site
 exclude_docs: |
+  /mkdocs/
   /site/
   /tools/
 
