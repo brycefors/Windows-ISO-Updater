@@ -51,7 +51,12 @@ pre {
   --md-primary-bg-color--light: #ffffffb3;
   --md-default-bg-color: #202020;
   --md-default-bg-color--light: #202020b3;
+  /* Fluent dark text fills, since Material's translucent greys read as dim on #202020 */
+  --md-default-fg-color: #ffffff;
+  --md-default-fg-color--light: #ffffffc5;
+  --md-default-fg-color--lighter: #ffffff87;
   --md-default-fg-color--lightest: #ffffff1f;
+  --md-typeset-color: #ffffff;
   --md-typeset-a-color: #60cdff;
   --md-code-bg-color: #2b2b2b;
   --md-footer-bg-color: #1c1c1c;
