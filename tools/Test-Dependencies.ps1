@@ -47,7 +47,7 @@ param(
     [switch]$Deep,
 
     [Parameter(HelpMessage = 'Catalog search to test the Update Catalog parsing with. Defaults to the current client cumulative update')]
-    [string]$CatalogQuery = 'Cumulative Update for Windows 11 Version 25H2 x64',
+    [string]$CatalogQuery = 'Cumulative Update for Windows 11 Version 26H2 x64',
 
     [Parameter(HelpMessage = 'Seconds to wait on any single web request')]
     [ValidateRange(5, 600)]
@@ -79,7 +79,7 @@ $Results = New-Object System.Collections.Generic.List[object]
 function Add-Result {
     param(
         [Parameter(Mandatory)][string]$Area,
-        [Parameter(Mandatory)][ValidateSet('Pass', 'Warn', 'Fail')][string]$Status,
+        [Parameter(Mandatory)][ValidateSet('Pass', 'Warn', 'Fail', 'Info')][string]$Status,
         [Parameter(Mandatory)][string]$Message,
         [string]$Action
     )
@@ -92,7 +92,7 @@ function Add-Result {
         })
 
     if ($Quiet) { return }
-    $Color = switch ($Status) { 'Pass' { 'Green' } 'Warn' { 'Yellow' } default { 'Red' } }
+    $Color = switch ($Status) { 'Pass' { 'Green' } 'Warn' { 'Yellow' } 'Info' { 'Cyan' } default { 'Red' } }
     Write-Host ('  [{0}] {1}' -f $Status.ToUpper(), $Message) -ForegroundColor $Color
 }
 
@@ -634,43 +634,49 @@ try {
 
     Write-Section 'Published script on GitHub'
 
-    $RawUrl = $null
-    try {
-        $RemoteUrl = & git -C (Split-Path -Parent $ScriptPath) remote get-url origin 2>&1
-        if ($LASTEXITCODE -eq 0 -and "$RemoteUrl" -match '(?i)github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$') {
-            $Slug = $Matches[1]
-            $RawUrl = "https://raw.githubusercontent.com/$Slug/refs/heads/main/$(Split-Path -Leaf $ScriptPath)"
-        }
-    }
-    catch { }
-
-    if (-not $RawUrl) {
-        Add-Result -Area 'Published' -Status 'Warn' -Message 'Could not derive the GitHub raw URL from the git remote. Skipping the published-script check.' -Action 'Run this tester from inside a git repository whose origin points at GitHub.'
+    # Anywhere else the working copy is expected to differ from main, so the comparison would only ever warn.
+    if ($env:GITHUB_ACTIONS -ne 'true' -or $env:GITHUB_REF -ne 'refs/heads/main') {
+        Write-Detail 'Skipped. This check only runs in GitHub Actions on the main branch.'
     }
     else {
-        Write-Detail $RawUrl
+        $RawUrl = $null
         try {
-            $Published = (Invoke-WebRequest -Uri $RawUrl -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop).Content
-            $RemoteErrors = $null
-            [System.Management.Automation.Language.Parser]::ParseInput($Published, [ref]$null, [ref]$RemoteErrors) | Out-Null
-            if ($RemoteErrors -and $RemoteErrors.Count -gt 0) {
-                Add-Result -Area 'Published' -Status 'Fail' -Message "The published script has $($RemoteErrors.Count) parse error(s)." -Action 'A broken script is on the main branch. Push a fix.'
-            }
-            else {
-                $RemoteVersion = if ($Published -match "(?m)^\s*\`$ScriptVersion\s*=\s*'([\d.]+)'") { $Matches[1] } else { 'unknown' }
-                $LocalContent  = Get-Content -LiteralPath $ScriptPath -Raw
-                $LocalVersion  = if ($LocalContent -match "(?m)^\s*\`$ScriptVersion\s*=\s*'([\d.]+)'") { $Matches[1] } else { 'unknown' }
-                Write-Detail "published $RemoteVersion / local $LocalVersion"
-                if ($RemoteVersion -eq $LocalVersion) {
-                    Add-Result -Area 'Published' -Status 'Pass' -Message "The published script parses cleanly and matches this working copy (version $LocalVersion)."
-                }
-                else {
-                    Add-Result -Area 'Published' -Status 'Warn' -Message "The published script is version $RemoteVersion, this working copy is $LocalVersion." -Action 'Expected while you have unpushed work. Push when you are done so the published version stays current.'
-                }
+            $RemoteUrl = & git -C (Split-Path -Parent $ScriptPath) remote get-url origin 2>&1
+            if ($LASTEXITCODE -eq 0 -and "$RemoteUrl" -match '(?i)github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$') {
+                $Slug = $Matches[1]
+                $RawUrl = "https://raw.githubusercontent.com/$Slug/refs/heads/main/$(Split-Path -Leaf $ScriptPath)"
             }
         }
-        catch {
-            Add-Result -Area 'Published' -Status 'Fail' -Message "Could not fetch the published script: $($_.Exception.Message)" -Action 'Check the repository visibility and that the main branch exists.'
+        catch { }
+
+        if (-not $RawUrl) {
+            Add-Result -Area 'Published' -Status 'Warn' -Message 'Could not derive the GitHub raw URL from the git remote. Skipping the published-script check.' -Action 'Run this tester from inside a git repository whose origin points at GitHub.'
+        }
+        else {
+            Write-Detail $RawUrl
+            try {
+                $Published = (Invoke-WebRequest -Uri $RawUrl -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop).Content
+                $RemoteErrors = $null
+                [System.Management.Automation.Language.Parser]::ParseInput($Published, [ref]$null, [ref]$RemoteErrors) | Out-Null
+                if ($RemoteErrors -and $RemoteErrors.Count -gt 0) {
+                    Add-Result -Area 'Published' -Status 'Fail' -Message "The published script has $($RemoteErrors.Count) parse error(s)." -Action 'A broken script is on the main branch. Push a fix.'
+                }
+                else {
+                    $RemoteVersion = if ($Published -match "(?m)^\s*\`$ScriptVersion\s*=\s*'([\d.]+)'") { $Matches[1] } else { 'unknown' }
+                    $LocalContent  = Get-Content -LiteralPath $ScriptPath -Raw
+                    $LocalVersion  = if ($LocalContent -match "(?m)^\s*\`$ScriptVersion\s*=\s*'([\d.]+)'") { $Matches[1] } else { 'unknown' }
+                    Write-Detail "published $RemoteVersion / local $LocalVersion"
+                    if ($RemoteVersion -eq $LocalVersion) {
+                        Add-Result -Area 'Published' -Status 'Pass' -Message "The published script parses cleanly and matches this working copy (version $LocalVersion)."
+                    }
+                    else {
+                        Add-Result -Area 'Published' -Status 'Warn' -Message "The published script is version $RemoteVersion, this working copy is $LocalVersion." -Action 'Expected while you have unpushed work. Push when you are done so the published version stays current.'
+                    }
+                }
+            }
+            catch {
+                Add-Result -Area 'Published' -Status 'Fail' -Message "Could not fetch the published script: $($_.Exception.Message)" -Action 'Check the repository visibility and that the main branch exists.'
+            }
         }
     }
 
@@ -791,6 +797,62 @@ try {
             }
         }
     }
+
+    # --- actions/checkout (informational) ---
+
+    Write-Section 'actions/checkout (informational)'
+
+    # Informational only: the workflow pins a commit SHA, so a newer release is a prompt to review, never a defect.
+    try {
+        $ApiHeaders = @{ 'User-Agent' = 'Windows-ISO-Updater-DepCheck'; Accept = 'application/vnd.github+json' }
+        if ($env:GITHUB_TOKEN) { $ApiHeaders['Authorization'] = "Bearer $env:GITHUB_TOKEN" }
+        $Release = Invoke-RestMethod -Uri 'https://api.github.com/repos/actions/checkout/releases/latest' -Headers $ApiHeaders -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop
+        $Published = [DateTimeOffset]::Parse("$($Release.published_at)", [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+        $Tag = "$($Release.tag_name)"
+        Add-Result -Area 'Checkout' -Status 'Info' -Message "Latest actions/checkout release is $Tag, published $($Published.ToString('yyyy-MM-dd'))."
+
+        $WorkflowDir = Join-Path -Path (Split-Path -Parent $PSScriptRoot) -ChildPath '.github\workflows'
+        $Pins = @()
+        if (Test-Path -LiteralPath $WorkflowDir) {
+            foreach ($Wf in @(Get-ChildItem -LiteralPath $WorkflowDir -File | Where-Object { $_.Extension -in '.yml', '.yaml' })) {
+                foreach ($M in [regex]::Matches((Get-Content -LiteralPath $Wf.FullName -Raw), '(?m)^\s*-?\s*uses:\s*actions/checkout@([0-9a-fA-F]{40})[ \t]*(?:#[ \t]*(\S+))?')) {
+                    $Pins += [pscustomobject]@{ File = $Wf.Name; Sha = $M.Groups[1].Value.ToLowerInvariant(); Version = $M.Groups[2].Value }
+                }
+            }
+        }
+
+        if ($Pins.Count -eq 0) {
+            Add-Result -Area 'Checkout' -Status 'Info' -Message 'No SHA-pinned actions/checkout reference found in .github/workflows.'
+        }
+        else {
+            # Annotated tags point at a tag object, so dereference until the object is a commit.
+            $RefUri = "https://api.github.com/repos/actions/checkout/git/ref/tags/$([uri]::EscapeDataString($Tag))"
+            $Obj = (Invoke-RestMethod -Uri $RefUri -Headers $ApiHeaders -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop).object
+            $Hops = 0
+            while ($Obj.type -eq 'tag' -and $Hops -lt 5) {
+                $Obj = (Invoke-RestMethod -Uri $Obj.url -Headers $ApiHeaders -TimeoutSec $TimeoutSec -UseBasicParsing -ErrorAction Stop).object
+                $Hops++
+            }
+            if ($Obj.type -ne 'commit' -or "$($Obj.sha)" -notmatch '^[0-9a-fA-F]{40}$') {
+                Add-Result -Area 'Checkout' -Status 'Info' -Message "Could not resolve $Tag to a commit SHA (got object type '$($Obj.type)')."
+            }
+            else {
+                $NewSha = "$($Obj.sha)".ToLowerInvariant()
+                foreach ($Pin in $Pins) {
+                    $Label = if ($Pin.Version) { "$($Pin.Version) ($($Pin.Sha))" } else { $Pin.Sha }
+                    if ($Pin.Sha -eq $NewSha) {
+                        Add-Result -Area 'Checkout' -Status 'Info' -Message "$($Pin.File): actions/checkout is up to date at $Tag."
+                    }
+                    else {
+                        Add-Result -Area 'Checkout' -Status 'Info' -Message "$($Pin.File): actions/checkout is pinned to $Label, behind latest $Tag." -Action "Replace the pin with: uses: actions/checkout@$NewSha # $Tag"
+                    }
+                }
+            }
+        }
+    }
+    catch {
+        Add-Result -Area 'Checkout' -Status 'Info' -Message "Could not read the latest actions/checkout release: $($_.Exception.Message)"
+    }
 }
 finally {
     Remove-Item -LiteralPath $TempRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -801,6 +863,7 @@ finally {
 $All = $Results.ToArray()
 $Failed = @($All | Where-Object { $_.Status -eq 'Fail' })
 $Warned = @($All | Where-Object { $_.Status -eq 'Warn' })
+$Infos = @($All | Where-Object { $_.Status -eq 'Info' })
 
 Write-Host ''
 Write-Host ('-' * 78) -ForegroundColor DarkGray
@@ -828,8 +891,61 @@ else {
     }
 }
 
+foreach ($Item in $Infos) {
+    Write-Host ''
+    Write-Host "Info - $($Item.Area): $($Item.Message)" -ForegroundColor Cyan
+}
+
 Write-Host ''
 Write-Host ("$($Failed.Count) failure(s), $($Warned.Count) warning(s), $($All.Count) check(s) total.") -ForegroundColor DarkGray
+
+# On GitHub Actions the same findings go to the run page, so a new hash or a broken link is readable without opening the log.
+if ($env:GITHUB_ACTIONS -eq 'true') {
+    # Workflow commands treat these characters as syntax, so they are percent-encoded per GitHub's rules.
+    $EscapeData = { param($Text) "$Text".Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A') }
+    $EscapeProperty = { param($Text) (& $EscapeData $Text).Replace(':', '%3A').Replace(',', '%2C') }
+    foreach ($Item in @($All | Where-Object { $_.Status -ne 'Pass' })) {
+        if ($Item.Status -eq 'Info') { continue }
+        $Level = if ($Item.Status -eq 'Fail') { 'error' } else { 'warning' }
+        $Body = if ($Item.Action) { "$($Item.Message) $($Item.Action)" } else { $Item.Message }
+        Write-Output "::$Level title=$(& $EscapeProperty $Item.Area)::$(& $EscapeData $Body)"
+    }
+
+    if ($env:GITHUB_STEP_SUMMARY) {
+        $EscapeCell = { param($Text) "$Text".Replace('|', '\|').Replace("`r", ' ').Replace("`n", ' ') }
+        $Md = New-Object System.Text.StringBuilder
+        [void]$Md.AppendLine('## Dependency check')
+        [void]$Md.AppendLine('')
+        [void]$Md.AppendLine("$($Failed.Count) failure(s), $($Warned.Count) warning(s), $($All.Count) check(s) total.")
+        [void]$Md.AppendLine('')
+        [void]$Md.AppendLine('| Area | Result |')
+        [void]$Md.AppendLine('| --- | --- |')
+        $All | Group-Object Area | ForEach-Object {
+            $Worst = if (@($_.Group | Where-Object { $_.Status -eq 'Fail' }).Count -gt 0) { 'Fail' }
+            elseif (@($_.Group | Where-Object { $_.Status -eq 'Warn' }).Count -gt 0) { 'Warn' }
+            else { 'Pass' }
+            [void]$Md.AppendLine("| $(& $EscapeCell $_.Name) | $Worst |")
+        }
+        [void]$Md.AppendLine('')
+        foreach ($Item in $Infos) {
+            [void]$Md.AppendLine("Info: $(& $EscapeCell $Item.Message)")
+            [void]$Md.AppendLine('')
+        }
+        if ($Actions.Count -eq 0) {
+            [void]$Md.AppendLine('Nothing in Windows-ISO-Updater.ps1 needs updating.')
+        }
+        else {
+            [void]$Md.AppendLine('### What needs updating')
+            [void]$Md.AppendLine('')
+            foreach ($Item in $Actions) {
+                [void]$Md.AppendLine("- **$($Item.Status): $(& $EscapeCell $Item.Area)** $(& $EscapeCell $Item.Message)")
+                [void]$Md.AppendLine("  $(& $EscapeCell $Item.Action)")
+            }
+        }
+        # No BOM, which Windows PowerShell's UTF8 encoding would otherwise put at the top of the summary.
+        [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, $Md.ToString(), (New-Object System.Text.UTF8Encoding $false))
+    }
+}
 
 if ($Failed.Count -gt 0) { exit 1 }
 if ($Warned.Count -gt 0) { exit 2 }

@@ -1,0 +1,56 @@
+name: Dependency check
+
+# run-name has no date function or date context, so scheduled runs rely on the timestamp the Actions UI already shows.
+run-name: "${{ github.event_name == 'schedule' && 'Scheduled run' || format('Dependency check ({0} by {1})', github.event_name, github.actor) }}"
+
+on:
+  schedule:
+    # Cron is UTC only, so these are 08:00 Pacific during daylight time and 07:00 in winter.
+    # Days 2-31 so the 1st gets only the deep run, not both.
+    - cron: '0 15 2-31 * *'
+    # The deep run also downloads the MCT and ADK installers to check their signatures. Matched by text below.
+    - cron: '0 15 1 * *'
+  workflow_dispatch:
+    inputs:
+      catalogQuery:
+        description: 'Catalog search used to test update title matching'
+        required: false
+        default: 'Cumulative Update for Windows 11 Version 26H2 x64'
+      deep:
+        description: 'Also download the MCT and ADK installers and verify their signatures'
+        type: boolean
+        default: false
+  push:
+    paths:
+      - 'Windows-ISO-Updater.ps1'
+      - 'tools/Test-Dependencies.ps1'
+      - '.github/workflows/dependency-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test-dependencies:
+    # Schedules run from the default branch, so this only matters if the default branch is ever changed from main.
+    if: github.event_name != 'schedule' || github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Windows PowerShell 5.1, the edition the script targets, rather than the runner's pwsh 7.
+      - name: Run Test-Dependencies
+        shell: powershell
+        # Passed through the environment, never spliced into the script, so a typed input cannot inject commands.
+        env:
+          # Lets the informational actions/checkout release lookup avoid the shared-IP anonymous API rate limit.
+          GITHUB_TOKEN: ${{ github.token }}
+          CATALOG_QUERY: ${{ inputs.catalogQuery || 'Cumulative Update for Windows 11 Version 26H2 x64' }}
+          DEEP: ${{ github.event.schedule == '0 15 1 * *' || inputs.deep == true }}
+        run: |
+          $TestArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '.\tools\Test-Dependencies.ps1', '-CatalogQuery', $env:CATALOG_QUERY)
+          if ($env:DEEP -eq 'true') { $TestArgs += '-Deep' }
+          powershell.exe @TestArgs
+          # Warnings are already annotated by the tester, so only a failure turns the run red.
+          if ($LASTEXITCODE -eq 2) { exit 0 }
+          exit $LASTEXITCODE

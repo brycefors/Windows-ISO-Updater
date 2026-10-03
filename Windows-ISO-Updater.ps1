@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.09.29.4   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.10.02.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -48,6 +48,7 @@
 #      the media, reporting anything it replaces. A \WISO-Build folder is also written onto the media (turn it
 #      off with -SkipTattoo) recording what the ISO was made from, which updates applied or failed, what
 #      was kept and stripped, who built it and when, plus a copy of the script that built it.
+#      -AnonymousTattoo leaves the machine, user and local paths out of it, for media handed to others.
 #   7. Records a "stamp" of the finished build (the source ISO's hash, the updates that went in, the
 #      parameters used and the ISO that came out) and keeps a history of them. The next run compares
 #      itself with that stamp first and exits in a minute or two when nothing has changed, which is what
@@ -158,6 +159,9 @@ param(
 
     [Parameter(HelpMessage = 'Do not tattoo the finished ISO. By default a \WISO-Build folder is added to the media recording what this build was made from, which updates applied or failed, what was kept and stripped, who built it and when, plus a copy of the script that made it')]
     [switch]$SkipTattoo,
+
+    [Parameter(HelpMessage = 'Leave the build machine name, user name, script path, command line and log path out of the \WISO-Build record, and reduce the -DriverPath, -ExtraFilesPath and -UpdatePath folders to their last component. Use it for media you hand to other people')]
+    [switch]$AnonymousTattoo,
 
     [Parameter(HelpMessage = 'Directory to download the ISO/updates into. Defaults to a Downloads folder inside the working folder. Needs several GB free')]
     [string]$DownloadPath,
@@ -294,7 +298,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.09.29.4'
+$ScriptVersion = '2026.10.02.2'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -482,6 +486,10 @@ $script:WinReCacheHash = $null
 $script:WinReVersions = New-Object System.Collections.Generic.List[psobject]
 # Keyed on WIM path and index, because reading a build costs a read-only mount and more than one caller wants it.
 $script:WimBuildCache = @{}
+# Each serviced edition's build, read while it is mounted, so the tattoo shows an edition whose LCU failed.
+$script:EditionBuilds = New-Object System.Collections.Generic.List[object]
+# Catalog titles by role, filled beside the KB tags because only the title names the product unambiguously.
+$script:CatalogTitles = @{}
 # The -DriverPath set, resolved once during validation and reused by every image the run services.
 $script:DriverInfFiles = @()
 $script:DriverHash     = $null
@@ -1843,10 +1851,21 @@ function Format-Json {
     for ($i = 0; $i -lt $Json.Length; $i++) {
         $Char = $Json[$i]
         if ($InString) {
-            [void]$Builder.Append($Char)
             # A backslash escapes whatever follows, so consume that before looking for the closing quote.
-            if ($Char -eq '\' -and $i + 1 -lt $Json.Length) { [void]$Builder.Append($Json[++$i]) }
-            elseif ($Char -eq '"') { $InString = $false }
+            if ($Char -eq '\' -and $i + 1 -lt $Json.Length) {
+                # 5.1 writes < > & and ' as \u00XX, which is valid JSON but unreadable in a file meant for people.
+                $Hex = if ($Json[$i + 1] -eq 'u' -and $i + 5 -lt $Json.Length) { $Json.Substring($i + 2, 4) } else { '' }
+                if ($Hex -in '003c', '003e', '0026', '0027') {
+                    [void]$Builder.Append([char][Convert]::ToInt32($Hex, 16))
+                    $i += 5
+                    continue
+                }
+                [void]$Builder.Append($Char)
+                [void]$Builder.Append($Json[++$i])
+                continue
+            }
+            [void]$Builder.Append($Char)
+            if ($Char -eq '"') { $InString = $false }
             continue
         }
         if ($Char -eq '"') { $InString = $true; [void]$Builder.Append($Char); continue }
@@ -2035,6 +2054,7 @@ function Get-ExpectedUpdateSet {
     $Include = '(?i)cumulative update (preview )?for (windows|microsoft server operating system)'
     $Exclude = '(?i)\.net|dynamic update'
     $Set = New-Object System.Collections.Generic.List[string]
+    $script:CatalogTitles = @{}
 
     # Same queries (including the broader fallback) the download step uses, so the two always agree.
     $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $Product for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude -AllowPreview:$IncludePreview
@@ -2042,6 +2062,7 @@ function Get-ExpectedUpdateSet {
         $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $(Get-CatalogProductQuery) for $CatalogArch-based Systems" -TitleInclude $Include -TitleExclude $Exclude -AllowPreview:$IncludePreview
     }
     if (-not $Lcu) { return $null }
+    $script:CatalogTitles['LCU'] = $Lcu.Title
     if ($BaselineOnly -and $Lcu.LastUpdated) {
         $LcuRaw = Search-UpdateCatalog -Query "Cumulative Update for $Product for $CatalogArch-based Systems"
         if ($LcuRaw -and (Test-IsHotpatchMonth -AllResults $LcuRaw -ReferenceDate ([datetime]$Lcu.LastUpdated))) {
@@ -2056,6 +2077,7 @@ function Get-ExpectedUpdateSet {
     if (-not $SkipDotNet) {
         $DotNet = Get-CatalogLatestEntry -Query "Cumulative Update for .NET Framework $Product for $CatalogArch" -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update' -AllowPreview:$IncludePreview
         $Set.Add("DotNet=$(Get-CatalogEntryTag -Entry $DotNet)")
+        if ($DotNet) { $script:CatalogTitles['DotNet'] = $DotNet.Title }
     }
     if (-not $SkipSetupDU) {
         # Bounds the Setup Dynamic Update by the LCU's own date so a stamp comparison always agrees with
@@ -2064,6 +2086,7 @@ function Get-ExpectedUpdateSet {
         if ($Lcu.LastUpdated) { $SetupDuArgs.NotAfter = $Lcu.LastUpdated }
         $SetupDu = Get-CatalogLatestEntry @SetupDuArgs
         $Set.Add("SetupDU=$(Get-CatalogEntryTag -Entry $SetupDu)")
+        if ($SetupDu) { $script:CatalogTitles['SetupDU'] = $SetupDu.Title }
     }
     if (-not $SkipWinRE) {
         # Server media labels the Safe OS package plain "Dynamic Update", so the Setup one is excluded by
@@ -2074,6 +2097,7 @@ function Get-ExpectedUpdateSet {
         if ($Lcu.LastUpdated) { $SafeOsArgs.NotAfter = $Lcu.LastUpdated }
         $SafeOs = Get-CatalogLatestEntry @SafeOsArgs
         $Set.Add("SafeOS=$(Get-CatalogEntryTag -Entry $SafeOs)")
+        if ($SafeOs) { $script:CatalogTitles['SafeOS'] = $SafeOs.Title }
     }
     return @($Set)
 }
@@ -3242,10 +3266,14 @@ function Add-ServicingResult {
         [string]$Image,
         [string]$Package,
         [string]$Result,
-        [string]$Detail
+        [string]$Detail,
+        [string[]]$Checkpoints
     )
     if (-not $Image) { return }
+    # Updates.Packages already lists each file, so a record names the KB and the two join on it.
+    if ($Package -match '(?i)kb(\d{6,}).*\.(msu|cab)$') { $Package = "KB$($Matches[1])" }
     $Record = [ordered]@{ Image = $Image; Package = $Package; Result = $Result }
+    if ($Checkpoints) { $Record['Checkpoints'] = @($Checkpoints) }
     if ($Detail) { $Record['Detail'] = $Detail }
     $script:TattooServicing.Add($Record)
 }
@@ -3262,6 +3290,14 @@ function Add-UpdateGroup {
 
     # The default label says nothing the package name does not, so it stays out of the build record.
     $RecordDetail = if ($Label -eq 'update package') { '' } else { $Label }
+    # DISM reads these from the staging folder without being told, so the record has to say they were there.
+    $Checkpoints = @()
+    if ($Group.Count -gt 1) {
+        $Checkpoints = @($Group[0..($Group.Count - 2)] | ForEach-Object {
+            $Leaf = Split-Path -Leaf "$_"
+            if ($Leaf -match '(?i)kb(\d{6,})') { "KB$($Matches[1])" } else { $Leaf }
+        })
+    }
 
     # Stage the whole group in a clean, isolated folder so DISM sees ONLY these files (no unrelated .msu).
     $Stage = Join-Path -Path $WorkRoot -ChildPath ('pkgstage_' + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -3288,12 +3324,12 @@ function Add-UpdateGroup {
 
             if ($ExitCode -eq 0 -or $ExitCode -eq 3010) {
                 Write-HostTimestamp '      Applied.' -ForegroundColor Green
-                Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Target) -Result 'Applied' -Detail $RecordDetail
+                Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Target) -Result 'Applied' -Detail $RecordDetail -Checkpoints $Checkpoints
                 return $true
             }
             if ($Output -match '0x800f081e') {
                 Write-HostTimestamp '      Already present / not applicable - skipping.' -ForegroundColor DarkGray
-                Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Target) -Result 'Skipped' -Detail 'Already present or not applicable (0x800F081E)'
+                Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Target) -Result 'Skipped' -Detail 'Already present or not applicable (0x800F081E)' -Checkpoints $Checkpoints
                 return $true
             }
 
@@ -3311,13 +3347,13 @@ function Add-UpdateGroup {
             $ExitCode = $LASTEXITCODE
             if ($ExitCode -eq 0 -or $ExitCode -eq 3010) {
                 Write-HostTimestamp '      Applied.' -ForegroundColor Green
-                Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Target) -Result 'Applied' -Detail 'Applied after the servicing stack was brought forward (0x800F0823)'
+                Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Target) -Result 'Applied' -Detail 'Applied after the servicing stack was brought forward (0x800F0823)' -Checkpoints $Checkpoints
                 return $true
             }
         }
 
         Write-HostTimestamp "      This package didn't apply (DISM exit code $ExitCode). Details are in C:\Windows\Logs\DISM\dism.log." -ForegroundColor DarkYellow
-        Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Target) -Result 'Failed' -Detail "DISM /Add-Package returned exit code $ExitCode"
+        Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Target) -Result 'Failed' -Detail "DISM /Add-Package returned exit code $ExitCode" -Checkpoints $Checkpoints
         $Output | Where-Object { $_ -match '(?i)error|0x[0-9a-f]{8}' } | Select-Object -Last 8 | ForEach-Object {
             Write-HostLog "        $_" -ForegroundColor DarkGray
         }
@@ -3338,7 +3374,7 @@ function Add-UpdateGroup {
     }
     catch {
         Write-HostTimestamp "      This package couldn't be staged/applied: $($_.Exception.Message)" -ForegroundColor DarkYellow
-        Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Group[$Group.Count - 1]) -Result 'Failed' -Detail $_.Exception.Message
+        Add-ServicingResult -Image $ImageLabel -Package (Split-Path -Leaf $Group[$Group.Count - 1]) -Result 'Failed' -Detail $_.Exception.Message -Checkpoints $Checkpoints
         return $false
     }
     finally {
@@ -4839,7 +4875,7 @@ $script:SourceMediaDropped = @()
 if (-not (Test-Path -LiteralPath $InstallWimExtracted) -and (Test-Path -LiteralPath $InstallEsdExtracted)) {
     Invoke-Task -Description 'The media uses install.esd - converting it to an editable install.wim...' -ScriptBlock {
         $Images = @(Get-WindowsImage -ImagePath $InstallEsdExtracted -ErrorAction Stop)
-        $script:SourceMediaEditions = @($Images | ForEach-Object { "[$($_.ImageIndex)] $($_.ImageName)" })
+        $script:SourceMediaEditions = @($Images | ForEach-Object { [ordered]@{ Index = [int]$_.ImageIndex; Name = "$($_.ImageName)" } })
         $Wanted = @($Images.ImageIndex)
         if ($KeepEditions -and $KeepEditions.Count -gt 0) {
             $EsdUnmatched = $null
@@ -5312,7 +5348,9 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
 
                 # Grabbed here because the image is already mounted, since mounting the finished image later
                 # just to read this one value costs several minutes.
-                if (-not $script:FinalBuildString) { $script:FinalBuildString = Get-MountedImageBuild -MountPath $MountDir }
+                $EditionBuild = Get-MountedImageBuild -MountPath $MountDir
+                if ($EditionBuild) { $script:EditionBuilds.Add([ordered]@{ Index = [int]$Index; Edition = "$EditionName"; Build = $EditionBuild }) }
+                if (-not $script:FinalBuildString) { $script:FinalBuildString = $EditionBuild }
                 if (-not $script:FinalImageLocale) { $script:FinalImageLocale = Get-MountedImageLocale -MountPath $MountDir }
 
                 Write-HostTimestamp '    Committing and unmounting...'
@@ -5658,7 +5696,8 @@ if (-not $SkipTattoo) {
         # Source indexes, because these are the editions as the ISO shipped them. Re-exporting renumbers
         # whatever survives, which is why the kept list is by name. An install.esd was already trimmed
         # during its conversion, so its pre-trim lists are the only record of what the media carried.
-        $SourceEditions = if ($script:SourceMediaEditions.Count -gt 0) { @($script:SourceMediaEditions) } else { @($InstallImages | ForEach-Object { "[$($_.ImageIndex)] $($_.ImageName)" }) }
+        # Wrapped outside the if, which would otherwise unroll a one-edition list into a bare entry.
+        $SourceEditions = @(if ($script:SourceMediaEditions.Count -gt 0) { $script:SourceMediaEditions } else { $InstallImages | ForEach-Object { [ordered]@{ Index = [int]$_.ImageIndex; Name = "$($_.ImageName)" } } })
         $KeptNames      = @($InstallImages | Where-Object { $KeepIndexes -contains [int]$_.ImageIndex } | ForEach-Object { "$($_.ImageName)" })
         $RemovedNames   = @($script:SourceMediaDropped) + @($InstallImages | Where-Object { $KeepIndexes -notcontains [int]$_.ImageIndex } | ForEach-Object { "$($_.ImageName)" })
         $UnpatchedNames = @($InstallImages | Where-Object { ($KeepIndexes -contains [int]$_.ImageIndex) -and ($ServiceIndexes -notcontains [int]$_.ImageIndex) } | ForEach-Object { "$($_.ImageName)" })
@@ -5667,28 +5706,82 @@ if (-not $SkipTattoo) {
         $WinReApplied   = @($WinReResults | Where-Object { $_.Result -eq 'Applied' }).Count
         $WinReFailed    = @($WinReResults | Where-Object { $_.Result -eq 'Failed' }).Count
         $WinReSkipped   = @($WinReResults | Where-Object { $_.Result -eq 'Skipped' }).Count
-        $WinReServicing =
-            if ($SkipWinRE) { 'winre.wim left as it shipped (-SkipWinRE was used)' }
-            elseif ($SkipUpdates -or $SkipServicing) { 'winre.wim left as it shipped (no updates were integrated)' }
-            elseif ($UpdatePath) { 'winre.wim left as it shipped (-UpdatePath packages are applied to install.wim and boot.wim only)' }
-            elseif ($script:LcuUpToDate) { 'winre.wim left as it shipped, because the media already carries the latest cumulative update' }
-            elseif (-not $SafeOsGroup) { 'winre.wim left as it shipped, because no Safe OS Dynamic Update was available' }
-            elseif ($WinReApplied -gt 0) {
-                "winre.wim serviced with the Safe OS Dynamic Update (KB$($script:SafeOsKb)), then cleaned and re-exported$(if ($WinReFailed -gt 0) { ". It failed for $WinReFailed edition(s), which keep the recovery image they shipped with" })"
+        $WinRe =
+            if ($SkipWinRE) { @{ Status = 'NotServiced'; Reason = '-SkipWinRE was used' } }
+            elseif ($SkipUpdates -or $SkipServicing) { @{ Status = 'NotServiced'; Reason = 'No updates were integrated' } }
+            elseif ($UpdatePath) { @{ Status = 'NotServiced'; Reason = '-UpdatePath packages are applied to install.wim and boot.wim only' } }
+            elseif ($script:LcuUpToDate) { @{ Status = 'NotServiced'; Reason = 'The media already carries the latest cumulative update' } }
+            elseif (-not $SafeOsGroup) { @{ Status = 'NotServiced'; Reason = 'No Safe OS Dynamic Update was available' } }
+            elseif ($WinReApplied -gt 0 -and $WinReFailed -gt 0) { @{ Status = 'PartiallyServiced'; Reason = "Failed for $WinReFailed edition(s), which keep the recovery image they shipped with" } }
+            elseif ($WinReApplied -gt 0) { @{ Status = 'Serviced'; Reason = $null } }
+            elseif ($WinReSkipped -gt 0 -and $WinReFailed -eq 0) { @{ Status = 'AlreadyCurrent'; Reason = 'Already at the build the Safe OS Dynamic Update delivers' } }
+            elseif ($WinReFailed -gt 0) { @{ Status = 'Failed'; Reason = 'The Safe OS Dynamic Update failed to apply' } }
+            else { @{ Status = 'NotServiced'; Reason = $null } }
+
+        $Invariant  = [System.Globalization.CultureInfo]::InvariantCulture
+        $TimeFormat = "yyyy-MM-dd'T'HH:mm:sszzz"
+
+        # The stamp keeps these as Role=KB@date tokens for comparison, which nobody reading the media should have to parse.
+        $CatalogSelection = @(foreach ($Token in @($script:ExpectedUpdateSet | Where-Object { "$_" -match '=' })) {
+            $Role, $Value = "$Token" -split '=', 2
+            if ($Value -match '^KB(\d+)@([\d-]*)$') {
+                [ordered]@{
+                    Role     = $Role
+                    Kb       = "KB$($Matches[1])"
+                    Released = if ($Matches[2]) { $Matches[2] } else { $null }
+                    Title    = $script:CatalogTitles[$Role]
+                }
             }
-            elseif ($WinReSkipped -gt 0 -and $WinReFailed -eq 0) { "winre.wim left as it shipped, because it is already at the build KB$($script:SafeOsKb) delivers" }
-            elseif ($WinReFailed -gt 0) { "winre.wim left as it shipped, because the Safe OS Dynamic Update (KB$($script:SafeOsKb)) failed to apply" }
-            else { 'winre.wim left as it shipped' }
+            else {
+                [ordered]@{ Role = $Role; Kb = $null; Released = $null; Title = $null; Note = $(if ($Value -eq 'none') { 'Not found in the catalog' } else { $Value }) }
+            }
+        })
+
+        # Anything not claimed by one of the catalog roles came from -UpdatePath.
+        $PackageRoles = @{}
+        $LcuFiles = @($script:Lcu | Where-Object { $_ })
+        for ($n = 0; $n -lt $LcuFiles.Count; $n++) {
+            $PackageRoles[(Split-Path -Leaf "$($LcuFiles[$n])")] = if ($n -eq $LcuFiles.Count - 1) { 'LCU' } else { 'Checkpoint' }
+        }
+        $OtherRoles = [ordered]@{ DotNet = $script:DotNet; SetupDU = $script:SetupDu; SafeOS = $script:SafeOs }
+        foreach ($Role in @($OtherRoles.Keys)) {
+            foreach ($File in @($OtherRoles[$Role] | Where-Object { $_ })) { $PackageRoles[(Split-Path -Leaf "$File")] = $Role }
+        }
+        # FromDownloadFolder is left behind on purpose. Only -AutoClean reads it, and only from the stamp.
+        $Packages = @(foreach ($Record in @($script:UpdateFileRecords)) {
+            $FileName = "$($Record.FileName)"
+            [ordered]@{
+                Kb       = if ($Record.Kb) { $Record.Kb } else { $null }
+                Role     = if ($PackageRoles.ContainsKey($FileName)) { $PackageRoles[$FileName] } else { 'Supplied' }
+                FileName = $FileName
+                SizeMB   = $Record.SizeMB
+                Sha256   = $Record.Sha256
+            }
+        })
+
+        # Typed, unlike the strings the stamp hashes, so a script reading this gets real booleans and nulls.
+        $BuildParameters = [ordered]@{}
+        foreach ($ParamName in $script:BuildAffectingParameters) {
+            $ParamValue = Get-Variable -Name $ParamName -ValueOnly -ErrorAction SilentlyContinue
+            $BuildParameters[$ParamName] =
+                if ($ParamValue -is [switch]) { $ParamValue.IsPresent }
+                elseif ($null -eq $ParamValue -or "$ParamValue" -eq '') { $null }
+                elseif ($AnonymousTattoo -and $ParamName -like '*Path') { Split-Path -Leaf "$ParamValue" }
+                elseif ($ParamValue -is [array]) { , @($ParamValue | ForEach-Object { "$_" }) }
+                else { $ParamValue }
+        }
 
         $TattooInfo = [ordered]@{
+            # Bumped whenever a field changes shape. Records written before this field existed are version 1.
+            SchemaVersion = 2
             Build       = [ordered]@{
-                Date          = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss K')
-                DateUtc       = (Get-Date).ToUniversalTime().ToString('o')
+                # The tattoo goes on before oscdimg runs, so this is when the record was written, not when the ISO was.
+                Started       = $script:ScriptStartTime.ToString($TimeFormat, $Invariant)
+                Recorded      = (Get-Date).ToString($TimeFormat, $Invariant)
                 Outcome       = if ($Failed.Count -gt 0 -or [int]$script:ServicingFailures -gt 0) { 'Completed with servicing warnings' } else { 'Completed' }
                 ScriptVersion = $ScriptVersion
                 IsoFileName   = Split-Path -Leaf $OutputIsoPath
                 VolumeLabel   = $IsoVolumeLabel
-                Started       = $script:ScriptStartTime.ToString('yyyy-MM-dd HH:mm:ss')
                 LogFile       = $LogFile
             }
             BuiltBy     = [ordered]@{
@@ -5697,7 +5790,11 @@ if (-not $SkipTattoo) {
                 OperatingSystem = "$($OsInfo.Caption) ($($OsInfo.Version))"
                 PowerShell      = "$($PSVersionTable.PSVersion)"
                 # Reuses the run header's read rather than asking Get-WinSystemLocale a second time.
-                Locale          = "Thread culture $($script:CurrentCulture.Name), UI culture $($script:CurrentUICulture.Name), system locale $($script:SystemLocale)"
+                Locale          = [ordered]@{
+                    ThreadCulture = "$($script:CurrentCulture.Name)"
+                    UICulture     = "$($script:CurrentUICulture.Name)"
+                    SystemLocale  = "$($script:SystemLocale)"
+                }
                 ScriptPath      = $script:ScriptPath
                 CommandLine     = Get-ScriptCommandLine
             }
@@ -5705,46 +5802,52 @@ if (-not $SkipTattoo) {
                 FileName      = if ($SourceItem) { $SourceItem.Name } else { Split-Path -Leaf $ResolvedIso }
                 SizeGB        = if ($SourceItem) { [math]::Round($SourceItem.Length / 1GB, 2) } else { 0 }
                 Sha256        = $script:StampSourceHash
-                Product       = "$($ImageInfo.ProductName)"
                 Version       = $ImageVersionText
                 FeatureUpdate = $FeatureName
                 Architecture  = $ImageArch
-                Language      = if ($script:MediaLanguage) { $script:MediaLanguage } elseif ($script:FinalImageLocale) { "$script:FinalImageLocale (image locale, the media does not record a language)" } else { '' }
-                ImageCreated  = if ($ImageInfo.CreatedTime) { ([datetime]$ImageInfo.CreatedTime).ToString('yyyy-MM-dd') } else { '' }
+                Language      = if ($script:MediaLanguage) { "$script:MediaLanguage" } else { $null }
+                ImageCreated  = if ($ImageInfo.CreatedTime) { ([datetime]$ImageInfo.CreatedTime).ToString('yyyy-MM-dd', $Invariant) } else { $null }
                 Editions      = $SourceEditions
             }
             Contents    = [ordered]@{
-                FinalBuild         = if ($script:FinalBuildString) { $script:FinalBuildString } else { "$ImageVersionText (unchanged)" }
+                FinalBuild         = if ($script:FinalBuildString) { $script:FinalBuildString } else { $ImageVersionText }
+                EditionBuilds      = $script:EditionBuilds.ToArray()
                 # Read from the offline hive while an edition was mounted to service it, since the media's
                 # own language (SourceMedia.Language, above) is only what Setup offers, not what was captured.
-                ImageLocale        = if ($script:FinalImageLocale) { $script:FinalImageLocale } elseif ($script:MediaLanguage) { "$script:MediaLanguage (media language, offline read unavailable)" } else { '' }
+                ImageLocale        = if ($script:FinalImageLocale) { "$script:FinalImageLocale" } else { $null }
                 InstallImage       = Split-Path -Leaf $FinalInstallImage
                 EditionsKept       = $KeptNames
                 EditionsRemoved    = $RemovedNames
                 EditionsNotUpdated = $UnpatchedNames
-                AnswerFile         = if ($ResolvedUnattend) { "autounattend.xml (from $(Split-Path -Leaf $ResolvedUnattend), SHA-256 $(Format-ShortHash $script:UnattendHash))" } else { '' }
+                AnswerFile         = if ($ResolvedUnattend) { [ordered]@{ FileName = 'autounattend.xml'; Source = Split-Path -Leaf $ResolvedUnattend; Sha256 = $script:UnattendHash } } else { $null }
                 RecoveryImage      = [ordered]@{
-                    Servicing = $WinReServicing
+                    Status   = $WinRe.Status
+                    Reason   = $WinRe.Reason
+                    SafeOsKb = if ($script:SafeOsKb) { "KB$($script:SafeOsKb)" } else { $null }
                     # Read from each edition's winre.wim header while it was mounted. Nothing else on the
                     # media says which recovery environment it will actually install.
-                    Builds    = @($script:WinReVersions | ForEach-Object {
-                        if ($_.After -ne $_.Before) { "$($_.Label) $($_.Before) -> $($_.After)" } else { "$($_.Label) $($_.After)" }
+                    Editions = @($script:WinReVersions | ForEach-Object {
+                        $EntryIndex = if ($_.Label -match '^\[(\d+)\]') { [int]$Matches[1] } else { $null }
+                        [ordered]@{ Index = $EntryIndex; Edition = ($_.Label -replace '^\[\d+\]\s*', ''); Before = $_.Before; After = $_.After }
                     })
                 }
+                ImageSizes         = @($script:WimSizes | ForEach-Object {
+                    [ordered]@{ Image = $_.Label; ShippedAs = $_.AfterName; BeforeMB = [math]::Round($_.Before / 1MB); AfterMB = [math]::Round($_.After / 1MB) }
+                })
             }
             Drivers     = if ($ResolvedDriverPath) {
                 [ordered]@{
-                    Source   = $ResolvedDriverPath
-                    Sha256   = $script:DriverHash
-                    Signing  = if ($AllowUnsignedDrivers) { 'Unsigned and untrusted drivers accepted (-AllowUnsignedDrivers)' } else { 'Signed drivers only' }
-                    Injected = 'Every serviced edition of install.wim, plus boot.wim index 2 (Windows Setup)'
-                    Packages = @($script:DriverInfFiles | ForEach-Object { $_.Name })
+                    Source        = if ($AnonymousTattoo) { Split-Path -Leaf $ResolvedDriverPath } else { $ResolvedDriverPath }
+                    Sha256        = $script:DriverHash
+                    AllowUnsigned = [bool]$AllowUnsignedDrivers
+                    Targets       = @('install.wim, every serviced edition', 'boot.wim index 2 (Windows Setup)')
+                    Packages      = @($script:DriverInfFiles | ForEach-Object { $_.Name })
                 }
             }
-            else { '' }
+            else { $null }
             ExtraFiles  = if ($ResolvedExtraFiles) {
                 [ordered]@{
-                    Source        = $ResolvedExtraFiles
+                    Source        = if ($AnonymousTattoo) { Split-Path -Leaf $ResolvedExtraFiles } else { $ResolvedExtraFiles }
                     Sha256        = $script:ExtraFilesHash
                     FileCount     = $script:ExtraFilesCopied
                     ReplacedCount = $script:ExtraFileOverwrites.Count
@@ -5756,23 +5859,30 @@ if (-not $SkipTattoo) {
                     Files         = $script:ExtraFileRecords
                 }
             }
-            else { '' }
+            else { $null }
             Stripped    = [ordered]@{
-                ComponentStore     = if ($UpdateGroups.Count -gt 0) { 'Superseded components removed (/StartComponentCleanup /ResetBase), so the images cannot be rolled back to their original patch level' } else { 'Untouched (nothing was serviced)' }
-                ServicingResidueMB = [math]::Round($script:TattooResidueMB, 0)
-                ResidueDetail      = if ($StripImageResidue) { 'CBS/DISM/DPX/MoSetup/WindowsUpdate logs, Windows\Temp, SoftwareDistribution\Download, WinREAgent and Panther logs. Windows recreates all of it on first boot' } else { 'Nothing was stripped, so the images still carry their servicing logs and temp files. Pass -StripImageResidue to remove them' }
+                # /StartComponentCleanup /ResetBase, after which the images cannot be rolled back to their original patch level.
+                ResetBase        = ($UpdateGroups.Count -gt 0)
+                ResidueStripped  = [bool]$StripImageResidue
+                ResidueMB        = [math]::Round($script:TattooResidueMB, 0)
                 # Only ever populated when the source ISO was captured from an installed machine rather
                 # than downloaded from Microsoft, which is worth knowing about the media you are holding.
                 # .ToArray() rather than @(), which throws "Argument types do not match" on 5.1.
-                CaptureLeftovers   = $script:TattooResidueFound.ToArray()
+                CaptureLeftovers = $script:TattooResidueFound.ToArray()
             }
             Updates     = [ordered]@{
-                CatalogSelection = @($script:ExpectedUpdateSet | Where-Object { $_ })
-                Packages         = @($script:UpdateFileRecords)
+                CatalogSelection = $CatalogSelection
+                Packages         = $Packages
                 Servicing        = $script:TattooServicing.ToArray()
                 FailedCount      = $Failed.Count
             }
-            Parameters  = Get-BuildParameterSet
+            BuildParameters = $BuildParameters
+        }
+        if ($AnonymousTattoo) {
+            foreach ($Key in 'Computer', 'User', 'ScriptPath', 'CommandLine') { $TattooInfo.BuiltBy.Remove($Key) }
+            $TattooInfo.Build.Remove('LogFile')
+            # Says the gap is deliberate, so nobody reads it as a record that failed to write.
+            $TattooInfo.BuiltBy['IdentityOmitted'] = $true
         }
 
         Write-BuildTattoo -MediaRoot $ExtractDir -Info $TattooInfo -ScriptSource $script:ScriptPath | Out-Null

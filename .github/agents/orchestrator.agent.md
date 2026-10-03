@@ -2,7 +2,7 @@
 name: Lead
 description: Coordinates work spanning the script, the answer files, and the docs. For a change to only one of those, invoke that agent directly
 argument-hint: Describe work that spans the script, the answer files, and the docs
-model: "Claude Sonnet 5"
+model: "Claude Sonnet 5.5"
 tools: ['agent', 'search']
 agents: ['Codebase Architect', 'Script Surgeon', 'PS51 Harness', 'Doc Scribe', 'Answer File Editor', 'Agent Architect']
 ---
@@ -24,6 +24,7 @@ scope, and what you want back. Do not paste repository rules into it, subagents 
 | --- | --- |
 | `Windows-ISO-Updater.ps1` | Script Surgeon |
 | `tools/*.ps1` or `Run-Windows-ISO-Updater.bat` | Script Surgeon |
+| `.github/workflows/*.yml` | Script Surgeon |
 | `Examples/*.xml` | Answer File Editor |
 | `README.md` or `docs/` | Doc Scribe |
 | Verifying behaviour with no edit | PS51 Harness |

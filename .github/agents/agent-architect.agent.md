@@ -2,7 +2,7 @@
 name: Agent Architect
 description: Designs, refines, and evaluates subagent configurations, prompts, and tool boundaries for the Windows-ISO-Updater ecosystem
 argument-hint: Specify the target agent to modify, or describe the role and goals for a new agent
-model: "Claude Opus 5"
+model: "Claude Opus 5.5"
 tools: ['search', 'read/problems', 'edit']
 ---
 
@@ -30,7 +30,7 @@ When creating or modifying an agent, follow this structure:
 name: <Descriptive Title>
 description: <Concise 1-line description of purpose>
 argument-hint: <What the user or orchestrator should provide when invoking this agent>
-model: "Claude Sonnet 5"
+model: "Claude Sonnet 5.5"
 tools: [<Only the required tools>]
 ---
 
