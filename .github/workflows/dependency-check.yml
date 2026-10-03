@@ -1,0 +1,42 @@
+name: Dependency check
+
+on:
+  schedule:
+    # Cron is UTC only, so this is 08:00 Pacific during daylight time and 07:00 in winter.
+    - cron: '0 15 * * *'
+  workflow_dispatch:
+    inputs:
+      catalogQuery:
+        description: 'Catalog search used to test update title matching'
+        required: false
+        default: 'Cumulative Update for Windows 11 Version 26H2 x64'
+  push:
+    paths:
+      - 'Windows-ISO-Updater.ps1'
+      - 'tools/Test-Dependencies.ps1'
+      - '.github/workflows/dependency-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test-dependencies:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Windows PowerShell 5.1, the edition the script targets, rather than the runner's pwsh 7.
+      - name: Run Test-Dependencies
+        shell: powershell
+        # Passed through the environment, never spliced into the script, so a typed input cannot inject commands.
+        env:
+          CATALOG_QUERY: ${{ inputs.catalogQuery || 'Cumulative Update for Windows 11 Version 26H2 x64' }}
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Test-Dependencies.ps1 -Deep -CatalogQuery $env:CATALOG_QUERY
+          $Code = $LASTEXITCODE
+          if ($Code -eq 2) {
+              Write-Output '::warning title=Test-Dependencies::Warnings only. Read the log, nothing is known to be broken.'
+              exit 0
+          }
+          exit $Code

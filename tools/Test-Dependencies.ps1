@@ -47,7 +47,7 @@ param(
     [switch]$Deep,
 
     [Parameter(HelpMessage = 'Catalog search to test the Update Catalog parsing with. Defaults to the current client cumulative update')]
-    [string]$CatalogQuery = 'Cumulative Update for Windows 11 Version 25H2 x64',
+    [string]$CatalogQuery = 'Cumulative Update for Windows 11 Version 26H2 x64',
 
     [Parameter(HelpMessage = 'Seconds to wait on any single web request')]
     [ValidateRange(5, 600)]

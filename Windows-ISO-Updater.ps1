@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.10.02.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.10.02.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -48,6 +48,7 @@
 #      the media, reporting anything it replaces. A \WISO-Build folder is also written onto the media (turn it
 #      off with -SkipTattoo) recording what the ISO was made from, which updates applied or failed, what
 #      was kept and stripped, who built it and when, plus a copy of the script that built it.
+#      -AnonymousTattoo leaves the machine, user and local paths out of it, for media handed to others.
 #   7. Records a "stamp" of the finished build (the source ISO's hash, the updates that went in, the
 #      parameters used and the ISO that came out) and keeps a history of them. The next run compares
 #      itself with that stamp first and exits in a minute or two when nothing has changed, which is what
@@ -297,7 +298,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.10.02.1'
+$ScriptVersion = '2026.10.02.2'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
