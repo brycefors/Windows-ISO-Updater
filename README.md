@@ -59,6 +59,10 @@ For search and easier navigation, read the documentation at [brycefors.github.io
 * [Architecture and Design Details](docs/design-notes.md)
 * [Technical Reference](docs/reference.md)
 
+## Reporting Issues
+
+For any problem with this tool, please [submit a GitHub issue](https://github.com/brycefors/Windows-ISO-Updater/issues).
+
 ## License
 
 Distributed under the [MIT License](LICENSE). Third-party utilities and Microsoft updates fetched during runtime remain governed by their respective vendor terms.
