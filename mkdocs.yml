@@ -25,8 +25,9 @@ theme:
   name: material
   # Segoe UI and Cascadia come from the stylesheet, so nothing is fetched from Google Fonts.
   font: false
+  logo: docs/assets/logo.svg
+  favicon: docs/assets/logo.svg
   icon:
-    logo: fontawesome/brands/windows
     repo: fontawesome/brands/github
   palette:
     - media: "(prefers-color-scheme: light)"
