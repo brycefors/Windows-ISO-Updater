@@ -98,14 +98,19 @@ The build stamp stays on the machine that did the building, which is no use to w
 
 It costs about half a megabyte, Windows Setup ignores it, and deleting it off a USB stick changes nothing. It records:
 
-- **The source media**, by file name, SHA-256, product name, version, feature update, architecture, language and the full list of editions it shipped with.
+- **The source media**, by file name, SHA-256, version, feature update, architecture, language and the full list of editions it shipped with, each with its original index.
 - **The finished image's own locale** (for example `es-ES`, `ko-KR`, `en-US`), read from the offline registry of the serviced image while it is mounted, since a WIM's own metadata only ever reflects the language it was captured with.
-- **Every update**, by KB and SHA-256, and the result of applying each one to each image, so a package that failed on `boot.wim` but applied to `install.wim` is visible without digging through `dism.log`.
+- **The build of every serviced edition**, read from each one while it was mounted, so an edition whose cumulative update failed shows the build it really shipped at.
+- **Every update**, by KB, role (`LCU`, `Checkpoint`, `DotNet`, `SetupDU`, `SafeOS`, or `Supplied` for `-UpdatePath` packages) and SHA-256, the catalog entry each was chosen from with its full title, and the result of applying each one to each image, so a package that failed on `boot.wim` but applied to `install.wim` is visible without digging through `dism.log`. A checkpoint update that DISM pulled in alongside the cumulative update is listed against it.
+- **The recovery image**: whether it was serviced (and if not, why), the Safe OS update used, and the build each edition's `winre.wim` started and finished at.
+- **Image sizes**: what `install.wim`, `boot.wim` and each serviced `winre.wim` weighed as extracted and as shipped.
 - **What was kept and what was stripped**: the editions kept, the editions removed, any edition left in the ISO that was not updated, whether the component store was reset, and how much servicing residue was deleted.
 - **Any drivers injected** with `-DriverPath`: the source folder, a hash of its contents, every `.inf` that went in, and whether unsigned drivers were accepted.
 - **Any files added** with `-ExtraFilesPath`: the source folder, a hash of its contents, and every file that was copied with its size, SHA-256, and whether it replaced something the media already had.
-- **Who built it**: machine name, user, operating system, PowerShell version, the operator's own locale (thread culture, UI culture and system locale), script version and the command line that was used.
-- **When**, both in local time and UTC.
+- **Who built it**: machine name, user, operating system, PowerShell version, the operator's own locale (thread culture, UI culture and system locale), script version and the command line that was used. `-AnonymousTattoo` leaves out the machine name, user, script path, command line and log path, and shortens the driver, extra files and update folders to their last component, for media you hand to other people.
+- **When** the run started and when the record was written, as local time with its UTC offset (for example `2026-10-02T19:07:37-07:00`). The record goes on just before `oscdimg` runs, so the ISO itself is finished a few minutes later.
+
+`build-info.json` carries the same data with real types: switches are `true` or `false`, anything unused is `null`, and lists stay lists even with one entry. Its `SchemaVersion` is `2`. Records written before that field existed are version 1, which stored these values as display strings.
 
 Pass `-SkipTattoo` to leave the media untouched. The switch is build-affecting, so toggling it forces one rebuild.
 
