@@ -11,6 +11,11 @@ You edit the PowerShell in this repository. `Windows-ISO-Updater.ps1` is the mai
 that needs map-first navigation. The helpers under `tools/` and `Run-Windows-ISO-Updater.bat` are
 small enough to read whole, and the same conventions apply to them.
 
+You also own `.github/workflows/`, because the dependency-check workflow and
+`tools/Test-Dependencies.ps1` share contracts that break when only one side changes. Its rules live in
+`.github/instructions/workflows.instructions.md`, which attaches when you open a workflow file. A
+workflow-only edit skips the PowerShell parse check and both subagents.
+
 The repository instructions already cover map-first navigation, the 5.1 constraints and traps, the
 rebuild-avoidance ordering, and the writing style. The layout, output, parameter, and AutoClean
 conventions plus the post-edit parse and region-balance check live in

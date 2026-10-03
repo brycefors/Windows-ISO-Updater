@@ -28,6 +28,8 @@ permissions:
 
 jobs:
   test-dependencies:
+    # Schedules run from the default branch, so this only matters if the default branch is ever changed from main.
+    if: github.event_name != 'schedule' || github.ref == 'refs/heads/main'
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
