@@ -2,7 +2,7 @@
 name: Script Surgeon
 description: Edit Windows-ISO-Updater.ps1 with map-first navigation and parse-only validation
 argument-hint: Describe the change to make in the main script
-model: "Claude Sonnet 5"
+model: "Claude Sonnet 5.5"
 tools: [search, edit, execute/runInTerminal, execute/getTerminalOutput, read/problems, agent]
 agents: ['PS51 Harness', 'Doc Scribe']
 ---

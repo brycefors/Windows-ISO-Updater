@@ -2,7 +2,7 @@
 name: Lead
 description: Coordinates work spanning the script, the answer files, and the docs. For a change to only one of those, invoke that agent directly
 argument-hint: Describe work that spans the script, the answer files, and the docs
-model: "Claude Sonnet 5"
+model: "Claude Sonnet 5.5"
 tools: ['agent', 'search']
 agents: ['Codebase Architect', 'Script Surgeon', 'PS51 Harness', 'Doc Scribe', 'Answer File Editor', 'Agent Architect']
 ---
