@@ -6,9 +6,6 @@
 
 Everything cheap happens first, so a run that has nothing to do costs a couple of minutes rather than an hour. Amber is a decision, red stops the run, green finishes it.
 
-<details class="abstract" markdown>
-<summary>Show the flowchart</summary>
-
 ```mermaid
 flowchart TD
     classDef gate fill:#fff4ce,stroke:#c19c00,color:#201f1e
@@ -73,8 +70,6 @@ flowchart TD
     class Task,UpToDate,Needed,Finish done
     class Sweep,Validate,Oscdimg,Iso,Stamp,Extract,Identify,Catalog,Skip,Editions,Service,Setup,Shrink,Files,Tattoo,Oscd2,Clean work
 ```
-
-</details>
 
 ## What the Script Does
 

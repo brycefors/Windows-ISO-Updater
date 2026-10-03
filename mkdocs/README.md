@@ -14,6 +14,7 @@ Pages. Nothing in this folder is published itself, apart from `assets/`.
 | `hooks.py` | Build hook that removes GitHub-only content from each page before it is rendered |
 | `assets/windows.css` | Windows-style colors and fonts (Segoe UI and Cascadia, so no web fonts are fetched) |
 | `assets/logo.svg` | Logo and favicon |
+| `assets/mermaid-maximize.js` | Adds a **Maximize** button to each Mermaid diagram, which opens it full-window at natural size |
 
 ## How the pages are sourced
 
