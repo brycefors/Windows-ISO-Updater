@@ -150,6 +150,31 @@ that happens is one extra read.
 
 Dropping your own `.iso` into `Downloads\` is all it takes to skip the Microsoft download, with no `-IsoPath` needed. The finished ISO is written to `Output\` instead, so a previous build is never picked up as the source for the next one. `-DownloadPath`, `-LogPath` and `-OutputIsoPath` override the individual folders if you want them elsewhere. Nothing outside these folders is changed, because all servicing happens against files in the working folder, never against the running system.
 
+## Microsoft Defender Exclusions
+
+Applying a cumulative update to a mounted image writes tens of thousands of files, and Defender's real-time protection scans each one as it lands. Excluding the folders where DISM does that work can make servicing noticeably faster. The script never changes Defender settings itself, so this is an optional step you take once, from an elevated prompt:
+
+```powershell
+$Root = 'C:\WISO-Work'   # match -WorkPath if you use it
+Add-MpPreference -ExclusionPath "$Root\Mount", "$Root\WinREMount", "$Root\BuildCheck", "$Root\ISO", "$Root\WinRECache"
+```
+
+| Folder | What happens there |
+| --- | --- |
+| `Mount\` | install.wim and boot.wim are mounted and serviced. This is where most of the time goes |
+| `WinREMount\` | The recovery image is mounted for the Safe OS update |
+| `BuildCheck\` | A brief read-only mount to read the image's build and patch level |
+| `ISO\` | The extracted media and the re-exported images |
+| `WinRECache\` | The serviced recovery image, reused for the other editions |
+
+Leave the rest scanned. `Downloads\` holds files that came from the internet, `Output\` and `OutputStaging\` hold the finished ISO, and your `-DriverPath` and `-ExtraFilesPath` folders are scanned where they live before anything is copied into the image. Each of those is read once, so scanning them costs little.
+
+Avoid process exclusions for `dism.exe` or `DismHost.exe`. A process exclusion covers every file that process touches anywhere on the machine, and `DismHost.exe` runs from a new temporary folder each time, so the exclusion would not reliably apply anyway.
+
+To confirm the exclusions took effect, run `(Get-MpPreference).ExclusionPath`. On a machine managed by Intune or Group Policy with local exclusions turned off, they are accepted but ignored, so ask whoever manages the policy instead. To remove them later, run the same command with `Remove-MpPreference`.
+
+The tradeoff is that files inside the offline image are not scanned while it is being serviced. The content is signed Microsoft media, and DISM checks each package's signature before applying it. The installed system is scanned as normal once it boots.
+
 ## Logging
 
 Each run writes two files to `<WorkPath>\Logs` (or `-LogPath`), both stamped with the date and time it started. The 30 most recent of each are kept and older ones are pruned automatically.
