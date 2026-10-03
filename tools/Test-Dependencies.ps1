@@ -634,43 +634,49 @@ try {
 
     Write-Section 'Published script on GitHub'
 
-    $RawUrl = $null
-    try {
-        $RemoteUrl = & git -C (Split-Path -Parent $ScriptPath) remote get-url origin 2>&1
-        if ($LASTEXITCODE -eq 0 -and "$RemoteUrl" -match '(?i)github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$') {
-            $Slug = $Matches[1]
-            $RawUrl = "https://raw.githubusercontent.com/$Slug/refs/heads/main/$(Split-Path -Leaf $ScriptPath)"
-        }
-    }
-    catch { }
-
-    if (-not $RawUrl) {
-        Add-Result -Area 'Published' -Status 'Warn' -Message 'Could not derive the GitHub raw URL from the git remote. Skipping the published-script check.' -Action 'Run this tester from inside a git repository whose origin points at GitHub.'
+    # Anywhere else the working copy is expected to differ from main, so the comparison would only ever warn.
+    if ($env:GITHUB_ACTIONS -ne 'true' -or $env:GITHUB_REF -ne 'refs/heads/main') {
+        Write-Detail 'Skipped. This check only runs in GitHub Actions on the main branch.'
     }
     else {
-        Write-Detail $RawUrl
+        $RawUrl = $null
         try {
-            $Published = (Invoke-WebRequest -Uri $RawUrl -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop).Content
-            $RemoteErrors = $null
-            [System.Management.Automation.Language.Parser]::ParseInput($Published, [ref]$null, [ref]$RemoteErrors) | Out-Null
-            if ($RemoteErrors -and $RemoteErrors.Count -gt 0) {
-                Add-Result -Area 'Published' -Status 'Fail' -Message "The published script has $($RemoteErrors.Count) parse error(s)." -Action 'A broken script is on the main branch. Push a fix.'
-            }
-            else {
-                $RemoteVersion = if ($Published -match "(?m)^\s*\`$ScriptVersion\s*=\s*'([\d.]+)'") { $Matches[1] } else { 'unknown' }
-                $LocalContent  = Get-Content -LiteralPath $ScriptPath -Raw
-                $LocalVersion  = if ($LocalContent -match "(?m)^\s*\`$ScriptVersion\s*=\s*'([\d.]+)'") { $Matches[1] } else { 'unknown' }
-                Write-Detail "published $RemoteVersion / local $LocalVersion"
-                if ($RemoteVersion -eq $LocalVersion) {
-                    Add-Result -Area 'Published' -Status 'Pass' -Message "The published script parses cleanly and matches this working copy (version $LocalVersion)."
-                }
-                else {
-                    Add-Result -Area 'Published' -Status 'Warn' -Message "The published script is version $RemoteVersion, this working copy is $LocalVersion." -Action 'Expected while you have unpushed work. Push when you are done so the published version stays current.'
-                }
+            $RemoteUrl = & git -C (Split-Path -Parent $ScriptPath) remote get-url origin 2>&1
+            if ($LASTEXITCODE -eq 0 -and "$RemoteUrl" -match '(?i)github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$') {
+                $Slug = $Matches[1]
+                $RawUrl = "https://raw.githubusercontent.com/$Slug/refs/heads/main/$(Split-Path -Leaf $ScriptPath)"
             }
         }
-        catch {
-            Add-Result -Area 'Published' -Status 'Fail' -Message "Could not fetch the published script: $($_.Exception.Message)" -Action 'Check the repository visibility and that the main branch exists.'
+        catch { }
+
+        if (-not $RawUrl) {
+            Add-Result -Area 'Published' -Status 'Warn' -Message 'Could not derive the GitHub raw URL from the git remote. Skipping the published-script check.' -Action 'Run this tester from inside a git repository whose origin points at GitHub.'
+        }
+        else {
+            Write-Detail $RawUrl
+            try {
+                $Published = (Invoke-WebRequest -Uri $RawUrl -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop).Content
+                $RemoteErrors = $null
+                [System.Management.Automation.Language.Parser]::ParseInput($Published, [ref]$null, [ref]$RemoteErrors) | Out-Null
+                if ($RemoteErrors -and $RemoteErrors.Count -gt 0) {
+                    Add-Result -Area 'Published' -Status 'Fail' -Message "The published script has $($RemoteErrors.Count) parse error(s)." -Action 'A broken script is on the main branch. Push a fix.'
+                }
+                else {
+                    $RemoteVersion = if ($Published -match "(?m)^\s*\`$ScriptVersion\s*=\s*'([\d.]+)'") { $Matches[1] } else { 'unknown' }
+                    $LocalContent  = Get-Content -LiteralPath $ScriptPath -Raw
+                    $LocalVersion  = if ($LocalContent -match "(?m)^\s*\`$ScriptVersion\s*=\s*'([\d.]+)'") { $Matches[1] } else { 'unknown' }
+                    Write-Detail "published $RemoteVersion / local $LocalVersion"
+                    if ($RemoteVersion -eq $LocalVersion) {
+                        Add-Result -Area 'Published' -Status 'Pass' -Message "The published script parses cleanly and matches this working copy (version $LocalVersion)."
+                    }
+                    else {
+                        Add-Result -Area 'Published' -Status 'Warn' -Message "The published script is version $RemoteVersion, this working copy is $LocalVersion." -Action 'Expected while you have unpushed work. Push when you are done so the published version stays current.'
+                    }
+                }
+            }
+            catch {
+                Add-Result -Area 'Published' -Status 'Fail' -Message "Could not fetch the published script: $($_.Exception.Message)" -Action 'Check the repository visibility and that the main branch exists.'
+            }
         }
     }
 
