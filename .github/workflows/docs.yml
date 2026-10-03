@@ -6,16 +6,14 @@ on:
       - 'README.md'
       - 'docs/**'
       - 'Examples/**'
-      - 'mkdocs.yml'
-      - 'requirements-docs.txt'
+      - 'mkdocs/**'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
       - 'README.md'
       - 'docs/**'
       - 'Examples/**'
-      - 'mkdocs.yml'
-      - 'requirements-docs.txt'
+      - 'mkdocs/**'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
     inputs:
@@ -38,17 +36,17 @@ jobs:
         with:
           python-version: '3.13'
           cache: pip
-          cache-dependency-path: requirements-docs.txt
+          cache-dependency-path: mkdocs/requirements-docs.txt
 
       - name: Install MkDocs
-        run: pip install -r requirements-docs.txt
+        run: pip install -r mkdocs/requirements-docs.txt
 
       # --strict turns broken links and bad nav entries into a failed run on every branch.
       - name: Build site
         env:
           # mkdocs-same-dir pulls in ProperDocs, which prints a banner about MkDocs 2 on every build.
           DISABLE_MKDOCS_2_WARNING: 'true'
-        run: mkdocs build --strict
+        run: mkdocs build --strict -f mkdocs/mkdocs.yml
 
       # Download from the run summary, then serve the folder (python -m http.server) to browse it.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
