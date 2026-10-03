@@ -9,8 +9,10 @@ repo_name: brycefors/Windows-ISO-Updater
 # Rooted at the repo so README.md is the home page and its docs/ links resolve unchanged.
 docs_dir: ..
 site_dir: ../site
+# The parent is matched with /* so the assets folder can be re-included.
 exclude_docs: |
-  /mkdocs/
+  /mkdocs/*
+  !/mkdocs/assets/
   /site/
   /tools/
 
@@ -22,13 +24,14 @@ nav:
   - Unattended Installs: docs/unattended-installs.md
   - Technical Reference: docs/reference.md
   - Design Notes: docs/design-notes.md
+  - Releases: https://github.com/brycefors/Windows-ISO-Updater/releases
 
 theme:
   name: material
   # Segoe UI and Cascadia come from the stylesheet, so nothing is fetched from Google Fonts.
   font: false
-  logo: docs/assets/logo.svg
-  favicon: docs/assets/logo.svg
+  logo: mkdocs/assets/logo.svg
+  favicon: mkdocs/assets/logo.svg
   icon:
     repo: fontawesome/brands/github
   palette:
@@ -57,7 +60,13 @@ theme:
     - content.code.copy
 
 extra_css:
-  - docs/assets/windows.css
+  - mkdocs/assets/windows.css
+
+extra:
+  generator: false
+
+hooks:
+  - hooks.py
 
 plugins:
   - search

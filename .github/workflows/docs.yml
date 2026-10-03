@@ -48,8 +48,10 @@ jobs:
           DISABLE_MKDOCS_2_WARNING: 'true'
         run: mkdocs build --strict -f mkdocs/mkdocs.yml
 
-      # Download from the run summary, then serve the folder (python -m http.server) to browse it.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      # Preview for runs that do not deploy. Download from the run summary, then serve the folder
+      # (python -m http.server) to browse it. A deploy already has the live site, so it skips this.
+      - if: github.ref != 'refs/heads/main' && !inputs.deploy
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: docs-site
           path: site/
