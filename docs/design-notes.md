@@ -52,7 +52,7 @@ Making the download opt-in also keeps third-party code out of a default run. Fid
 
 **Download the ISO once, keep it, and point every build at it.** Get it from [microsoft.com/software-download](https://www.microsoft.com/software-download), the Media Creation Tool, the Microsoft Evaluation Center, your Volume Licensing Service Center or a Visual Studio subscription:
 
-```shell
+```bat
 .\Run-Windows-ISO-Updater.bat -IsoPath "D:\ISOs\Win11_25H2_original.iso"
 ```
 
@@ -152,7 +152,7 @@ Component store growth, the one argument that would favour a fresh base, is alre
 
 The intended setup is a pristine ISO kept somewhere permanent, with its own working folder:
 
-```shell
+```bat
 .\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -Schedule PatchTuesday -AutoClean ^
   -IsoPath "D:\ISOs\Win11_25H2_original.iso" -WorkPath "D:\WISO\Win11"
 ```

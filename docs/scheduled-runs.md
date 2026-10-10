@@ -11,7 +11,7 @@ That makes it safe to schedule the script as often as you like. Hourly is fine.
 
 ## Registering the task
 
-```shell
+```bat
 :: Monthly, on the 15th at 03:00 - the default
 .\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -AutoClean -IsoPath "C:\ISOs\Win11_25H2.iso"
 
@@ -102,7 +102,7 @@ write time), so an hourly check does not re-read 8 GB every hour.
 
 `-CheckOnly` answers the question and exits without downloading or building anything:
 
-```shell
+```bat
 .\Run-Windows-ISO-Updater.bat -CheckOnly
 ```
 
@@ -128,7 +128,7 @@ folder it was staged in). Only files matching this script's own generated name, 
 applies to that folder as a whole: aiming a Windows 10 run and a Windows 11 run at one shared output folder
 makes them compete for the same slots.
 
-```shell
+```bat
 :: Keep the last five generated ISOs instead of three
 .\Run-Windows-ISO-Updater.bat -Scheduled -AutoClean -KeepIsoCount 5
 ```
@@ -144,7 +144,7 @@ How often a scheduled task produces a new recovery ISO depends on how it builds 
 
 A recovery-only run takes minutes, but an hourly or daily task still turns out an identical ISO each time. The Safe OS Dynamic Update it picks up changes about once a month, so register it with `-Schedule Monthly` or `-Schedule PatchTuesday`, and add `-AutoClean` so only the newest `-KeepIsoCount` recovery ISOs are kept. Recovery ISOs are counted apart from installation ISOs, so the two never compete for the same slots.
 
-```shell
+```bat
 .\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Win11.iso" -RecoveryIsoOnly -AutoClean -RegisterScheduledTask -Schedule PatchTuesday
 ```
 
@@ -167,7 +167,7 @@ only need to refresh the driver files in the folder, and the schedule takes care
 
 Register a task that injects VMware Tools drivers into an already-patched Windows 11 ISO:
 
-```shell
+```bat
 .\Run-Windows-ISO-Updater.bat -RegisterScheduledTask ^
   -IsoPath "C:\ISOs\Win11_25H2_x64.iso" ^
   -SkipUpdates ^

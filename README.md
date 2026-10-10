@@ -24,12 +24,12 @@ Installing Windows from this updated media saves time by eliminating large post-
 ### Command Examples
 
 **Unattended Custom Build:**
-```shell
+```bat
 .\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Win11.iso" -Edition "Windows 11 Pro" -Unattended
 ```
 
 **Windows Server Build:**
-```shell
+```bat
 .\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Server2025.iso"
 ```
 
