@@ -12,7 +12,7 @@ The easiest and recommended way to run this script is by using the `Run-Windows-
 ## Recommended Method: Using the Batch File
 
 1.  **Download Files:** Make sure both `Run-Windows-ISO-Updater.bat` and `Windows-ISO-Updater.ps1` are saved in the **same folder**.
-2.  **Provide an ISO:** Drop a Windows ISO into `C:\WISO-Work\Downloads`, or pass one with `-IsoPath`. The script does not fetch one for you unless you add `-UseFido` or `-UseMct` ([why](design-notes.md#why-the-iso-has-to-come-from-you)).
+2.  **Provide an ISO:** Drop a Windows ISO into `C:\WISO-Work\Downloads`, pass one with `-IsoPath`, or drag the ISO onto `Run-Windows-ISO-Updater.bat`, which builds from it. The script does not fetch one for you unless you add `-UseFido` or `-UseMct` ([why](design-notes.md#why-the-iso-has-to-come-from-you)).
 3.  **Run the Batch File:** Double-click the `Run-Windows-ISO-Updater.bat` file.
 4.  **Administrator Prompt:** A User Account Control (UAC) window will appear asking for administrative privileges. Click **Yes**.
 5.  **Follow Prompts:** The script opens in a new window, summarizes what it will do, and asks for confirmation before building.
@@ -24,9 +24,11 @@ To use command-line parameters, run the batch file from a Command Prompt or Powe
 1.  Open Command Prompt or PowerShell.
 2.  Navigate to the directory where you saved the files (e.g., `cd C:\Users\YourUser\Downloads`).
 3.  Run the batch file with your desired parameters. For example:
-    ```shell
+    ```bat
     .\Run-Windows-ISO-Updater.bat -Unattended -InstallAdk -Edition "Windows 11 Pro"
     ```
+
+Relative paths such as `.\Examples\autounattend-lab-admin.xml` are read from the folder you ran it in, even after the administrator prompt reopens it in a new window. Run from a terminal, the batch file waits for the script and passes on its exit code, so `-CheckOnly` can be scripted against it. Double-clicked or dropped onto from Explorer, its own window closes as soon as the administrator window opens.
 
 The full list is in [Command-Line Parameters](parameters.md).
 
