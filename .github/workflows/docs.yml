@@ -1,7 +1,10 @@
 name: Docs
 
 on:
+  # Other branches only build on a pull request into main or a manual run.
   push:
+    branches:
+      - main
     paths:
       - 'README.md'
       - 'docs/**'
@@ -9,6 +12,8 @@ on:
       - 'mkdocs/**'
       - '.github/workflows/docs.yml'
   pull_request:
+    branches:
+      - main
     paths:
       - 'README.md'
       - 'docs/**'
