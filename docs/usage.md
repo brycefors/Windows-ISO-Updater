@@ -266,5 +266,29 @@ The ISO this script produces is stock media with Microsoft's boot files and sign
 
 Keep it that way when you write it to a USB stick. Flashing the ISO as it is preserves the signed boot loader, while anything that swaps in its own loader or patches the installer binaries breaks the signature chain, and a machine enforcing Secure Boot will refuse it. If you use Rufus to write the ISO, decline its Windows customization options (the Windows User Experience dialog and any option to swap the boot loader or patch the installer), as those may require disabling Secure Boot. If you want an answer file on the media, use `-UnattendPath` so it goes on before the ISO is built rather than being added afterwards.
 
+## Building a Recovery ISO
+
+Because of a bug in Windows Setup, some Windows 11 media will not let you use the **Repair my PC** option. It appears on the Setup screen but does nothing when clicked, and stock Microsoft media is affected too. That leaves no simple way to reach Startup Repair, System Restore or a recovery command prompt on a PC that will not boot.
+
+`-RecoveryIsoPath` works around it by building a second, much smaller ISO alongside the installation ISO. It boots straight into the Windows Recovery Environment with no Setup screen in front of it, and it carries the recovery image with the latest Safe OS update already applied. It holds only the boot files and the recovery image, never your answer file or extra files, so it is fit to hand out across an organization (Microsoft's license terms still cover what is on it).
+
+```shell
+.\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Win11.iso" -RecoveryIsoPath "D:\ISOs"
+```
+
+Give `-RecoveryIsoPath` a folder to get a generated name such as `Win11_Recovery_x64_26100.6899_20261010-1200.iso`, or a full file path to name it yourself. With `-AutoClean`, the newest `-KeepIsoCount` generated recovery ISOs in that folder are kept and older ones are deleted, counted separately from the installation ISOs.
+
+To build only the recovery ISO, add `-RecoveryIsoOnly`. The source ISO is read in place, `install.wim` is never serviced, and the only download is the Safe OS Dynamic Update, so it finishes in minutes. Without `-RecoveryIsoPath` it lands in the `Output\` folder under the working folder. It keeps no build stamps, so a scheduled run builds a fresh recovery ISO every time it fires ([choosing a schedule](scheduled-runs.md#recovery-isos-on-a-schedule)).
+
+```shell
+.\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Win11.iso" -RecoveryIsoOnly
+```
+
+This is not a layout Microsoft documents. Every file on the recovery ISO is Microsoft's own and unmodified, the boot files keep their signatures so it boots with Secure Boot on, and the recovery image is only updated with Microsoft's Safe OS update. What is not documented is placing that recovery image where install media keeps its Setup image, so Microsoft support will not treat it as a known configuration. If your organization requires officially supported tooling, use one of these instead:
+
+- **A recovery drive.** Run `recoverydrive.exe` on a working PC. It is the documented way to make bootable recovery media, but it writes only to a USB stick, not an ISO, and needs a working machine to run on.
+- **The recovery partition on the PC itself.** Hold Shift while clicking Restart, or run `reagentc /boottore` and reboot.
+- **WinPE from the Windows ADK.** It gives you a command prompt for repair work, but not the recovery menus.
+
 
 [← Back to README](../README.md)

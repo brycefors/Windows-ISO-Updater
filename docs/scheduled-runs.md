@@ -133,6 +133,21 @@ makes them compete for the same slots.
 .\Run-Windows-ISO-Updater.bat -Scheduled -AutoClean -KeepIsoCount 5
 ```
 
+## Recovery ISOs on a Schedule
+
+How often a scheduled task produces a new recovery ISO depends on how it builds one:
+
+| The task runs with | A new recovery ISO is built |
+| --- | --- |
+| `-RecoveryIsoPath` alongside a full build | Only when the installation ISO is rebuilt, following the [rebuild rules](#when-a-run-decides-to-rebuild) above. A run that finds nothing changed stops before either ISO is built. |
+| `-RecoveryIsoOnly` | **Every time the task fires.** A recovery-only run keeps no stamp, so it never decides that nothing changed. |
+
+A recovery-only run takes minutes, but an hourly or daily task still turns out an identical ISO each time. The Safe OS Dynamic Update it picks up changes about once a month, so register it with `-Schedule Monthly` or `-Schedule PatchTuesday`, and add `-AutoClean` so only the newest `-KeepIsoCount` recovery ISOs are kept. Recovery ISOs are counted apart from installation ISOs, so the two never compete for the same slots.
+
+```shell
+.\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Win11.iso" -RecoveryIsoOnly -AutoClean -RegisterScheduledTask -Schedule PatchTuesday
+```
+
 ## Injecting Drivers on a Schedule
 
 If you already have a fully patched ISO on disk and want to refresh drivers on a schedule without

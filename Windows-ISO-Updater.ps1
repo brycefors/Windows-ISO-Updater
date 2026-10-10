@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.10.02.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.10.10.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -182,6 +182,12 @@ param(
     [ValidatePattern('^[A-Za-z0-9._-]{1,32}$')]
     [string]$VolumeLabel,
 
+    [Parameter(HelpMessage = 'Also build a small recovery ISO that boots straight into the Windows Recovery Environment (Startup Repair, System Restore, Uninstall Updates, Command Prompt), using the recovery image from the serviced install.wim. Give it a full file path, or a folder to keep the generated name. It carries only the boot files and the recovery image, never the answer file or the -ExtraFilesPath content. -AutoClean keeps the newest -KeepIsoCount generated recovery ISOs in that folder, counted separately from the installation ISOs')]
+    [string]$RecoveryIsoPath,
+
+    [Parameter(HelpMessage = 'Build only the recovery ISO and stop. The source ISO is read in place rather than extracted, install.wim is never serviced, and only the Safe OS Dynamic Update is downloaded, so it takes minutes rather than hours. Written to -RecoveryIsoPath, or to the Output folder under the working folder when that is not given. Keeps no build stamps, so every run builds a fresh one')]
+    [switch]$RecoveryIsoOnly,
+
     [Parameter(HelpMessage = 'Full path to oscdimg.exe if the Windows ADK is installed in a non-standard location')]
     [string]$OscdimgPath,
 
@@ -298,7 +304,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.10.02.2'
+$ScriptVersion = '2026.10.10.1'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -383,6 +389,9 @@ $MountDir   = Join-Path -Path $WorkRoot -ChildPath 'Mount'
 # Where the serviced recovery image waits between editions. Its own folder because it outlives the step
 # that made it, unlike the re-export temporaries that come and go inside one, so it is one thing to delete.
 $WinReCacheDir = Join-Path -Path $WorkRoot -ChildPath 'WinRECache'
+# Where -RecoveryIsoPath keeps the recovery image between being copied out of install.wim and being packaged,
+# which is most of the run because the installation ISO is built in between.
+$RecoveryMediaDir = Join-Path -Path $WorkRoot -ChildPath 'RecoveryMedia'
 # Where a standalone oscdimg.exe is cached if it has to be downloaded, so later runs reuse it.
 $OscdimgLocalPath = Join-Path -Path $WorkRoot -ChildPath 'Tools\oscdimg.exe'
 # Downloads and logs default under the work root - NOT the script folder, which may sit on a cloud-synced
@@ -407,6 +416,29 @@ if ($OutputIsoPath) {
         $FinishedIsoDir = $OutputIsoPath
         $OutputIsoPath  = $null
     }
+}
+# Read the same way as -OutputIsoPath, so a folder means "there, under the generated name".
+$RecoveryIsoDir  = $null
+$RecoveryIsoFile = $null
+if ($RecoveryIsoPath) {
+    $RecoveryIsoFull = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RecoveryIsoPath)
+    $RecoveryIsFolder = $false
+    try {
+        $RecoveryIsFolder = ($RecoveryIsoFull -match '[\\/]$') -or
+            -not [System.IO.Path]::GetExtension($RecoveryIsoFull) -or
+            (Test-Path -LiteralPath $RecoveryIsoFull -PathType Container -ErrorAction Stop)
+    }
+    catch { }   # a malformed or unreachable path is reported properly by the output check further down
+    if ($RecoveryIsFolder) {
+        $RecoveryIsoDir = $RecoveryIsoFull
+    }
+    else {
+        $RecoveryIsoFile = $RecoveryIsoFull
+        $RecoveryIsoDir  = Split-Path -Path $RecoveryIsoFull -Parent
+    }
+}
+elseif ($RecoveryIsoOnly) {
+    $RecoveryIsoDir = $FinishedIsoDir
 }
 # oscdimg writes an ISO as hours of small writes, which a share cannot be trusted with, so a network
 # destination is built here first and copied over as one sequential pass at the end.
@@ -1800,6 +1832,8 @@ function Get-BuildParameterSet {
     # Same for the drivers, which are injected into the images rather than copied onto the media.
     $Set['Drivers'] = if ($script:DriverHash) { $script:DriverHash } else { '' }
     $Set['ExtraFiles'] = if ($script:ExtraFilesHash) { $script:ExtraFilesHash } else { '' }
+    # Only present when asked for, so turning it on forces one rebuild without changing every older stamp's hash.
+    if ($RecoveryIsoPath) { $Set['RecoveryIso'] = 'True' }
     return $Set
 }
 
@@ -2228,7 +2262,8 @@ function Invoke-AutoClean {
     # there are orphans from earlier runs, not candidates for this remote-output run.
     if (-not $OutputIsRemote) {
         foreach ($Item in @(Get-ChildItem -LiteralPath $FinishedIsoDir -Filter '*.iso' -File -ErrorAction SilentlyContinue)) {
-            if ($Item.Name -match $GeneratedName) { $Candidates[$Item.FullName.ToLowerInvariant()] = $Item }
+            # A -RecoveryIsoPath ISO follows the same naming but must not use up a -KeepIsoCount slot.
+            if ($Item.Name -match $GeneratedName -and $Item.Name -notmatch '_Recovery_') { $Candidates[$Item.FullName.ToLowerInvariant()] = $Item }
         }
     }
 
@@ -2296,7 +2331,15 @@ function Invoke-AutoClean {
     }
     if ($RemovedSourceIsos -eq 0) { Write-HostTimestamp '  No stale cached source ISOs to remove.' -ForegroundColor DarkGray }
 
-    Write-HostTimestamp ('  Cleanup removed {0} update package(s), {1} ISO(s) and {2} cached source ISO(s), freeing {3:N1} GB.' -f $RemovedUpdates, $RemovedIsos, $RemovedSourceIsos, ($FreedMB / 1024)) -ForegroundColor Green
+    # 4. Recovery ISOs, counted on their own so they never take an installation ISO's -KeepIsoCount slot.
+    $RemovedRecoveryIsos = 0
+    if ($RecoveryIsoDir) {
+        $RecoveryCleanup = Remove-StaleRecoveryIso -Directory $RecoveryIsoDir -KeepCount $KeepIsoCount -Protected $ProtectedPaths
+        $RemovedRecoveryIsos = $RecoveryCleanup.Removed
+        $FreedMB += $RecoveryCleanup.FreedMB
+    }
+
+    Write-HostTimestamp ('  Cleanup removed {0} update package(s), {1} ISO(s), {2} recovery ISO(s) and {3} cached source ISO(s), freeing {4:N1} GB.' -f $RemovedUpdates, $RemovedIsos, $RemovedRecoveryIsos, $RemovedSourceIsos, ($FreedMB / 1024)) -ForegroundColor Green
 }
 
 #endregion
@@ -2698,6 +2741,21 @@ function Get-ShortPath {
     }
     catch { }
     return $Path
+}
+
+# oscdimg's -bootdata value for a media folder. etfsboot.com boots it on legacy BIOS PCs and efisys.bin on
+# UEFI ones, so both go in when both exist. Short paths because -bootdata breaks on a space. Returns $null
+# when the folder has neither, which still builds an ISO but not a bootable one.
+function Get-OscdimgBootData {
+    param([Parameter(Mandatory)][string]$MediaRoot)
+
+    $EtfsBoot = Join-Path -Path $MediaRoot -ChildPath 'boot\etfsboot.com'
+    $EfiSys   = Join-Path -Path $MediaRoot -ChildPath 'efi\microsoft\boot\efisys.bin'
+    if ((Test-Path -LiteralPath $EtfsBoot) -and (Test-Path -LiteralPath $EfiSys)) {
+        return "2#p0,e,b$(Get-ShortPath -Path $EtfsBoot)#pEF,e,b$(Get-ShortPath -Path $EfiSys)"
+    }
+    if (Test-Path -LiteralPath $EfiSys) { return "1#pEF,e,b$(Get-ShortPath -Path $EfiSys)" }
+    return $null
 }
 
 # Resolves a list of edition tokens (edition names, partial names, or index numbers) to the matching
@@ -3981,6 +4039,123 @@ function Write-BuildTattoo {
     }
 }
 #endregion
+
+#region Recovery ISO
+# Builds the recovery ISO from a recovery image and a folder holding the media's boot files. The media's BCD
+# boots whatever sits at \sources\boot.wim, so the recovery image placed there beside those boot files is a
+# complete recovery disc with no Setup screen in front of it. Returns the path of the finished ISO.
+function New-RecoveryIso {
+    param(
+        [Parameter(Mandatory)][string]$WinReWim,
+        [Parameter(Mandatory)][string]$BootSource,
+        [string]$BootManagerDir,
+        [int]$Build,
+        [string]$Architecture
+    )
+
+    $RecoveryRoot = Join-Path -Path $RecoveryMediaDir -ChildPath 'ISO'
+    if (Test-Path -LiteralPath $RecoveryRoot) { Remove-Item -LiteralPath $RecoveryRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    New-Item -ItemType Directory -Path (Join-Path $RecoveryRoot 'sources') -Force -ErrorAction Stop | Out-Null
+    # Boot files only, so an answer file holding passwords never lands on media meant for handing out.
+    foreach ($Name in 'boot', 'efi', 'bootmgr', 'bootmgr.efi') {
+        $From = Join-Path -Path $BootSource -ChildPath $Name
+        if (Test-Path -LiteralPath $From) { Copy-Item -LiteralPath $From -Destination $RecoveryRoot -Recurse -Force -ErrorAction Stop }
+    }
+    # Copied off read-only media, and the boot managers below have to be replaceable.
+    Get-ChildItem -LiteralPath $RecoveryRoot -Recurse -Force -File | Where-Object { $_.IsReadOnly } | ForEach-Object { $_.IsReadOnly = $false }
+
+    # Matched to the serviced recovery image, the same way a full build matches the media's to boot.wim.
+    if ($BootManagerDir) {
+        foreach ($File in @(Get-ChildItem -LiteralPath $RecoveryRoot -Recurse -Force -Filter 'b*.efi' -File -ErrorAction SilentlyContinue)) {
+            $Source = switch -Regex ($File.Name) {
+                '^(bootmgfw|bootx64|bootia32|bootaa64)\.efi$' { Join-Path -Path $BootManagerDir -ChildPath 'bootmgfw.efi' }
+                '^bootmgr\.efi$' { Join-Path -Path $BootManagerDir -ChildPath 'bootmgr.efi' }
+                default { $null }
+            }
+            if ($Source -and (Test-Path -LiteralPath $Source)) { Copy-Item -LiteralPath $Source -Destination $File.FullName -Force -ErrorAction Stop }
+        }
+    }
+
+    Write-HostTimestamp '  Placing the recovery image where the media boots from (sources\boot.wim)...'
+    Export-WindowsImage -SourceImagePath $WinReWim -SourceIndex 1 -DestinationImagePath (Join-Path $RecoveryRoot 'sources\boot.wim') -CompressionType Max -Setbootable -ErrorAction Stop | Out-Null
+
+    $Re = Get-WinReVersion -WinReWim $WinReWim
+    $WindowsTag =
+        if ($script:EffectiveServer) { Get-ServerReleaseName -Build $Build }
+        elseif ($Build -ge 22000) { 'Win11' }
+        elseif ($Build -gt 0) { 'Win10' }
+        else { 'Windows' }
+    $NameParts = @($WindowsTag, 'Recovery', ($Architecture -replace '[^A-Za-z0-9]', ''))
+    if ($Re) { $NameParts += "$($Re.Build).$($Re.Ubr)" }
+    $RecoveryName = ((@($NameParts) + (Get-Date -Format 'yyyyMMdd-HHmm')) -join '_') + '.iso'
+    $Target = if ($RecoveryIsoFile) { $RecoveryIsoFile } else { Join-Path -Path $RecoveryIsoDir -ChildPath $RecoveryName }
+    # Same 32-character rule as the main label, and the architecture is the first thing to go.
+    $Label = ($NameParts -join '_').ToUpperInvariant() -replace '[^A-Z0-9]', '_'
+    if ($Label.Length -gt 32) { $Label = $Label -replace '_(X64|X86|ARM64|AMD64)_', '_' }
+    if ($Label.Length -gt 32) { $Label = $Label.Substring(0, 32) }
+    $Label = $Label.Trim('_')
+
+    # Built locally and copied over for the same reason as the main ISO.
+    $TargetIsRemote = Test-RemotePath -Path (Split-Path -Path $Target -Parent)
+    $BuildTarget = $Target
+    if ($TargetIsRemote) {
+        New-Item -ItemType Directory -Path $IsoStageDir -Force -ErrorAction SilentlyContinue | Out-Null
+        $BuildTarget = Join-Path -Path $IsoStageDir -ChildPath (Split-Path -Leaf $Target)
+    }
+    if (Test-Path -LiteralPath $BuildTarget) { Remove-Item -LiteralPath $BuildTarget -Force -ErrorAction SilentlyContinue }
+
+    $BootData = Get-OscdimgBootData -MediaRoot $RecoveryRoot
+    if (-not $BootData) { throw 'the media has no boot sectors, so a recovery ISO built from it would not boot' }
+    $RecoveryArgs = @('-m', '-o', '-u2', '-udfver102', "-l$Label", "-bootdata:$BootData", $RecoveryRoot, $BuildTarget)
+    Write-HostTimestamp "  Running: `"$Oscdimg`" $($RecoveryArgs -join ' ')" -ForegroundColor DarkGray
+    $Proc = Start-Process -FilePath $Oscdimg -ArgumentList $RecoveryArgs -Wait -PassThru -NoNewWindow -ErrorAction Stop
+    if ($Proc.ExitCode -ne 0) { throw "oscdimg returned exit code $($Proc.ExitCode)" }
+    if (-not (Test-Path -LiteralPath $BuildTarget)) { throw 'oscdimg reported success but no ISO was written' }
+    if ($TargetIsRemote) {
+        Copy-LargeFile -Path $BuildTarget -Destination $Target
+        Remove-Item -LiteralPath $BuildTarget -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-HostTimestamp ('  Recovery ISO created ({0:N0} MB, volume label {1}).' -f ((Get-Item -LiteralPath $Target).Length / 1MB), $Label) -ForegroundColor Green
+    if ($Re) { Write-HostTimestamp "  It boots the recovery environment at $($Re.Version)." -ForegroundColor DarkGray }
+    return $Target
+}
+
+# Keeps the newest generated recovery ISOs in a folder and deletes the rest. No stamp records them, so only
+# names this script generates are candidates, and a file path the user chose is overwritten each build anyway.
+# Returns how many went and how much space that freed, for -AutoClean's summary.
+function Remove-StaleRecoveryIso {
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [int]$KeepCount = 3,
+        [string[]]$Protected
+    )
+
+    $ProtectedPaths = @(@($Protected) | Where-Object { $_ } | ForEach-Object { "$_".TrimEnd('\').ToLowerInvariant() })
+    $RecoveryName = '^(Win10|Win11|Windows|WinSrv[A-Za-z0-9]*)_Recovery_[A-Za-z0-9]+(_[\d.]+)?_\d{8}-\d{4}\.iso$'
+    $RecoveryIsos = @(Get-ChildItem -LiteralPath $Directory -Filter '*.iso' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match $RecoveryName } |
+        Sort-Object -Property LastWriteTime -Descending)
+    if ($RecoveryIsos.Count -gt 0) {
+        Write-HostTimestamp "  Found $($RecoveryIsos.Count) generated recovery ISO(s), keeping the newest $KeepCount." -ForegroundColor DarkGray
+    }
+
+    $Removed = 0
+    $FreedMB = 0
+    foreach ($Item in @($RecoveryIsos | Select-Object -Skip $KeepCount | Where-Object { $ProtectedPaths -notcontains $_.FullName.ToLowerInvariant() })) {
+        try {
+            $SizeMB = $Item.Length / 1MB
+            Remove-Item -LiteralPath $Item.FullName -Force -ErrorAction Stop
+            $Removed++
+            $FreedMB += $SizeMB
+            Write-HostTimestamp ('  Deleted old recovery ISO: {0} ({1:N0} MB)' -f $Item.Name, $SizeMB) -ForegroundColor DarkGray
+        }
+        catch { Write-HostTimestamp "  Could not delete '$($Item.FullName)': $($_.Exception.Message)" -ForegroundColor Yellow }
+    }
+    if ($Removed -eq 0) { Write-HostTimestamp '  No old recovery ISOs to remove.' -ForegroundColor DarkGray }
+    return [pscustomobject]@{ Removed = $Removed; FreedMB = $FreedMB }
+}
+#endregion
 #endregion
 
 #region Run header
@@ -3999,6 +4174,20 @@ if ($ServiceWinRE) {
 }
 if ($Server) {
     Write-HostTimestamp '-Server is deprecated and no longer needed. Server media is detected from the image itself, so -IsoPath pointed at a Server ISO (or one dropped into the download folder) is enough.' -ForegroundColor Yellow
+}
+if ($RecoveryIsoOnly) {
+    if ($CheckOnly) {
+        Write-HostTimestamp '-CheckOnly cannot be combined with -RecoveryIsoOnly, which keeps no build stamps to compare against.' -ForegroundColor Red
+        Stop-Transcript | Out-Null
+        exit 1
+    }
+    $RecoveryIgnored = @('Edition', 'KeepEditions', 'KeepAllEditions', 'UpdatePath', 'SkipDotNet', 'SkipSetupDU', 'BaselineOnly',
+        'VerifyPatchLevel', 'CompressEsd', 'FastCompression', 'UnattendPath', 'DriverPath', 'AllowUnsignedDrivers', 'ExtraFilesPath',
+        'SkipTattoo', 'AnonymousTattoo', 'StripImageResidue', 'VolumeLabel', 'IsoNamePrefix', 'IsoNameSuffix', 'Force', 'NoStamp', 'StampPath') |
+        Where-Object { $script:ScriptBoundParameters.ContainsKey($_) }
+    if ($RecoveryIgnored) {
+        Write-HostTimestamp "-RecoveryIsoOnly builds only the recovery ISO, so these are ignored: $((@($RecoveryIgnored) | ForEach-Object { "-$_" }) -join ', ')" -ForegroundColor Yellow
+    }
 }
 # Raised before the log existed, so the console already showed it and only the .log still needs it.
 if ($script:LogDirProblem) { Write-CMTraceLog -Message $script:LogDirProblem -Type 2 }
@@ -4124,12 +4313,12 @@ if (-not $HaveRunMutex) {
 #endregion
 
 #region Clean up leftovers from an interrupted run
-# Add-UpdateGroup stages each package in its own pkgstage_* folder and the serviced recovery image waits in
-# WinRECache, both deleted when the step that made them finishes, but a run that was killed outright never
-# reaches that and leaves several GB behind. Cleared before the free space check so the reading reflects
-# what is really available.
+# Add-UpdateGroup stages each package in its own pkgstage_* folder, the serviced recovery image waits in
+# WinRECache, and -RecoveryIsoPath assembles its media in RecoveryMedia. All are deleted when the step that
+# made them finishes, but a run that was killed outright never reaches that and leaves several GB behind.
+# Cleared before the free space check so the reading reflects what is really available.
 $StaleStages = @(Get-ChildItem -LiteralPath $WorkRoot -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -like 'pkgstage_*' -or $_.Name -eq 'WinRECache' })
+    Where-Object { $_.Name -like 'pkgstage_*' -or $_.Name -in 'WinRECache', 'RecoveryMedia' })
 if ($StaleStages.Count -gt 0) {
     $StageFreedMB = 0
     $StageRemoved = 0
@@ -4213,7 +4402,8 @@ if ($null -eq $FreeGB) {
 }
 else {
     Write-HostTimestamp "Free space on the working drive: $FreeGB GB"
-    $RequiredGB = 50
+    # A recovery-only run stages at most one edition converted out of an install.esd.
+    $RequiredGB = if ($RecoveryIsoOnly) { 10 } else { 50 }
     if ($FreeGB -lt $RequiredGB) {
         if ($CheckOnly) {
             # -CheckOnly builds nothing, so it only needs to say that a build would not fit right now.
@@ -4234,7 +4424,7 @@ Write-Host $LineBreak
 # The rest of the build takes hours and oscdimg is the last thing it runs, so a missing folder, a share
 # that is not writable, or an ISO still mounted from a previous run has to be caught here instead.
 $OutputIsRemote = $false
-if (-not $ListEditions -and -not $CheckOnly) {
+if (-not $ListEditions -and -not $CheckOnly -and -not $RecoveryIsoOnly) {
     $OutputDir = if ($OutputIsoPath) { Split-Path -Path $OutputIsoPath -Parent } else { $FinishedIsoDir }
     $OutputProblem = Get-OutputPathProblem -Directory $OutputDir -FilePath $OutputIsoPath
     if ($OutputProblem) {
@@ -4271,6 +4461,18 @@ if (-not $ListEditions -and -not $CheckOnly) {
             Write-HostTimestamp "  Only $OutputFreeGB GB is free there, and a finished ISO is usually 5 to 8 GB." -ForegroundColor Yellow
         }
     }
+    Write-Host $LineBreak
+}
+if ($RecoveryIsoDir -and -not $ListEditions -and -not $CheckOnly) {
+    $RecoveryProblem = Get-OutputPathProblem -Directory $RecoveryIsoDir -FilePath $RecoveryIsoFile
+    if ($RecoveryProblem) {
+        Write-HostTimestamp 'The recovery ISO could not be written where it is meant to go.' -ForegroundColor Red
+        Write-HostTimestamp "  $RecoveryProblem" -ForegroundColor Red
+        Write-HostTimestamp '  Fix the destination or point -RecoveryIsoPath somewhere else, then run again.' -ForegroundColor Red
+        Stop-Transcript | Out-Null
+        exit 1
+    }
+    Write-HostTimestamp "Recovery ISO   : $(if ($RecoveryIsoFile) { $RecoveryIsoFile } else { "$RecoveryIsoDir (generated name)" })" -ForegroundColor Green
     Write-Host $LineBreak
 }
 
@@ -4373,7 +4575,30 @@ if ($ExtraFilesPath) {
 #endregion
 
 #region Interactive confirmation
-if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -not $CheckOnly) {
+if ($RecoveryIsoOnly -and -not $Unattended -and -not $SkipInteractive -and -not $ListEditions) {
+    Write-HostLog 'This tool builds a recovery ISO that boots straight into the Windows Recovery Environment. It will:'
+    if ($IsoPath) { Write-HostLog "  - Use the ISO you provided: $IsoPath" }
+    else { Write-HostLog "  - Use the ISO it finds in the download folder: $DlDir" }
+    Write-HostLog '  - Read the recovery image out of that ISO without extracting or servicing anything else'
+    if (-not ($SkipUpdates -or $SkipServicing -or $SkipWinRE)) {
+        Write-HostLog '  - Download the latest Safe OS Dynamic Update from the Microsoft Update Catalog and apply it to the recovery image'
+    }
+    Write-HostLog "  - Write the recovery ISO to $(if ($RecoveryIsoFile) { $RecoveryIsoFile } else { $RecoveryIsoDir })"
+    if ($AutoClean) {
+        Write-HostLog "  - DELETE all but the newest $KeepIsoCount generated recovery ISOs in that folder (-AutoClean)" -ForegroundColor Yellow
+    }
+    Write-Host ''
+    Write-HostLog 'This usually takes minutes rather than hours. Nothing on this PC is changed.' -ForegroundColor Yellow
+    Write-Host ''
+    $Confirm = Read-Host "Type 'Y' to continue, or anything else to cancel"
+    if ($Confirm -notin @('Y', 'y', 'Yes', 'yes')) {
+        Write-HostTimestamp 'Operation cancelled by user.' -ForegroundColor Yellow
+        Stop-Transcript | Out-Null
+        exit 0
+    }
+    Write-Host $LineBreak
+}
+if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -not $CheckOnly -and -not $RecoveryIsoOnly) {
     Write-HostLog "This tool builds an updated Windows installation ISO. It will:"
     if ($IsoPath) {
         Write-HostLog "  - Use the ISO you provided: $IsoPath"
@@ -4452,6 +4677,9 @@ if (-not $Unattended -and -not $SkipInteractive -and -not $ListEditions -and -no
     }
     if ($ResolvedExtraFiles) {
         Write-HostLog "  - Copy the contents of $ResolvedExtraFiles onto the root of the ISO, replacing anything the media already had at the same path" -ForegroundColor Yellow
+    }
+    if ($RecoveryIsoPath) {
+        Write-HostLog "  - Also build a recovery ISO that boots straight into the Windows Recovery Environment, written to $(if ($RecoveryIsoFile) { $RecoveryIsoFile } else { $RecoveryIsoDir })"
     }
     Write-HostLog "  - Recompile a new bootable ISO with oscdimg"
     if (-not $NoStamp) {
@@ -4700,6 +4928,171 @@ if ($ListEditions) {
     Write-Host $LineBreak
     Stop-Transcript | Out-Null
     exit 0
+}
+
+#endregion
+
+#region Build only the recovery ISO and exit (-RecoveryIsoOnly)
+# A recovery ISO needs only the recovery image and the media's boot files, so the ISO is read in place
+# rather than extracted, install.wim is never serviced, and the run ends here.
+if ($RecoveryIsoOnly) {
+    $RecoveryExit = 1
+    $RecoveryMountedIso = $false
+    $RecoveryBootManagers = Join-Path -Path $RecoveryMediaDir -ChildPath 'BootManagers'
+    $script:RecoveryWinRe = $null
+    $script:RecoveryIsoOutput = $null
+    try {
+        $Attached = Get-DiskImage -ImagePath $ResolvedIso -ErrorAction SilentlyContinue
+        if (-not ($Attached -and $Attached.Attached)) {
+            Mount-DiskImage -ImagePath $ResolvedIso -ErrorAction Stop | Out-Null
+            $RecoveryMountedIso = $true
+            Start-Sleep -Seconds 2
+        }
+        $IsoDrive = (Get-DiskImage -ImagePath $ResolvedIso | Get-Volume -ErrorAction SilentlyContinue).DriveLetter
+        if (-not $IsoDrive) { throw 'Could not determine the drive letter of the mounted ISO.' }
+        $MediaRoot = "$($IsoDrive):\"
+        $SourceImage = Join-Path -Path $MediaRoot -ChildPath 'sources\install.wim'
+        if (-not (Test-Path -LiteralPath $SourceImage)) { $SourceImage = Join-Path -Path $MediaRoot -ChildPath 'sources\install.esd' }
+        if (-not (Test-Path -LiteralPath $SourceImage)) { throw 'The ISO has no sources\install.wim or install.esd, so it is not Windows installation media.' }
+
+        $ImageInfo = Get-WindowsImage -ImagePath $SourceImage -Index 1 -ErrorAction Stop
+        $ImageBuild = if ("$($ImageInfo.Version)" -match '^\d+\.\d+\.(\d+)') { [int]$Matches[1] } else { 0 }
+        $script:EffectiveServer = "$($ImageInfo.ImageName) $($ImageInfo.EditionId)" -match '(?i)server'
+        if (-not $script:EffectiveServer -and $ImageBuild -gt 0) {
+            $script:EffectiveWindowsVersion = if ($ImageBuild -ge 22000) { '11' } else { '10' }
+        }
+        $ImageArch = switch ($ImageInfo.Architecture) { 0 { 'x86' } 9 { 'x64' } 12 { 'arm64' } default { $WinInfo.Architecture } }
+        $CatalogArch = switch ($ImageArch) { 'arm64' { 'ARM64' } 'x86' { 'x86' } default { 'x64' } }
+        $RecoverySkipUpdate = $SkipUpdates -or $SkipServicing -or $SkipWinRE -or $ImageBuild -lt 10240
+        Write-HostTimestamp "Image          : $($ImageInfo.ImageName), $($ImageInfo.Version), $ImageArch"
+        Write-Host $LineBreak
+        New-Item -ItemType Directory -Path $RecoveryMediaDir -Force -ErrorAction Stop | Out-Null
+
+        Invoke-Task -Description 'Copying the recovery image out of the ISO...' -ScriptBlock {
+            $MountSource = $SourceImage
+            # DISM cannot mount an .esd. Every edition carries the same recovery image, so converting one is enough.
+            if ($SourceImage -like '*.esd') {
+                $MountSource = Join-Path -Path $RecoveryMediaDir -ChildPath 'install.wim'
+                Write-HostTimestamp '  The media uses install.esd, so one edition is converted to a WIM first...'
+                Export-WindowsImage -SourceImagePath $SourceImage -SourceIndex 1 -DestinationImagePath $MountSource -CompressionType Fast -ErrorAction Stop | Out-Null
+            }
+            $script:RecoveryFeatureName = if ($RecoverySkipUpdate) { $null } else { Resolve-FeatureUpdateName -Build $ImageBuild -WimPath $MountSource }
+            $Staged = Join-Path -Path $RecoveryMediaDir -ChildPath 'winre.wim'
+            try {
+                Reset-MountDirectory -Path $MountDir -ImagePath $MountSource
+                Mount-WindowsImage -ImagePath $MountSource -Index 1 -Path $MountDir -ReadOnly -ErrorAction Stop | Out-Null
+                $Source = Join-Path -Path $MountDir -ChildPath 'Windows\System32\Recovery\winre.wim'
+                if (-not (Test-Path -LiteralPath $Source)) { throw 'the image carries no Windows\System32\Recovery\winre.wim' }
+                Copy-Item -LiteralPath $Source -Destination $Staged -Force -ErrorAction Stop
+                # It is mounted read-write further down, so it cannot keep a read-only attribute from the media.
+                Set-ItemProperty -LiteralPath $Staged -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
+                $script:RecoveryWinRe = $Staged
+            }
+            finally {
+                Dismount-ImageDiscard -Path $MountDir | Out-Null
+                if (-not (Get-WindowsImage -Mounted -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.TrimEnd('\') -ieq $MountDir.TrimEnd('\') })) {
+                    Remove-Item -LiteralPath $MountDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                if ($MountSource -ne $SourceImage) { Remove-Item -LiteralPath $MountSource -Force -ErrorAction SilentlyContinue }
+            }
+            $Re = Get-WinReVersion -WinReWim $Staged
+            Write-HostTimestamp "  Copied the recovery image$(if ($Re) { " ($($Re.Version))" })." -ForegroundColor Green
+        }
+
+        if ($RecoverySkipUpdate) {
+            Write-HostTimestamp 'The recovery image is used as the media shipped it, without the Safe OS Dynamic Update.' -ForegroundColor Yellow
+            Write-Host $LineBreak
+        }
+        elseif ($script:EffectiveServer -and -not $script:RecoveryFeatureName) {
+            # Without the release name the Server query matches every Server release, the same trap a full build stops on.
+            Write-HostTimestamp "No release name is known for Server build $ImageBuild, so no catalog query can find its Safe OS Dynamic Update. The recovery image is used as the media shipped it." -ForegroundColor Yellow
+            Write-Host $LineBreak
+        }
+        else {
+            Invoke-Task -Description 'Looking for a Safe OS Dynamic Update for the recovery image...' -ScriptBlock {
+                $Product = Get-CatalogProductQuery -FeatureUpdate $script:RecoveryFeatureName
+                # Bounded by the cumulative update's date as in a full build, so both modes pick the same package.
+                $Lcu = Get-CatalogLatestEntry -Query "Cumulative Update for $Product for $CatalogArch-based Systems" -TitleInclude '(?i)cumulative update (preview )?for (windows|microsoft server operating system)' -TitleExclude '(?i)\.net|dynamic update' -AllowPreview:$IncludePreview
+                $SafeOsArgs = @{
+                    Query        = "Safe OS Dynamic Update $Product $CatalogArch"
+                    DownloadDir  = $DlDir
+                    TitleInclude = if ($script:EffectiveServer) { '(?i)dynamic update' } else { '(?i)safe os dynamic update' }
+                    TitleExclude = '(?i)setup dynamic update'
+                    AllowPreview = $IncludePreview
+                }
+                if ($Lcu -and $Lcu.LastUpdated) { $SafeOsArgs.NotAfter = $Lcu.LastUpdated }
+                $script:SafeOs = Get-LatestCatalogPackage @SafeOsArgs
+                if (-not $script:SafeOs) {
+                    Write-HostTimestamp '  No Safe OS Dynamic Update was found, so the recovery image is used as the media shipped it.' -ForegroundColor Yellow
+                }
+            }
+
+            if ($script:SafeOs) {
+                Invoke-Task -Description 'Applying the Safe OS Dynamic Update to the recovery image...' -ScriptBlock {
+                    $SafeOsKb = if ((Split-Path -Leaf "$(@($script:SafeOs)[-1])") -match '(?i)kb(\d{6,})') { $Matches[1] } else { $null }
+                    if (-not $ReapplyUpdates -and (Test-WinReAlreadyCurrent -WinReWim $script:RecoveryWinRe -KbNumber $SafeOsKb)) { return }
+                    $WinReMount = Join-Path -Path $WorkRoot -ChildPath 'WinREMount'
+                    Reset-MountDirectory -Path $WinReMount -ImagePath $script:RecoveryWinRe
+                    try {
+                        Mount-WindowsImage -ImagePath $script:RecoveryWinRe -Index 1 -Path $WinReMount -ErrorAction Stop | Out-Null
+                        Add-UpdateGroup -MountDir $WinReMount -Group @($script:SafeOs) -Label 'Safe OS Dynamic Update' | Out-Null
+                        Write-HostTimestamp '      Cleaning up the recovery image component store (/StartComponentCleanup /ResetBase)...'
+                        & dism.exe /Image:"$WinReMount" /Cleanup-Image /StartComponentCleanup /ResetBase | Out-Null
+                        New-Item -ItemType Directory -Path $RecoveryBootManagers -Force -ErrorAction Stop | Out-Null
+                        foreach ($Name in 'bootmgfw.efi', 'bootmgr.efi') {
+                            $From = Join-Path -Path $WinReMount -ChildPath "Windows\Boot\EFI\$Name"
+                            if (Test-Path -LiteralPath $From) { Copy-Item -LiteralPath $From -Destination $RecoveryBootManagers -Force -ErrorAction Stop }
+                        }
+                        Dismount-WindowsImage -Path $WinReMount -Save -ErrorAction Stop | Out-Null
+                        $Re = Get-WinReVersion -WinReWim $script:RecoveryWinRe
+                        if ($Re) { Write-HostTimestamp "  The recovery image is now at $($Re.Version)." -ForegroundColor Green }
+                    }
+                    catch {
+                        # Not fatal, the recovery image the media shipped still makes a working recovery ISO.
+                        Write-HostTimestamp "  The recovery image could not be serviced: $($_.Exception.Message). It is used as the media shipped it." -ForegroundColor Yellow
+                        Dismount-ImageDiscard -Path $WinReMount | Out-Null
+                        Remove-Item -LiteralPath $RecoveryBootManagers -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                    finally {
+                        if (-not (Get-WindowsImage -Mounted -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.TrimEnd('\') -ieq $WinReMount.TrimEnd('\') })) {
+                            Remove-Item -LiteralPath $WinReMount -Recurse -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+            }
+        }
+
+        Invoke-Task -Description 'Building the recovery ISO...' -ScriptBlock {
+            $BootManagers = if (Test-Path -LiteralPath $RecoveryBootManagers) { $RecoveryBootManagers } else { $null }
+            $script:RecoveryIsoOutput = New-RecoveryIso -WinReWim $script:RecoveryWinRe -BootSource $MediaRoot -BootManagerDir $BootManagers -Build $ImageBuild -Architecture $ImageArch
+        }
+        if ($AutoClean) {
+            Invoke-Task -Description 'Cleaning up old recovery ISOs (-AutoClean)...' -ScriptBlock {
+                Remove-StaleRecoveryIso -Directory $RecoveryIsoDir -KeepCount $KeepIsoCount -Protected @($script:RecoveryIsoOutput) | Out-Null
+            }
+        }
+        $RecoveryExit = 0
+    }
+    catch {
+        Write-HostTimestamp "The recovery ISO could not be built: $($_.Exception.Message)" -ForegroundColor Red
+    }
+    finally {
+        if ($RecoveryMountedIso) { Dismount-DiskImage -ImagePath $ResolvedIso -ErrorAction SilentlyContinue | Out-Null }
+        Remove-Item -LiteralPath $RecoveryMediaDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    Write-HostTimestamp "Total run time: $(Format-Duration ((Get-Date) - $script:ScriptStartTime))" -ForegroundColor Cyan
+    if ($RecoveryExit -eq 0) {
+        Write-HostTimestamp 'Done. Your recovery ISO is ready:' -ForegroundColor Green
+        Write-HostTimestamp "  $script:RecoveryIsoOutput" -ForegroundColor Green
+        Write-HostLog 'Boot it, or a USB stick written from it, and it opens straight to the Windows Recovery Environment.'
+    }
+    Write-Host $LineBreak
+    if (-not $Unattended -and -not $SkipInteractive) {
+        Read-Host -Prompt 'Press enter to exit'
+    }
+    Stop-Transcript | Out-Null
+    exit $RecoveryExit
 }
 
 #endregion
@@ -5527,6 +5920,44 @@ if ($UpdateGroups.Count -gt 0 -or $script:DriverInfFiles.Count -gt 0) {
 
 #endregion
 
+#region Capture the recovery image (-RecoveryIsoPath)
+# Read back out of install.wim rather than caught mid-servicing, so a run that serviced nothing still has
+# one. Done before the re-export, because -CompressEsd turns install.wim into an .esd DISM cannot mount.
+$script:RecoveryWinRe = $null
+if ($RecoveryIsoPath) {
+    Invoke-Task -Description 'Copying the recovery image out of install.wim for the recovery ISO...' -ScriptBlock {
+        # A serviced edition carries the serviced recovery image, so one of those is preferred.
+        $RecoveryIndex = [int](@($ServiceIndexes) + @($KeepIndexes))[0]
+        $Staged = Join-Path -Path $RecoveryMediaDir -ChildPath 'winre.wim'
+        try {
+            New-Item -ItemType Directory -Path $RecoveryMediaDir -Force -ErrorAction Stop | Out-Null
+            Reset-MountDirectory -Path $MountDir -ImagePath $InstallWimExtracted
+            Mount-WindowsImage -ImagePath $InstallWimExtracted -Index $RecoveryIndex -Path $MountDir -ReadOnly -ErrorAction Stop | Out-Null
+            $Source = Join-Path -Path $MountDir -ChildPath 'Windows\System32\Recovery\winre.wim'
+            if (-not (Test-Path -LiteralPath $Source)) {
+                Write-HostTimestamp "  Index $RecoveryIndex carries no winre.wim, so there is no recovery image to build an ISO from." -ForegroundColor Yellow
+                return
+            }
+            Copy-Item -LiteralPath $Source -Destination $Staged -Force -ErrorAction Stop
+            $script:RecoveryWinRe = $Staged
+            $Re = Get-WinReVersion -WinReWim $Staged
+            Write-HostTimestamp "  Took the recovery image$(if ($Re) { " ($($Re.Version))" }) from index $RecoveryIndex." -ForegroundColor Green
+        }
+        catch {
+            Write-HostTimestamp "  The recovery image could not be copied out: $($_.Exception.Message). The recovery ISO will be skipped." -ForegroundColor Yellow
+        }
+        finally {
+            Dismount-ImageDiscard -Path $MountDir | Out-Null
+            # Removing a folder DISM still tracks as mounted is what orphans a mount, so only an empty one goes.
+            if (-not (Get-WindowsImage -Mounted -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.TrimEnd('\') -ieq $MountDir.TrimEnd('\') })) {
+                Remove-Item -LiteralPath $MountDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+#endregion
+
 #region Re-export install.wim (shrink after servicing and/or drop editions with -KeepEditions)
 # Exporting only the kept indexes both reclaims the space freed by the component cleanup AND physically
 # removes any editions the user chose not to keep. Runs when updates were applied or when trimming.
@@ -5892,30 +6323,12 @@ if (-not $SkipTattoo) {
 #endregion
 
 #region Recompile the ISO with oscdimg
-# The two boot sectors extracted from the source media: etfsboot.com boots the ISO on legacy BIOS PCs,
-# efisys.bin boots it on modern UEFI PCs. Both are fed to oscdimg so the new ISO boots on either.
-$EtfsBoot = Join-Path $ExtractDir 'boot\etfsboot.com'
-$EfiSys   = Join-Path $ExtractDir 'efi\microsoft\boot\efisys.bin'
-
 Invoke-Task -Description "Recompiling the bootable ISO to $BuildIsoPath ..." -ScriptBlock {
     # Remove any leftover ISO at the target path from a previous run so oscdimg starts clean.
     if (Test-Path -LiteralPath $BuildIsoPath) { Remove-Item -LiteralPath $BuildIsoPath -Force -ErrorAction SilentlyContinue }
 
-    # Build the dual (BIOS + UEFI) boot data. Use 8.3 short paths for the boot files so any spaces in the
-    # working path do not break oscdimg's -bootdata argument.
-    $BootArg = $null
-    if ((Test-Path -LiteralPath $EtfsBoot) -and (Test-Path -LiteralPath $EfiSys)) {
-        # Both boot sectors present -> build dual-boot data: "2" entries, one for BIOS (p0) and one for
-        # UEFI (pEF), each pointing at its (short-path) boot file.
-        $EtfsShort = Get-ShortPath -Path $EtfsBoot
-        $EfiShort  = Get-ShortPath -Path $EfiSys
-        $BootArg = "2#p0,e,b$EtfsShort#pEF,e,b$EfiShort"
-    }
-    elseif (Test-Path -LiteralPath $EfiSys) {
-        # UEFI-only media (no BIOS boot sector present): a single UEFI (pEF) boot entry.
-        $BootArg = "1#pEF,e,b$(Get-ShortPath -Path $EfiSys)"
-    }
-    else {
+    $BootArg = Get-OscdimgBootData -MediaRoot $ExtractDir
+    if (-not $BootArg) {
         # Neither boot sector was found, so oscdimg will still build the ISO, but it may not be bootable.
         Write-HostTimestamp '  No boot sectors were found in the extracted media, so the resulting ISO may not be bootable.' -ForegroundColor Yellow
     }
@@ -5966,6 +6379,30 @@ if ($BuildIsoPath -ne $OutputIsoPath) {
         Remove-Item -LiteralPath $BuildIsoPath -Force -ErrorAction SilentlyContinue
     }
     Write-Host $LineBreak
+}
+
+#endregion
+
+#region Build the recovery ISO (-RecoveryIsoPath)
+$script:RecoveryIsoOutput = $null
+if ($RecoveryIsoPath) {
+    Invoke-Task -Description 'Building the recovery ISO...' -ScriptBlock {
+        try {
+            if (-not $script:RecoveryWinRe) {
+                Write-HostTimestamp '  No recovery image was copied out of install.wim, so there is no recovery ISO to build.' -ForegroundColor Yellow
+                return
+            }
+            # The boot managers in $ExtractDir were already matched to the serviced boot.wim.
+            $script:RecoveryIsoOutput = New-RecoveryIso -WinReWim $script:RecoveryWinRe -BootSource $ExtractDir -Build $ImageBuild -Architecture $ImageArch
+        }
+        catch {
+            # The installation ISO is already finished, so a recovery ISO that fails must not cost the run.
+            Write-HostTimestamp "  The recovery ISO could not be built: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        finally {
+            Remove-Item -LiteralPath $RecoveryMediaDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 #endregion
@@ -6068,7 +6505,7 @@ if (-not $NoStamp) {
 #region Housekeeping (-AutoClean)
 if ($AutoClean) {
     Invoke-Task -Description 'Cleaning up old downloads and ISOs (-AutoClean)...' -ScriptBlock {
-        Invoke-AutoClean -CurrentStamp (Read-BuildStamp) -History (Get-BuildStampHistory) -KeepIsoCount $KeepIsoCount -Protected @($ResolvedIso, $OutputIsoPath)
+        Invoke-AutoClean -CurrentStamp (Read-BuildStamp) -History (Get-BuildStampHistory) -KeepIsoCount $KeepIsoCount -Protected @($ResolvedIso, $OutputIsoPath, $script:RecoveryIsoOutput)
     }
     Write-Host $LineBreak
 }
@@ -6094,6 +6531,10 @@ Write-Host $LineBreak
 
 Write-HostTimestamp 'Done. Your updated Windows installation ISO is ready:' -ForegroundColor Green
 Write-HostTimestamp "  $OutputIsoPath" -ForegroundColor Green
+if ($script:RecoveryIsoOutput) {
+    Write-HostTimestamp 'Recovery ISO:' -ForegroundColor Green
+    Write-HostTimestamp "  $script:RecoveryIsoOutput" -ForegroundColor Green
+}
 if (-not $SkipTattoo) {
     Write-HostTimestamp '  Open \WISO-Build on the ISO for the record of how it was built.' -ForegroundColor DarkGray
 }
