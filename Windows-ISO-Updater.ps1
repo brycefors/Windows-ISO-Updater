@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.10.13.1   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.10.13.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -304,7 +304,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.10.13.1'
+$ScriptVersion = '2026.10.13.2'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -4734,7 +4734,6 @@ if (-not $ListEditions -and -not $CheckOnly) {
         Stop-Transcript | Out-Null
         exit 1
     }
-    Write-Host $LineBreak
 }
 
 #endregion
@@ -5168,7 +5167,7 @@ if (-not $NoStamp) {
                     Invoke-AutoClean -CurrentStamp $script:PreviousStamp -History (Get-BuildStampHistory) -KeepIsoCount $KeepIsoCount -Protected @($ResolvedIso)
                 }
             }
-            Write-Host $LineBreak
+            else { Write-Host $LineBreak }
             Stop-Transcript | Out-Null
             exit 0
         }
@@ -5298,7 +5297,6 @@ if (-not (Test-Path -LiteralPath $InstallWimExtracted) -and (Test-Path -LiteralP
         Remove-Item -LiteralPath $InstallEsdExtracted -Force -ErrorAction SilentlyContinue
         Write-HostTimestamp '  Conversion complete.' -ForegroundColor Green
     }
-    Write-Host $LineBreak
 }
 
 if (-not (Test-Path -LiteralPath $InstallWimExtracted)) {
@@ -5455,6 +5453,7 @@ else {
         $UpdateGroups.Add(@($script:Lcu))
         if ($script:LcuReapplied) {
             Write-HostTimestamp 'WARNING: -ReapplyUpdates is integrating updates into media that already carries them. This may leave the Setup binaries on the media mismatched with the ones inside boot.wim, which can stop Windows 11 Setup Dynamic Update from completing when imaging a computer with Windows 11.' -ForegroundColor Yellow
+            Write-Host $LineBreak
         }
     }
     elseif ($script:LcuUpToDate) {
@@ -5463,16 +5462,17 @@ else {
         Write-HostTimestamp "The image is already fully patched ($script:LcuUpToDate), so no cumulative update is needed." -ForegroundColor Green
         Add-ServicingResult -Image 'install.wim, boot.wim, winre.wim and the media sources folder' -Package 'Cumulative, .NET, Setup and Safe OS Dynamic Updates' -Result 'Skipped' -Detail "The media is already at $script:LcuUpToDate, so it is left as it shipped"
         Write-HostTimestamp '  The .NET update, both Dynamic Updates and boot.wim are left exactly as the media shipped them, so its Setup files stay matched to its images. Use -ReapplyUpdates to integrate everything anyway.' -ForegroundColor DarkGray
+        Write-Host $LineBreak
     }
     elseif ($script:LcuSkippedBaselineOnly) {
         Write-HostTimestamp '  Cumulative update skipped - image stays on prior baseline for hotpatch compatibility.' -ForegroundColor Yellow
+        Write-Host $LineBreak
     }
     else {
         Write-HostTimestamp 'Could not obtain a cumulative update from the catalog. You can supply one with -UpdatePath, or use -SkipUpdates to just recompile the ISO.' -ForegroundColor Red
         Stop-Transcript | Out-Null
         exit 1
     }
-    Write-Host $LineBreak
 
     if (-not $SkipDotNet -and -not $script:LcuUpToDate) {
         Invoke-Task -Description 'Downloading the latest .NET cumulative update from the Microsoft Update Catalog...' -ScriptBlock {
@@ -5480,8 +5480,10 @@ else {
             $script:DotNet = Get-LatestCatalogPackage -Query $Query -DownloadDir $DlDir -TitleInclude '(?i)\.net framework' -TitleExclude '(?i)dynamic update' -AllowPreview:$IncludePreview
         }
         if ($script:DotNet) { $UpdateGroups.Add(@($script:DotNet)) }
-        else { Write-HostTimestamp '  No .NET cumulative update was integrated (none found).' -ForegroundColor Yellow }
-        Write-Host $LineBreak
+        else {
+            Write-HostTimestamp '  No .NET cumulative update was integrated (none found).' -ForegroundColor Yellow
+            Write-Host $LineBreak
+        }
     }
 
     # The Setup Dynamic Update is NOT applied to an image - it is expanded over the media's sources
@@ -5505,8 +5507,8 @@ else {
             if ($script:EffectiveServer) {
                 Write-HostTimestamp '  Microsoft only publishes one for Server 2025 and newer, so this is expected on older Server media.' -ForegroundColor DarkGray
             }
+            Write-Host $LineBreak
         }
-        Write-Host $LineBreak
     }
 
     if (-not $SkipWinRE -and -not $script:LcuUpToDate) {
@@ -5533,8 +5535,10 @@ else {
                 if ((Split-Path -Leaf "$File") -match '(?i)kb(\d{6,})') { $script:SafeOsKb = $Matches[1]; break }
             }
         }
-        else { Write-HostTimestamp '  No Safe OS Dynamic Update was found, so WinRE update integration will be skipped (per Microsoft, the LCU does not apply to WinRE).' -ForegroundColor Yellow }
-        Write-Host $LineBreak
+        else {
+            Write-HostTimestamp '  No Safe OS Dynamic Update was found, so WinRE update integration will be skipped (per Microsoft, the LCU does not apply to WinRE).' -ForegroundColor Yellow
+            Write-Host $LineBreak
+        }
     }
 }
 
@@ -5999,7 +6003,6 @@ if (($UpdateGroups.Count -gt 0) -or $TrimNeeded -or $CompressEsd) {
             Remove-Item -LiteralPath $Temp -Force -ErrorAction SilentlyContinue
         }
     }
-    Write-Host $LineBreak
 }
 
 # Reads $FinalInstallImage rather than install.wim, so -CompressEsd is measured against what ships.
@@ -6020,7 +6023,6 @@ if ($ResolvedUnattend) {
             Write-HostTimestamp '  Warning: the answer file selects the edition by /IMAGE/INDEX, but install.wim was renumbered when the other editions were removed. Switch it to /IMAGE/NAME, or use -KeepAllEditions, if Setup cannot find the edition.' -ForegroundColor Yellow
         }
     }
-    Write-Host $LineBreak
 }
 
 #endregion
@@ -6085,8 +6087,8 @@ if ($ResolvedExtraFiles) {
     }
     if (-not $SkipTattoo -and @($script:ExtraFileOverwrites | Where-Object { $_ -match '(?i)^WISO-Build\\' }).Count -gt 0) {
         Write-HostTimestamp '  Note: files under \WISO-Build are about to be replaced by the build record. Pass -SkipTattoo to keep yours.' -ForegroundColor Yellow
+        Write-Host $LineBreak
     }
-    Write-Host $LineBreak
 }
 
 #endregion
@@ -6357,7 +6359,6 @@ Invoke-Task -Description "Recompiling the bootable ISO to $BuildIsoPath ..." -Sc
     $SizeGB = [math]::Round((Get-Item -LiteralPath $BuildIsoPath).Length / 1GB, 2)
     Write-HostTimestamp "  New ISO created ($SizeGB GB)." -ForegroundColor Green
 }
-Write-Host $LineBreak
 
 # One sequential copy at the end, rather than oscdimg writing across the wire for the length of the build.
 if ($BuildIsoPath -ne $OutputIsoPath) {
@@ -6379,7 +6380,6 @@ if ($BuildIsoPath -ne $OutputIsoPath) {
         Write-HostTimestamp "  The finished ISO is at $OutputIsoPath." -ForegroundColor Green
         Remove-Item -LiteralPath $BuildIsoPath -Force -ErrorAction SilentlyContinue
     }
-    Write-Host $LineBreak
 }
 
 #endregion
@@ -6428,7 +6428,6 @@ Invoke-Task -Description 'Cleaning up the working extraction folder...' -ScriptB
         Write-HostTimestamp "  Could not fully remove $ExtractDir : $($_.Exception.Message). You can delete it manually." -ForegroundColor Yellow
     }
 }
-Write-Host $LineBreak
 
 #endregion
 
@@ -6498,7 +6497,6 @@ if (-not $NoStamp) {
         }
         Write-BuildStamp -Stamp $Stamp
     }
-    Write-Host $LineBreak
 }
 
 #endregion
@@ -6508,7 +6506,6 @@ if ($AutoClean) {
     Invoke-Task -Description 'Cleaning up old downloads and ISOs (-AutoClean)...' -ScriptBlock {
         Invoke-AutoClean -CurrentStamp (Read-BuildStamp) -History (Get-BuildStampHistory) -KeepIsoCount $KeepIsoCount -Protected @($ResolvedIso, $OutputIsoPath, $script:RecoveryIsoOutput)
     }
-    Write-Host $LineBreak
 }
 
 #endregion
