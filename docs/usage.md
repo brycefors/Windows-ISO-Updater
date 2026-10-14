@@ -12,7 +12,7 @@ The easiest and recommended way to run this script is by using the `Run-Windows-
 ## Recommended Method: Using the Batch File
 
 1.  **Download Files:** Make sure both `Run-Windows-ISO-Updater.bat` and `Windows-ISO-Updater.ps1` are saved in the **same folder**.
-2.  **Provide an ISO:** Drop a Windows ISO into `C:\WISO-Work\Downloads`, or pass one with `-IsoPath`. The script does not fetch one for you unless you add `-UseFido` or `-UseMct` ([why](design-notes.md#why-the-iso-has-to-come-from-you)).
+2.  **Provide an ISO:** Drop a Windows ISO into `C:\WISO-Work\Downloads`, pass one with `-IsoPath`, or drag the ISO onto `Run-Windows-ISO-Updater.bat`, which builds from it. The script does not fetch one for you unless you add `-UseFido` or `-UseMct` ([why](design-notes.md#why-the-iso-has-to-come-from-you)).
 3.  **Run the Batch File:** Double-click the `Run-Windows-ISO-Updater.bat` file.
 4.  **Administrator Prompt:** A User Account Control (UAC) window will appear asking for administrative privileges. Click **Yes**.
 5.  **Follow Prompts:** The script opens in a new window, summarizes what it will do, and asks for confirmation before building.
@@ -24,9 +24,11 @@ To use command-line parameters, run the batch file from a Command Prompt or Powe
 1.  Open Command Prompt or PowerShell.
 2.  Navigate to the directory where you saved the files (e.g., `cd C:\Users\YourUser\Downloads`).
 3.  Run the batch file with your desired parameters. For example:
-    ```shell
+    ```bat
     .\Run-Windows-ISO-Updater.bat -Unattended -InstallAdk -Edition "Windows 11 Pro"
     ```
+
+Relative paths such as `.\Examples\autounattend-lab-admin.xml` are read from the folder you ran it in, even after the administrator prompt reopens it in a new window. Run from a terminal, the batch file waits for the script and passes on its exit code, so `-CheckOnly` can be scripted against it. Double-clicked or dropped onto from Explorer, its own window closes as soon as the administrator window opens.
 
 The full list is in [Command-Line Parameters](parameters.md).
 
@@ -38,7 +40,7 @@ has to come from you, though, because neither Fido nor the Media Creation Tool s
 download it from the [Microsoft Evaluation Center](https://www.microsoft.com/evalcenter), your Volume
 Licensing Service Center, or a Visual Studio subscription first.
 
-```shell
+```bat
 :: Slipstream the latest Server cumulative update into your own Server 2025 ISO
 .\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Server2025.iso"
 
@@ -53,7 +55,7 @@ the ISO into the download folder, and the script handles the rest. The key diffe
 Fido nor the Media Creation Tool serves LTSC media at all, so you must supply it from the Volume
 Licensing Service Center, the Evaluation Center, or a Visual Studio subscription.
 
-```shell
+```bat
 :: Slipstream the latest cumulative update into your own Windows 11 LTSC ISO
 .\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Win11LTSC.iso"
 
@@ -92,7 +94,7 @@ scratch space. Nothing in the folder layout is scoped by version.
 **Give each version its own `-WorkPath`.** That one parameter separates all of it, and there is nothing
 else to configure.
 
-```shell
+```bat
 :: Windows 11, the usual case
 .\Run-Windows-ISO-Updater.bat -WindowsVersion 11 -WorkPath "D:\WISO\Win11"
 
@@ -137,7 +139,7 @@ If you keep source ISOs in one place, point `-IsoPath` at the specific file rath
 folder. `-IsoPath` also accepts a folder, but it picks the most recently modified ISO inside it by default
 (or the largest with `-UseLargestIso`), which is the same trap as a shared `Downloads` folder.
 
-```shell
+```bat
 .\Run-Windows-ISO-Updater.bat -IsoPath "\\nas\isos\Win11_25H2.iso" -WorkPath "D:\WISO\Win11"
 ```
 
@@ -151,7 +153,7 @@ the working folder and copied over once it is done, so a share that stalls canno
 Each version needs its own task name as well as its own working folder, otherwise registering the second
 one replaces the first.
 
-```shell
+```bat
 .\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -Schedule PatchTuesday -AutoClean ^
   -WindowsVersion 11 -WorkPath "D:\WISO\Win11" -TaskName "Windows ISO Updater - Win11"
 
@@ -164,7 +166,7 @@ Both tasks run as SYSTEM, so every path has to be a local path SYSTEM can reach.
 
 ## Running It on a Schedule
 
-```shell
+```bat
 :: Rebuild monthly, on the 15th at 03:00, and clean up what earlier builds left behind
 .\Run-Windows-ISO-Updater.bat -RegisterScheduledTask -Schedule Monthly -ScheduleDay 15 -ScheduleTime 03:00 -AutoClean
 
@@ -182,7 +184,7 @@ A Windows ISO's `install.wim` usually contains many editions (Home, Home N, Pro,
 
 Every kept edition is serviced by default, so a two-edition build takes roughly twice as long as a one-edition build. Pass `-KeepEditions "Windows 11 Pro"` if you only need one and want the shorter run. If you also narrow `-Edition` to a single one, only that edition is serviced, so any other edition you kept ships unpatched and the script warns about it.
 
-```shell
+```bat
 :: See what editions are inside the ISO first (downloads/uses the ISO, then just lists and exits)
 .\Run-Windows-ISO-Updater.bat -ListEditions
 
@@ -202,7 +204,7 @@ Every kept edition is serviced by default, so a two-edition build takes roughly 
 
 `-DriverPath` points at a folder of driver packages and injects them into the images. The folder is searched **recursively** for `.inf` files, and each one is added to every serviced edition of `install.wim` and to `boot.wim` index 2.
 
-```shell
+```bat
 :: Add a folder of extracted drivers to the images
 .\Run-Windows-ISO-Updater.bat -DriverPath "D:\Drivers\OptiPlex-7010"
 
@@ -226,7 +228,7 @@ The alternative that needs no rebuild is a `$WinPEDriver$` folder at the root of
 
 `-ExtraFilesPath` copies a folder onto the **root of the finished ISO**, keeping the folder structure. Use it for a scripts folder, an `$OEM$` tree, a `$WinPEDriver$` folder, an image you want to carry along, or anything else you want on the media.
 
-```shell
+```bat
 :: Everything inside Media-Extras ends up at the root of the ISO
 .\Run-Windows-ISO-Updater.bat -ExtraFilesPath "D:\Media-Extras"
 ```
@@ -265,6 +267,30 @@ Read-only attributes inherited from the source ISO do not block the copy, they a
 The ISO this script produces is stock media with Microsoft's boot files and signatures untouched, so it boots on a machine with Secure Boot enabled without any extra steps.
 
 Keep it that way when you write it to a USB stick. Flashing the ISO as it is preserves the signed boot loader, while anything that swaps in its own loader or patches the installer binaries breaks the signature chain, and a machine enforcing Secure Boot will refuse it. If you use Rufus to write the ISO, decline its Windows customization options (the Windows User Experience dialog and any option to swap the boot loader or patch the installer), as those may require disabling Secure Boot. If you want an answer file on the media, use `-UnattendPath` so it goes on before the ISO is built rather than being added afterwards.
+
+## Building a Recovery ISO
+
+Because of a bug in Windows Setup, some Windows 11 media will not let you use the **Repair my PC** option. It appears on the Setup screen but does nothing when clicked, and stock Microsoft media is affected too. That leaves no simple way to reach Startup Repair, System Restore or a recovery command prompt on a PC that will not boot.
+
+`-RecoveryIsoPath` works around it by building a second, much smaller ISO alongside the installation ISO. It boots straight into the Windows Recovery Environment with no Setup screen in front of it, and it carries the recovery image with the latest Safe OS update already applied. It holds only the boot files and the recovery image, never your answer file or extra files, so it is fit to hand out across an organization (Microsoft's license terms still cover what is on it).
+
+```bat
+.\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Win11.iso" -RecoveryIsoPath "D:\ISOs"
+```
+
+Give `-RecoveryIsoPath` a folder to get a generated name such as `Win11_Recovery_x64_26100.6899_20261010-1200.iso`, or a full file path to name it yourself. With `-AutoClean`, the newest `-KeepIsoCount` generated recovery ISOs in that folder are kept and older ones are deleted, counted separately from the installation ISOs.
+
+To build only the recovery ISO, add `-RecoveryIsoOnly`. The source ISO is read in place, `install.wim` is never serviced, and the only download is the Safe OS Dynamic Update, so it finishes in minutes. Without `-RecoveryIsoPath` it lands in the `Output\` folder under the working folder. It keeps no build stamps, so a scheduled run builds a fresh recovery ISO every time it fires ([choosing a schedule](scheduled-runs.md#recovery-isos-on-a-schedule)).
+
+```bat
+.\Run-Windows-ISO-Updater.bat -IsoPath "C:\ISOs\Win11.iso" -RecoveryIsoOnly
+```
+
+This is not a layout Microsoft documents. Every file on the recovery ISO is Microsoft's own and unmodified, the boot files keep their signatures so it boots with Secure Boot on, and the recovery image is only updated with Microsoft's Safe OS update. What is not documented is placing that recovery image where install media keeps its Setup image, so Microsoft support will not treat it as a known configuration. If your organization requires officially supported tooling, use one of these instead:
+
+- **A recovery drive.** Run `recoverydrive.exe` on a working PC. It is the documented way to make bootable recovery media, but it writes only to a USB stick, not an ISO, and needs a working machine to run on.
+- **The recovery partition on the PC itself.** Hold Shift while clicking Restart, or run `reagentc /boottore` and reboot.
+- **WinPE from the Windows ADK.** It gives you a command prompt for repair work, but not the recovery menus.
 
 
 [← Back to README](../README.md)

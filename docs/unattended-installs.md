@@ -4,7 +4,7 @@
 
 Pass an answer file with `-UnattendPath` and it is copied to the root of the finished ISO as `autounattend.xml`:
 
-```shell
+```bat
 .\Run-Windows-ISO-Updater.bat -UnattendPath "C:\Answer\autounattend.xml"
 ```
 
@@ -26,7 +26,7 @@ Three of the files in [`Examples/`](../Examples) are built around this workflow.
 
 [`Examples/autounattend-lab-admin.xml`](../Examples/autounattend-lab-admin.xml) skips OOBE entirely, signs in automatically as the built-in Administrator (password `Password123`), enables Remote Desktop, and sets `PreventDeviceEncryption` **only when the install detects it is running in a virtual machine**, because encrypted guests defeat block-level deduplication on the SAN, and it also stops Windows 11 25H2 silently turning on BitLocker there. On physical machines it **removes** that value rather than merely leaving it unset, so hardware deployed from a gold image that baked it in still encrypts normally. On VMware guests it also installs VMware Tools at first logon, using a Tools ISO mounted by the hypervisor if one is present and downloading from `packages.vmware.com` otherwise.
 
-```shell
+```bat
 .\Run-Windows-ISO-Updater.bat -UnattendPath ".\Examples\autounattend-lab-admin.xml"
 ```
 
@@ -51,11 +51,11 @@ Three of the files in [`Examples/`](../Examples) are built around this workflow.
 
 It drops a `SEAL-THIS-IMAGE.txt` checklist on the public desktop with the remaining manual steps, including the seal command:
 
-```shell
+```bat
 %WINDIR%\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown
 ```
 
-```shell
+```bat
 .\Run-Windows-ISO-Updater.bat -UnattendPath ".\Examples\autounattend-gold-image.xml"
 ```
 
@@ -69,7 +69,7 @@ It drops a `SEAL-THIS-IMAGE.txt` checklist on the public desktop with the remain
 
 [`Examples/autounattend-ultimate.xml`](../Examples/autounattend-ultimate.xml) is `autounattend-lab-admin.xml` with the disk-wipe confirmation removed and driver installation dispatched by manufacturer. Unlike that file, it defines no local account and signs no one in automatically. `<AutoLogon>`, the `<UserAccounts><AdministratorPassword>` block, and the OOBE-suppression flags are all gone, so Windows Setup's normal account-creation and network check-in phase runs instead of being skipped. That is the phase where a device enrolled in Windows Autopilot detects itself, downloads its profile, and joins Entra ID at first boot, so enrolled hardware still ends up fully configured with no one at the console. It carries forward that file's windowsPE installer and BitLocker/power handling unchanged apart from the differences noted below.
 
-```shell
+```bat
 .\Run-Windows-ISO-Updater.bat -UnattendPath ".\Examples\autounattend-ultimate.xml"
 ```
 
