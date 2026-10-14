@@ -1,5 +1,5 @@
 # Windows ISO Updater
-# Version: 2026.10.13.2   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
+# Version: 2026.10.13.3   (date-based, stamped automatically by tools\Update-Version.ps1 on commit)
 #
 #region Script overview
 # This script builds a fully up-to-date ("slipstreamed") Windows 11, Windows 10 or Windows Server
@@ -304,7 +304,7 @@ $script:ScriptPath = $PSCommandPath
 
 # Kept in step with the header comment by tools\Update-Version.ps1, and shown in the log and recorded in
 # the build stamp so a finished ISO can be traced back to the exact script that built it.
-$ScriptVersion = '2026.10.13.2'
+$ScriptVersion = '2026.10.13.3'
 
 # A scheduled run has nobody to answer a prompt.
 if ($Scheduled) {
@@ -590,8 +590,8 @@ function Write-CMTraceLog {
         # CMTrace reads the offset as minutes behind UTC, so a machine at UTC-5 writes +300.
         $Bias = [int](-[System.TimeZoneInfo]::Local.GetUtcOffset($Now).TotalMinutes)
         $Entry = '<![LOG[{0}]LOG]!><time="{1}{2}{3:000}" date="{4}" component="{5}" context="" type="{6}" thread="{7}" file="{8}:{9}">' -f
-            # The console indents to show nesting, which CMTrace's component column already shows.
-            "$Message".TrimStart().Replace(']LOG]!>', ']LOG] !>'),
+            # Indents and column padding only line things up on the console, so CMTrace gets single spaces.
+            ("$Message".Trim() -replace '[ \t]{2,}', ' ').Replace(']LOG]!>', ']LOG] !>'),
             $Now.ToString('HH:mm:ss.fff'),
             $(if ($Bias -ge 0) { '+' } else { '-' }),
             [math]::Abs($Bias),
